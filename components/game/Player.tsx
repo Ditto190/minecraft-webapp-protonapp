@@ -3,18 +3,18 @@
 import { useEffect, useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import { Euler, PerspectiveCamera, Vector3 } from 'three';
-import { AIR, BLOCK_BY_KEY, BLOCKS, isLavaId, isWaterId } from '@/lib/blocks';
+import { BLOCK_BY_KEY, BLOCKS, isLavaId, isWaterId, tileOf } from '@/lib/blocks';
 import { breakBlock, cancelEating, eatState, sweepAround, tickEating, tryPlace, useButton } from '@/lib/actions';
-import { isFarmlandId, isWheatCropId } from '@/lib/crops';
+import { trampleFarmland } from '@/lib/crops';
 import { effectiveDigTime } from '@/lib/dig';
-import { attackState, cameraRef, debugInfo, digState, getActiveWorld, hurtState, panelUnlock, pearlTeleport, playerPosition, survivalStats, targetBlock, teleportState, touchInput, worldClock } from '@/lib/game';
+import { attackState, breakParticles, burningState, cameraRef, cameraShake, debugInfo, digState, getActiveWorld, handSwing, hurtState, panelUnlock, pearlTeleport, playerPosition, portalState, SHAKE_DECAY_MS, survivalStats, targetBlock, teleportState, touchInput, worldClock } from '@/lib/game';
 import { itemDrops } from '@/lib/items';
+import { materialTile } from '@/lib/materials';
 import { otherDimension } from '@/lib/dimension';
 import { END_SPAWN } from '@/lib/end';
 import { isPortalId } from '@/lib/portal';
 import { outerHeightAt, pickOuterIsland } from '@/lib/end';
 import { gatewayState } from '@/lib/endfight';
-import { spawnMaterialDrop } from '@/lib/items';
 import { raycastBlock } from '@/lib/raycast';
 import { resolveAnchorRespawn } from '@/lib/respawnanchor';
 import { arrows, checkEndermanStare, damageMob, mobInReach, mobs, spawnMobAt, type Arrow } from '@/lib/mobs';
@@ -38,6 +38,8 @@ const FLY_SPEED = 11;
 const JUMP_VEL = 8.07;
 const GRAVITY = 26;
 const REACH = 6; // 挖掘/放置距离
+/** 横扫粒子弧线：面前 ±40° 两簇（弧度） */
+const SWEEP_ARC = [-0.7, 0.7] as const;
 const LOOK_SENSITIVITY = 0.0045; // 触屏视角灵敏度（弧度/像素）
 const SPAWN = { x: 8.5, z: 8.5 };
 
@@ -126,6 +128,20 @@ export function Player() {
   const yawPitch = useRef({ yaw: 0, pitch: 0 });
   /** 脚步声：累计水平位移，每 2.2 格一步 */
   const stepAcc = useRef(0);
+  /** 视角摆动（MC view bobbing）：相位由水平位移驱动，幅度随速度/状态缩放（空中/游泳/飞行渐停） */
+  const bobPhase = useRef(0);
+  const bobAmp = useRef(0);
+  /** 落地短促下顿：幅度按落地速度缩放，sin 包络下顿后回弹 */
+  const landDip = useRef({ amp: 0, t: 1 });
+  /** 受伤相机倾斜（MC Java damage tilt）：hurtState.lastAt 边沿触发，随机侧 roll，0.4s 内衰减回正 */
+  const hurtTilt = useRef({ at: Number.NEGATIVE_INFINITY, dir: 1 });
+  const hurtSeen = useRef(Number.NEGATIVE_INFINITY);
+  /** 已应用到相机的 roll：帧末按 delta 修正（桌面 mousemove 的四元数分解会保留 z 分量；触屏帧首欧拉重建时回填） */
+  const appliedRoll = useRef(0);
+  /** 挖掘敲击音计时（长按挖掘每 0.25s 一声低音量，挖碎瞬间的全音量音效走 breakBlock） */
+  const digTapAcc = useRef(0);
+  /** 进食碎屑计时（读条中每 0.2s 从相机下方推食物粒子） */
+  const eatCrumbAcc = useRef(0);
   /** 台阶辅助上台动画（150ms 平滑升起，避免瞬移突兀/起跳弹循环） */
   const stepAnim = useRef<{ from: number; to: number; t: number } | null>(null);
   const prevStep = useRef({ x: 0, z: 0 });
@@ -160,6 +176,7 @@ export function Player() {
     pos.current = null;
     velY.current = 0;
     portalAcc.current = 0;
+    portalState.charge = 0; // 跨维度后门内读秒归零（屏幕紫色渐进 overlay 消费）
   }, [dimension]);
 
   // 相机共享给触屏挖/放动作（lib/actions.ts）
@@ -299,7 +316,7 @@ export function Player() {
       if (e.button === 0) digHeld.current = true;
       else if (e.button === 2) {
         useButton.held = true; // 进食读条等的「按住使用」状态（lib/actions.ts）
-        tryPlace();
+        if (tryPlace()) handSwing.at = performance.now(); // 放置成功：播一次手部挥动（触屏放置走 TouchControls 直调 tryPlace，不经此处）
       } else if (e.button === 1) {
         // 中键选块（MC pick block）：取准星方块到手上
         e.preventDefault(); // 阻止浏览器中键自动滚动
@@ -380,7 +397,7 @@ export function Player() {
       );
       touchInput.lookDX = 0;
       touchInput.lookDY = 0;
-      camera.quaternion.setFromEuler(euler.set(yp.pitch, yp.yaw, 0));
+      camera.quaternion.setFromEuler(euler.set(yp.pitch, yp.yaw, appliedRoll.current)); // z 回填已应用 roll：帧末 roll 修正是 delta 形式
     }
 
     if (pos.current === null) {
@@ -431,6 +448,7 @@ export function Player() {
     if (gs.dead) {
       useButton.held = false;
       if (eatState.active) cancelEating(); // 死亡打断进食读条（MC：死亡取消使用动作）
+      portalState.charge = 0; // 死亡后传送门读秒归零（不再推进，死亡界面下不该残留紫色 overlay）
       return;
     }
     // Esc 暂停（指针解锁）：物理/挖掘/生存 tick 全部冻结；触屏 paused 恒 false 不受影响
@@ -587,19 +605,19 @@ export function Player() {
     if (hitY) {
       if (dy < 0) {
         onGround.current = true;
-        // 踩踏耕地：跳起/跌落到耕地上会踩回泥土（MC 规则），上面的作物弹出
+        // 落地反馈（|v|=√(2·GRAVITY·h)，阈值 7 ≈ 下落 1 格）：播脚下方块脚步声（低音量、潜行更轻，与行走脚步呼应），
+        // 并触发短促相机下顿——幅度按落地速度缩放，跳落 1 格（落地 |v|≈8）几乎无感、高落明显
         if (velY.current <= -7 && !flying) {
           const tx = Math.floor(p.x);
           const ty = Math.floor(p.y - 0.01);
           const tz = Math.floor(p.z);
-          if (isFarmlandId(world.getBlock(tx, ty, tz))) {
-            world.setBlock(tx, ty, tz, BLOCK_BY_KEY.dirt.id);
-            if (isWheatCropId(world.getBlock(tx, ty + 1, tz))) {
-              world.setBlock(tx, ty + 1, tz, AIR);
-              if (gs.worldMode === 'survival') spawnMaterialDrop('wheat_seeds', tx + 0.5, ty + 1.4, tz + 0.5, 1);
-            }
-            playSound('dig_dirt');
-          }
+          const landSnd = BLOCKS[world.getBlock(tx, ty, tz)]?.stepSound;
+          if (landSnd) playSound(landSnd, sneaking ? 0.2 : 0.45);
+          landDip.current.amp = Math.min(0.22, (-velY.current - 7) * 0.016);
+          landDip.current.t = 0;
+          // 踩踏耕地：摔落砸到耕地上踩回泥土、其上作物弹出（MC 规则，逻辑在 lib/crops.ts trampleFarmland）。
+          // Java 按摔落距离概率判定，简化为「摔落 >1 格即踩坏」（与上方落地反馈共用阈值）
+          if (trampleFarmland(world, tx, ty, tz)) playSound('dig_dirt');
         }
       }
       velY.current = 0;
@@ -647,6 +665,8 @@ export function Player() {
         if (fd > 0 && gs.damagePlayer(fd)) fireDmgAcc.current -= fd;
       }
     }
+    // 着火状态桥：燃烧剩余秒数共享给屏幕火焰覆盖层（0 = 未燃烧；浸岩浆时 fireAcc 持续刷新为 15，出水/脱离危险递减）
+    burningState.burningLeft = Math.max(0, fireAcc.current);
     // 虚空伤害（y < -20）：MC Java 每次受击 4 点、约 0.5s 一击（damagePlayer 的 HURT_COOLDOWN 无敌帧自然节流，等效 ~8/s），
     // bypassArmor 不吃护甲。死亡走正常死亡流程（掉落 + 死亡界面），不再传送回重生点
     if (p.y < -20 && !gs.dead) {
@@ -675,6 +695,21 @@ export function Player() {
     tickEffects(dt);
     // 进食读条推进（MC Java 按住右键 1.61s；取消/结算逻辑在 lib/actions.ts）
     tickEating(dt);
+    // 进食碎屑：读条中每 ~0.2s 从相机下方推出食物图标粒子（breakParticles 共享池；每帧位置由 fx/fz 前探）
+    if (eatState.active) {
+      eatCrumbAcc.current += dt;
+      if (eatCrumbAcc.current >= 0.2) {
+        eatCrumbAcc.current = 0;
+        breakParticles.push({
+          x: camera.position.x + fx * 0.3 - 0.5,
+          y: camera.position.y - 0.75,
+          z: camera.position.z + fz * 0.3 - 0.5,
+          tile: materialTile(eatState.material),
+        });
+      }
+    } else {
+      eatCrumbAcc.current = 0;
+    }
     // 信标：校验金字塔并给范围内玩家刷新所选效果（MC）
     tickBeacons(world, p.x, p.y, p.z);
     // 末影水晶：龙在存活水晶附近时缓慢回血（MC 治疗光束）
@@ -759,6 +794,8 @@ export function Player() {
       }
       if (isPortalId(feet) || isPortalId(eye)) {
         portalAcc.current += dt;
+        // 门内读秒进度（0-1）每帧共享给屏幕紫色渐进 overlay（MC 生存 4s = 80 tick 传满）
+        portalState.charge = Math.min(1, portalAcc.current / 4);
         if (gs.worldMode === 'creative' || portalAcc.current >= 4) { // MC：生存读秒 4s（80 tick），创造秒传
           portalAcc.current = 0;
           teleportState.pending = { x: p.x, y: p.y, z: p.z };
@@ -767,6 +804,7 @@ export function Player() {
         }
       } else {
         portalAcc.current = 0;
+        portalState.charge = 0;
       }
     }
 
@@ -778,7 +816,49 @@ export function Player() {
       prevStep.current = { x: pos.current.x, z: pos.current.z };
     }
 
-    state.camera.position.set(p.x, p.y + (sneaking ? EYE - 0.12 : EYE), p.z); // MC 潜行视点略降
+    // —— 相机反馈（MC Java 手感）：视角摆动 / 落地下顿 / 受伤倾斜 / 爆炸震动。帧循环零分配，全部直接改相机 ——
+    const camPos = state.camera.position;
+    camPos.set(p.x, p.y + (sneaking ? EYE - 0.12 : EYE), p.z); // MC 潜行视点略降
+    // 视角摆动（view bobbing）：着地行走时相机周期上下+左右微晃；相位由水平位移驱动（每 1.6 格一周期），
+    // 幅度随速度缩放（冲刺更明显、潜行减弱），空中/游泳/飞行时渐停
+    const bobTarget =
+      !flying && !inFluid && onGround.current && hDist > 0.001
+        ? Math.min(speed / WALK_SPEED, 1.4) * (sneaking ? 0.35 : sprinting ? 1.25 : 1)
+        : 0;
+    bobAmp.current += (bobTarget - bobAmp.current) * Math.min(1, dt * 8);
+    if (onGround.current && !flying && !inFluid) bobPhase.current += hDist * ((Math.PI * 2) / 1.6);
+    if (bobAmp.current > 0.001) {
+      const amp = bobAmp.current * 0.05; // 步幅基准 0.05：走路 ≈0.05，冲刺 ≈0.08，潜行几乎无感
+      camPos.y += Math.abs(Math.sin(bobPhase.current)) * amp; // 上下每周期两晃
+      const sway = Math.sin(bobPhase.current) * amp * 0.7; // 左右每周期一晃（右 = (-fz, fx)）
+      camPos.x += -fz * sway;
+      camPos.z += fx * sway;
+    }
+    // 落地短促下顿：sin 包络下顿后回弹（0.28s）
+    if (landDip.current.t < 1) {
+      landDip.current.t = Math.min(1, landDip.current.t + dt / 0.28);
+      camPos.y -= landDip.current.amp * Math.sin(landDip.current.t * Math.PI);
+    }
+    // 受伤相机倾斜（MC Java damage tilt）：受击边沿触发随机侧 roll（~6.3°），0.4s 内二次方衰减回正
+    const nowMs = performance.now();
+    if (hurtState.lastAt > hurtSeen.current) {
+      hurtSeen.current = hurtState.lastAt;
+      hurtTilt.current.at = nowMs;
+      hurtTilt.current.dir = Math.random() < 0.5 ? -1 : 1;
+    }
+    const tiltAge = (nowMs - hurtTilt.current.at) / 400;
+    let roll = tiltAge < 1 ? hurtTilt.current.dir * 0.11 * (1 - tiltAge) * (1 - tiltAge) : 0;
+    // 爆炸屏幕震动：cameraShake 包络内对位置/roll 加平滑伪噪声（两正弦叠加，衰减随 addShake 同款包络）
+    const shakeAge = nowMs - cameraShake.at;
+    if (shakeAge < SHAKE_DECAY_MS && cameraShake.mag > 0) {
+      const k = cameraShake.mag * (1 - shakeAge / SHAKE_DECAY_MS);
+      camPos.x += (Math.sin(nowMs * 0.0413) * 0.6 + Math.sin(nowMs * 0.0977) * 0.4) * k * 0.09;
+      camPos.y += (Math.sin(nowMs * 0.0521 + 1.3) * 0.6 + Math.sin(nowMs * 0.0871 + 0.7) * 0.4) * k * 0.09;
+      roll += (Math.sin(nowMs * 0.0631 + 2.1) * 0.6 + Math.sin(nowMs * 0.1103 + 4.2) * 0.4) * k * 0.05;
+    }
+    // roll 应用：delta 修正（桌面 mousemove 的四元数分解保留 z 分量；触屏帧首欧拉重建已回填 appliedRoll）
+    state.camera.rotateZ(roll - appliedRoll.current);
+    appliedRoll.current = roll;
     playerPosition.x = p.x;
     playerPosition.y = p.y;
     playerPosition.z = p.z;
@@ -850,8 +930,25 @@ export function Player() {
           }
           const baseDmg = (tool?.attackDamage ?? 1) + (held?.kind === 'tool' ? ((held.ench?.sharpness ?? 0) * 0.5 + ((held.ench?.sharpness ?? 0) > 0 ? 0.5 : 0)) : 0) + (effects.strength > 0 ? 3 * Math.max(effectLvls.strength, beaconTiers.get('strength') ?? 1) : 0); // 拳头 1 点（半心），锋利 +0.5×级+0.5（MC Java），力量药水 +3/级（MC）
           damageMob(mob, baseDmg * cdScale * (crit ? 1.5 : 1), playerPosition, held?.kind === 'tool' ? (held.ench?.looting ?? 0) : 0, world, kb); // 抢夺加掉落
+          // 暴击反馈：命中点推一簇亮色星状粒子（breakParticles 共享池；白雪贴图是池内最亮 tile）
+          if (crit) {
+            breakParticles.push({ x: mob.x - 0.5, y: mob.y + 0.4, z: mob.z - 0.5, tile: tileOf('snow') });
+          }
           // MC Java 横扫攻击：剑 + 冷却全满 + 非冲刺命中时，主目标周围 1 格内其他敌对生物各受 1 点横扫伤害
-          if (tool?.kind === 'sword' && fullCharge && !sprinting) sweepAround(mob, playerPosition, world);
+          if (tool?.kind === 'sword' && fullCharge && !sprinting) {
+            sweepAround(mob, playerPosition, world);
+            // 横扫反馈：沿挥击弧（面前 ±40°）推两簇白色粒子（绕 Y 轴旋转向量：x'=x·cos+z·sin, z'=-x·sin+z·cos）
+            for (const a of SWEEP_ARC) {
+              const c = Math.cos(a);
+              const s = Math.sin(a);
+              breakParticles.push({
+                x: p.x + (fx * c + fz * s) * 1.2 - 0.5,
+                y: p.y + 0.7,
+                z: p.z + (-fx * s + fz * c) * 1.2 - 0.5,
+                tile: tileOf('snow'),
+              });
+            }
+          }
           if (tool) gs.damageHeldTool(tool.kind === 'sword' ? 1 : 2); // MC：剑耗 1，工具作武器耗 2
           playSound('dig_choppy', 0.8);
           survivalStats.exhaustion += 0.1; // MC：攻击消耗
@@ -871,16 +968,19 @@ export function Player() {
         }
       }
       if (attacked) {
+        handSwing.at = performance.now(); // 攻击出手（命中生物/水晶/打回爆裂球）：播一次手部挥动
         digState.target = null;
         digState.progress = 0;
       } else {
         const hit = targetBlock.hit;
         if (hit) {
+          if (clickEdge) handSwing.at = performance.now(); // 点按到方块先挥一次；持续挖掘的往复挥动由 HeldItem 随 digState 驱动
           const [bx, by, bz] = hit.block;
           const t = digState.target;
           if (!t || t[0] !== bx || t[1] !== by || t[2] !== bz) {
             digState.target = [bx, by, bz];
             digState.progress = 0;
+            digTapAcc.current = 0; // 换目标重置敲击音计时（新块从 0.25s 后开始敲）
           }
           const blockId = world.getBlock(bx, by, bz);
           if (BLOCKS[blockId]?.unbreakable) {
@@ -893,19 +993,31 @@ export function Player() {
             if (now - lastCreativeBreak.current >= 200) {
               lastCreativeBreak.current = now;
               breakBlock(world, bx, by, bz);
+              handSwing.at = now; // 创造即时破坏：按住连破按 200ms 冷却节奏持续挥动
             }
             digState.target = null;
             digState.progress = 0;
           } else {
-            // MC 挖掘时间：工具匹配且采掘层级达标时切硬度×1.5 基值（需镐方块 = digTime×0.3）再除工具速度；
-            // 效率附魔仅匹配生效，水中/悬空（onGround=false）各 ×5 慢（lib/dig.ts）
+            // MC 挖掘时间：工具类别匹配即按工具速度（与采掘层级无关）；需镐方块层级达标切硬度×1.5 基值（digTime×0.3）、
+            // 不足保持 ×5 基值但仍除速度（层级只影响掉落）；效率附魔速度>1 生效，水中/悬空（onGround=false）各 ×5 慢（lib/dig.ts）
             const held = gs.hotbarSlots[gs.selectedSlot];
             digState.progress += dt / effectiveDigTime(blockId, held, effects.haste > 0 ? (beaconTiers.get('haste') ?? 1) : 0, headInWater, onGround.current);
+            // 挖掘敲击音：长按过程中每 0.25s 低音量播该方块挖掘音组（MC 挖掘循环声；挖碎瞬间的全音量音效在 breakBlock）
+            digTapAcc.current += dt;
+            if (digTapAcc.current >= 0.25) {
+              digTapAcc.current = 0;
+              const tapSnd = BLOCKS[blockId]?.digSound;
+              if (tapSnd) playSound(tapSnd, 0.25);
+            }
             if (digState.progress >= 1) {
               breakBlock(world, bx, by, bz);
               if (gs.worldMode === 'survival') {
                 survivalStats.exhaustion += 0.005; // MC：挖掘消耗
-                if (held?.kind === 'tool') gs.damageHeldTool(1); // MC：挖掘耗 1 点耐久
+                // MC：剑挖方块固定耗 2 点耐久（SwordItem.mineBlock），其他工具 1 点；
+                // 硬度 0 的瞬碎方块（花草/火把/树苗/红石粉等，digTime≤0.05）不耗耐久
+                if (held?.kind === 'tool' && (BLOCKS[blockId]?.digTime ?? 1) > 0.05) {
+                  gs.damageHeldTool(TOOLS[held.tool].kind === 'sword' ? 2 : 1);
+                }
               }
               digState.target = null;
               digState.progress = 0;
@@ -914,12 +1026,15 @@ export function Player() {
         } else {
           digState.target = null;
           digState.progress = 0;
+          // 挥空（准星无方块/生物）：MC 点击空气即挥臂；按住不动则按挥动动画时长（与 HeldItem SWING_MS 一致）节奏持续挥臂
+          if (clickEdge || nowMs - handSwing.at >= 250) handSwing.at = nowMs;
         }
       }
     } else if (digState.target) {
       digState.target = null;
       digState.progress = 0;
     }
+    if (!digState.target) digTapAcc.current = 0; // 挖掘中断（松键/移开准星/已挖碎/出手攻击）重置敲击计时
 
     // F3 调试数据
     debugInfo.fps = debugInfo.fps * 0.9 + (1 / Math.max(delta, 1e-4)) * 0.1;

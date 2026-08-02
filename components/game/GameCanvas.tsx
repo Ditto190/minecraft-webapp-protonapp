@@ -13,11 +13,14 @@ import { Mobs } from './Mobs';
 import { BeaconBeams } from './BeaconBeams';
 import { EndCrystals } from './EndCrystals';
 import { FishingBobber } from './FishingBobber';
+import { HeldItem } from './HeldItem';
 import { ItemDrops } from './ItemDrops';
 import { XpOrbs } from './XpOrbs';
 import { Tnt } from './Tnt';
 import { DayNight } from './DayNight';
 import { Rain } from './Rain';
+import { PortalTransition } from './PortalTransition';
+import { FireOverlay } from './FireOverlay';
 import { UnderwaterFX, skyFog } from './UnderwaterFX';
 import { RendererKindContext, type RendererKind } from './renderer-kind';
 import { loadingState } from '@/lib/game';
@@ -101,6 +104,8 @@ export function GameCanvas() {
         <Rain />
         <WorldRenderer />
         <Player />
+        {/* 第一人称手持物：紧随 Player 挂载，useFrame 在其后执行读到当帧最终相机位姿 */}
+        <HeldItem />
         <Mobs />
         <BeaconBeams />
         <EndCrystals />
@@ -114,6 +119,10 @@ export function GameCanvas() {
         <BreakParticles />
         <UnderwaterFX />
       </Canvas>
+      {/* 维度切换过渡层（DOM overlay，不在 three 场景内） */}
+      <PortalTransition />
+      {/* 着火屏幕火焰层（DOM overlay） */}
+      <FireOverlay />
     </RendererKindContext.Provider>
   );
 }

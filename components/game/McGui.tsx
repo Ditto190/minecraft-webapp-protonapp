@@ -15,7 +15,7 @@ import { withBase } from '@/lib/basepath';
 import type { Slot } from '@/lib/slots';
 import { useGameStore } from '@/lib/store';
 import { createTouchPress, LONG_PRESS_MS, pressMove, pressTimeout, pressUp, type TouchButton, type TouchPressState } from '@/lib/touchGestures';
-import { slotDurabilityPct, slotTile } from './slotDisplay';
+import { slotDurabilityPct, slotEnchanted, slotTile } from './slotDisplay';
 import { TileIcon } from './TileIcon';
 
 /** MC 格 18px × 2（Faithful 32x 纹理为 176×166 的 2 倍） */
@@ -201,7 +201,7 @@ export function GuiSlot({
       // touchAction none：格子上禁浏览器滚动/缩放手势（拖动分发不被抢走）；callout none：禁 iOS 长按弹窗
       style={{ left: pos[0], top: pos[1], width: G, height: G, touchAction: 'none', WebkitTouchCallout: 'none' }}
     >
-      {slot && <TileIcon tile={tile} size={30} blockId={slot.kind === 'block' ? slot.id : undefined} />}
+      {slot && <TileIcon tile={tile} size={30} blockId={slot.kind === 'block' ? slot.id : undefined} enchanted={slotEnchanted(slot)} />}
       {slot && slot.kind !== 'tool' && slot.kind !== 'armor' && slot.count > 1 && (
         <span className="pointer-events-none absolute bottom-0 right-0.5 text-[10px] font-bold text-white drop-shadow">{slot.count}</span>
       )}

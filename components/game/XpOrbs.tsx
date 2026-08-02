@@ -6,6 +6,7 @@ import { BoxGeometry, Mesh, MeshBasicMaterial, type Group } from 'three';
 import { BLOCKS } from '@/lib/blocks';
 import { getActiveWorld, playerPosition } from '@/lib/game';
 import { tickXpOrbs, xpOrbs } from '@/lib/xporb';
+import { xpPickupSound } from '@/lib/sound';
 import { useGameStore } from '@/lib/store';
 
 const seenScratch = new Set<number>();
@@ -29,7 +30,10 @@ export function XpOrbs() {
       world,
       dt,
       playerPosition,
-      (v) => useGameStore.getState().addXp(v),
+      (v) => {
+        useGameStore.getState().addXp(v);
+        xpPickupSound(); // 拾取「叮」（连续拾取升调，见 sound.ts）
+      },
       (bx, by, bz) => BLOCKS[world.getBlock(Math.floor(bx), by, Math.floor(bz))]?.solid === true,
     );
 

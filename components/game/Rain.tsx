@@ -1,13 +1,17 @@
 'use client';
 
 // 降雨/雷暴：相机周围的竖直雨丝（lineSegments 循环下落），头顶有遮挡或在水下时不显示
+// 雨声环境音（sound.ts startRain/stopRain）：随天气与本地降水开停/调强度，水下静音，雪天极轻
+// 雨点落地溅射：下雨时（非雪天）间歇在相机周围裸露地表推少量淡蓝碎块粒子（breakParticles 事件，每次 ~10 粒）
 
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { BufferAttribute, BufferGeometry, LineBasicMaterial, type LineSegments } from 'three';
-import { BLOCKS, isLavaId, isWaterId } from '@/lib/blocks';
-import { getActiveWorld } from '@/lib/game';
+import { BLOCKS, isLavaId, isWaterId, tileOf } from '@/lib/blocks';
+import { breakParticles, getActiveWorld } from '@/lib/game';
+import { startRain, stopRain } from '@/lib/sound';
 import { weather, precipAt } from '@/lib/weather';
+import type { World } from '@/lib/world';
 
 const MAX_DROPS = 900; // 雷暴密度
 const RAIN_DROPS = 450; // 普通雨密度
@@ -26,16 +30,53 @@ rainGeo.setAttribute('position', rainAttr);
 const rainMat = new LineBasicMaterial({ color: '#8fb3d9', transparent: true, opacity: 0.45, depthWrite: false });
 const rainState = { seeded: false };
 
+const SPLASH_RADIUS = 12; // 溅射水平散布半径（比雨丝小，只在近处出，少占粒子池）
+/** 溅射节流：acc 累计 dt，到 next 推一朵；next 每次取 0.3-0.7s 随机（~2 朵/秒，克制） */
+const splashState = { acc: 0, next: 0.5 };
+
+/** 推一朵雨点落地溅射：相机周围随机水平位置，自上而下找首个裸露表面（实心块或水面——屋檐下/洞穴内的位置
+ *  会先扫到其顶面，等价于跳过遮挡），y 取表面上方一格，碎块散布后受重力落回表面弹跳。
+ *  经 breakParticles 推送（只读 import，每次事件 ~10 粒，取水面贴图出淡蓝碎块）；
+ *  设置里关闭粒子时 BreakParticles 每帧丢弃整个队列，这里无需判断 */
+function spawnSplash(world: World, cx: number, cy: number, cz: number): void {
+  const x = cx + (Math.random() * 2 - 1) * SPLASH_RADIUS;
+  const z = cz + (Math.random() * 2 - 1) * SPLASH_RADIUS;
+  const bx = Math.floor(x);
+  const bz = Math.floor(z);
+  const top = Math.floor(cy) + TOP;
+  const bottom = Math.max(0, Math.floor(cy) - BOTTOM);
+  for (let y = top; y >= bottom; y--) {
+    const b = world.getBlock(bx, y, bz);
+    if (BLOCKS[b]?.solid || isWaterId(b)) {
+      breakParticles.push({ x, y: y + 1, z, tile: tileOf('water_still') });
+      return;
+    }
+  }
+}
+
 export function Rain() {
   const ref = useRef<LineSegments>(null);
+  // 已应用的雨声状态（''=静音）：仅变化时调 sound.ts，避免每帧重复 start/stop
+  const audioRef = useRef('');
+
+  // 卸载（切世界/回主菜单）停雨声
+  useEffect(() => () => stopRain(), []);
 
   useFrame(({ camera }, delta) => {
     const lines = ref.current;
     if (!lines) return;
+    /** 雨声目标状态（''=静音 / rain / thunder / snow）：startRain、stopRain 均幂等 */
+    const applyAudio = (want: string) => {
+      if (audioRef.current === want) return;
+      audioRef.current = want;
+      if (want === '') stopRain();
+      else startRain(want === 'thunder' ? 1.5 : want === 'snow' ? 0.15 : 1); // 雷暴略响，雪天极轻
+    };
     const raining = weather.kind !== 'clear';
     if (!raining) {
       lines.visible = false;
       rainState.seeded = false;
+      applyAudio('');
       return;
     }
     const world = getActiveWorld();
@@ -47,6 +88,7 @@ export function Rain() {
     if (precip === 'none') {
       lines.visible = false;
       rainState.seeded = false;
+      applyAudio('');
       return;
     }
     const snow = precip === 'snow';
@@ -54,9 +96,10 @@ export function Rain() {
       const head = world.getBlock(Math.floor(cx), Math.floor(cy), Math.floor(cz));
       if (isWaterId(head) || isLavaId(head)) {
         lines.visible = false;
+        applyAudio(''); // 头入水/岩浆：雨声隔断
         return;
       }
-      // 头顶 24 格内有不透明遮挡（洞穴/屋内）则看不到雨
+      // 头顶 24 格内有不透明遮挡（洞穴/屋内）则看不到雨（但仍闻雨声，MC 屋内听雨观感，不动 audioRef）
       for (let y = 1; y <= 24; y++) {
         const b = world.getBlock(Math.floor(cx), Math.floor(cy) + y, Math.floor(cz));
         if (BLOCKS[b]?.opaque) {
@@ -66,6 +109,7 @@ export function Rain() {
       }
     }
     lines.visible = true;
+    applyAudio(snow ? 'snow' : weather.kind);
 
     const count = weather.kind === 'thunder' ? MAX_DROPS : RAIN_DROPS;
     // 雪：白色、更慢、更短（雪片观感），横向飘移
@@ -73,6 +117,15 @@ export function Rain() {
     rainMat.opacity = snow ? 0.8 : weather.kind === 'thunder' ? 0.6 : 0.45;
     const streak = snow ? 0.08 : STREAK;
     const dt = Math.min(delta, 0.05);
+    // 雨点落地溅射：间歇推一朵（雪天不做）；头顶遮挡/水下已在上面 return，走到这里必然露天见雨
+    if (!snow && world) {
+      splashState.acc += dt;
+      if (splashState.acc >= splashState.next) {
+        splashState.acc = 0;
+        splashState.next = 0.3 + Math.random() * 0.4;
+        spawnSplash(world, cx, cy, cz);
+      }
+    }
     // 首次（或雨后重开）时在相机周围撒满
     if (!rainState.seeded) {
       rainState.seeded = true;

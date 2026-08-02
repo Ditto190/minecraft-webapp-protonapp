@@ -1,9 +1,10 @@
-// 钓鱼：抛竿落水漂浮、挂墙静置、等待→咬钩窗口、收竿渔获（MC 概率表）、雨天加速、遮顶减速、钓竿配方
+// 钓鱼：抛竿落水漂浮、挂墙静置、等待→咬钩窗口、收竿渔获（MC 概率表）、雨天加速、遮顶减速、水花粒子反馈、钓竿配方
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { BLOCK_BY_KEY } from '../blocks';
 import { bobber, castBobber, CATCH_TABLE, clearFishing, reelIn, tickFishing } from '../fishing';
 import { FOODS, SMELTING } from '../furnace';
+import { breakParticles } from '../game';
 import { VOID_TERRAIN } from '../noise';
 import { RECIPES } from '../recipes';
 import { weather } from '../weather';
@@ -152,6 +153,32 @@ describe('咬钩与收竿', () => {
     castBobber({ x: 8.5, y: 44, z: 8.5 }, { x: 0, y: -1, z: 0 });
     for (let i = 0; i < 20 && bobber.current?.state === 'flying'; i++) tickFishing(w, 0.05);
     expect(bobber.current!.timer).toBeCloseTo(15, 0);
+  });
+});
+
+describe('水花反馈', () => {
+  it('落水与咬钩各推一朵水粒子事件（BreakParticles 队列，水花中心对浮标）', () => {
+    const w = setup();
+    pond(w);
+    breakParticles.length = 0;
+    vi.spyOn(Math, 'random').mockReturnValue(0.4); // 等待 15s 确定推进到咬钩
+    castBobber({ x: 8.5, y: 45, z: 2.5 }, { x: 0, y: 0.2, z: 1 });
+    for (let i = 0; i < 60 && bobber.current?.state === 'flying'; i++) tickFishing(w, 0.05);
+    const b = bobber.current!;
+    expect(b.state).toBe('waiting');
+    expect(breakParticles.length).toBe(1); // 抛竿落水一朵
+    // 事件坐标按粒子生成偏移（+0.25~0.75）回退：水花以浮标为中心散开
+    expect(breakParticles[0].x).toBeCloseTo(b.x - 0.4, 5);
+    expect(breakParticles[0].z).toBeCloseTo(b.z - 0.4, 5);
+    expect(breakParticles[0].y).toBeCloseTo(b.floatY - 0.35, 5);
+    // 推进到咬钩：再推一朵（错过窗口回等待不再推）
+    for (let i = 0; i < 40 && b.state === 'waiting'; i++) tickFishing(w, 0.5);
+    expect(b.state).toBe('bite');
+    expect(breakParticles.length).toBe(2);
+    for (let i = 0; i < 4; i++) tickFishing(w, 0.5); // 2s > 1.5s 窗口
+    expect(b.state).toBe('waiting');
+    expect(breakParticles.length).toBe(2);
+    breakParticles.length = 0;
   });
 });
 

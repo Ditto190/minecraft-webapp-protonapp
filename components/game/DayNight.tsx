@@ -5,6 +5,8 @@ import { useFrame } from '@react-three/fiber';
 import {
   AdditiveBlending,
   BoxGeometry,
+  BufferAttribute,
+  BufferGeometry,
   CanvasTexture,
   Color,
   DoubleSide,
@@ -36,6 +38,8 @@ const BODY_SIZE = 36; // 太阳/月亮贴图尺寸
 const CLOUD_Y = 80;
 const CLOUD_SIZE = 600;
 const CLOUD_SPEED = 2.5; // 纹理偏移速度
+const STAR_COUNT = 500;
+const STAR_RADIUS = 320; // 比日月轨道更远，仍在相机 far=400 内
 
 const SKY_DAY = new Color('#87ceeb');
 const SKY_NIGHT = new Color('#0b1026');
@@ -89,6 +93,74 @@ function makeCloudTexture(): CanvasTexture {
   return tex;
 }
 
+/** 星空几何：均匀球面分布的切向四边形（法线指向球心即相机，任何视角都是正面小方块），
+ *  顶点色灰度随机 = 星星亮度差异。WebGPU 后端点精灵恒为 1px（three/webgpu 限制），
+ *  而本项目默认 webgpu，故用四边形网格而非 THREE.Points，两个渲染器观感一致 */
+function makeStarGeometry(): BufferGeometry {
+  const rand = mulberry32(20250802);
+  const pos = new Float32Array(STAR_COUNT * 4 * 3);
+  const col = new Float32Array(STAR_COUNT * 4 * 3);
+  const idx = new Uint32Array(STAR_COUNT * 6);
+  for (let i = 0; i < STAR_COUNT; i++) {
+    // 均匀球面随机方向（含地平线以下，MC 同款——被地形遮挡自然不可见）
+    const y = rand() * 2 - 1;
+    const theta = rand() * Math.PI * 2;
+    const r = Math.sqrt(1 - y * y);
+    const dx = r * Math.cos(theta);
+    const dz = r * Math.sin(theta);
+    // 切向正交基：u = d × a 归一化（a 取不与 d 平行的轴），v = d × u
+    const ax = Math.abs(y) > 0.9 ? 1 : 0;
+    const ay = 1 - ax;
+    let ux = -dz * ay;
+    let uy = dz * ax;
+    let uz = dx * ay - y * ax;
+    const ul = Math.hypot(ux, uy, uz);
+    ux /= ul;
+    uy /= ul;
+    uz /= ul;
+    const vx = y * uz - dz * uy;
+    const vy = dz * ux - dx * uz;
+    const vz = dx * uy - y * ux;
+    const cx = dx * STAR_RADIUS;
+    const cy = y * STAR_RADIUS;
+    const cz = dz * STAR_RADIUS;
+    const s = 0.4 + rand() * 0.5; // 半边长：全宽 0.8~1.8 世界单位 ≈ 屏幕上 1.5~3.5px
+    const o = i * 12;
+    // 四角：c ± u·s ± v·s
+    pos[o] = cx - (ux + vx) * s;
+    pos[o + 1] = cy - (uy + vy) * s;
+    pos[o + 2] = cz - (uz + vz) * s;
+    pos[o + 3] = cx + (ux - vx) * s;
+    pos[o + 4] = cy + (uy - vy) * s;
+    pos[o + 5] = cz + (uz - vz) * s;
+    pos[o + 6] = cx + (ux + vx) * s;
+    pos[o + 7] = cy + (uy + vy) * s;
+    pos[o + 8] = cz + (uz + vz) * s;
+    pos[o + 9] = cx - (ux - vx) * s;
+    pos[o + 10] = cy - (uy - vy) * s;
+    pos[o + 11] = cz - (uz - vz) * s;
+    const b = 0.5 + rand() * 0.5; // 亮度随机差异
+    for (let v = 0; v < 4; v++) {
+      col[o + v * 3] = b;
+      col[o + v * 3 + 1] = b;
+      col[o + v * 3 + 2] = b;
+    }
+    const q = i * 6;
+    const v0 = i * 4;
+    idx[q] = v0;
+    idx[q + 1] = v0 + 1;
+    idx[q + 2] = v0 + 2;
+    idx[q + 3] = v0;
+    idx[q + 4] = v0 + 2;
+    idx[q + 5] = v0 + 3;
+  }
+  const geo = new BufferGeometry();
+  geo.setAttribute('position', new BufferAttribute(pos, 3));
+  geo.setAttribute('color', new BufferAttribute(col, 3));
+  geo.setIndex(new BufferAttribute(idx, 1));
+  return geo;
+}
+
 /** 闪电 bolt 共享资源（模块级，同本文件 sky/sunDir 惯例：避免 hook 内可变值争议） */
 const boltGeom = new BoxGeometry(0.22, 1, 0.22);
 const boltMat = new MeshBasicMaterial({ color: '#f4f8ff', transparent: true, blending: AdditiveBlending, depthWrite: false, fog: false });
@@ -124,10 +196,11 @@ function LightningBolts() {
   return <group ref={groupRef} />;
 }
 
-/** 昼夜循环：太阳/月亮轨道、云层漂移、光照与雾色随时间渐变 */
+/** 昼夜循环：太阳/月亮轨道、星空、云层漂移、光照与雾色随时间渐变 */
 export function DayNight() {
   const sunRef = useRef<Sprite>(null);
   const moonRef = useRef<Sprite>(null);
+  const starRef = useRef<Mesh>(null);
   const cloudRef = useRef<Mesh>(null);
   const dirRef = useRef<DirectionalLight>(null);
   const ambRef = useRef<AmbientLight>(null);
@@ -136,19 +209,42 @@ export function DayNight() {
   const sunTex = useMemo(() => makeBodyTexture('#f5d76e', '#eec845', 32), []);
   const moonTex = useMemo(() => makeBodyTexture('#dfe3ee', '#b9c0d4', 32), []);
   const cloudTex = useMemo(() => makeCloudTexture(), []);
+  const starGeo = useMemo(() => makeStarGeometry(), []);
   /** 按渲染器类型创建的材质（sprite/basic 的节点或经典变体） */
-  const [mats, setMats] = useState<{ sun: Material; moon: Material; cloud: Material } | null>(null);
+  const [mats, setMats] = useState<{ sun: Material; moon: Material; star: Material; cloud: Material } | null>(null);
   const kind = useRendererKind();
 
   useEffect(() => {
+    let alive = true;
+    let created: Material[] | null = null;
     void getAtlasMaterials(kind).then((m) => {
-      setMats({
-        sun: m.sprite({ map: sunTex, transparent: true, fog: false, depthWrite: false }),
-        moon: m.sprite({ map: moonTex, transparent: true, fog: false, depthWrite: false }),
-        cloud: m.basic({ map: cloudTex, transparent: true, opacity: 0.55, depthWrite: false, side: DoubleSide }),
-      });
+      if (!alive) return;
+      // 星空：加法混合（黑底不遮挡，亮度叠到天色上）+ 顶点色亮度差异；blending 首次渲染前设置即可
+      const star = m.basic({ transparent: true, opacity: 0, depthWrite: false, fog: false, vertexColors: true, side: DoubleSide });
+      star.blending = AdditiveBlending;
+      created = [
+        m.sprite({ map: sunTex, transparent: true, fog: false, depthWrite: false }),
+        m.sprite({ map: moonTex, transparent: true, fog: false, depthWrite: false }),
+        star,
+        m.basic({ map: cloudTex, transparent: true, opacity: 0.55, depthWrite: false, side: DoubleSide }),
+      ];
+      setMats({ sun: created[0], moon: created[1], star: created[2], cloud: created[3] });
     });
+    return () => {
+      alive = false;
+      if (created) for (const mat of created) mat.dispose();
+    };
   }, [sunTex, moonTex, cloudTex, kind]);
+
+  // 卸载时释放贴图与星空几何（材质在上方 effect 清理）
+  useEffect(() => {
+    return () => {
+      sunTex.dispose();
+      moonTex.dispose();
+      cloudTex.dispose();
+      starGeo.dispose();
+    };
+  }, [sunTex, moonTex, cloudTex, starGeo]);
 
   useFrame(({ scene, camera }, delta) => {
     const dt = Math.min(delta, 0.05);
@@ -243,6 +339,15 @@ export function DayNight() {
       );
     }
 
+    // 星空：亮度随夜晚因子（dayFactor 反向）淡入/淡出；跟随相机平移但网格不旋转，即锚定世界方向；
+    // 雨雪天与水下不可见；下界/末地无星空（MC）
+    const stars = starRef.current;
+    if (stars) {
+      stars.visible = overworld && weather.kind === 'clear' && !immersed;
+      stars.position.copy(camera.position);
+      (stars.material as MeshBasicMaterial).opacity = (1 - dayFactor) * 0.9;
+    }
+
     // 云层跟随相机平移 + 纹理漂移；雨雪天云层变灰变厚；设置里可关闭云（MC 云开关）；下界/末地无云（MC）
     const cloud = cloudRef.current;
     if (cloud) {
@@ -267,6 +372,8 @@ export function DayNight() {
         <>
           <sprite ref={sunRef} material={mats.sun as unknown as SpriteMaterial} scale={[BODY_SIZE, BODY_SIZE, 1]} />
           <sprite ref={moonRef} material={mats.moon as unknown as SpriteMaterial} scale={[BODY_SIZE * 0.7, BODY_SIZE * 0.7, 1]} />
+          {/* 星空始终跟随相机，包围球恒定可见，关掉视锥剔除 */}
+          <mesh ref={starRef} geometry={starGeo} material={mats.star} frustumCulled={false} />
           <mesh ref={cloudRef} material={mats.cloud} rotation={[-Math.PI / 2, 0, 0]}>
             <planeGeometry args={[CLOUD_SIZE, CLOUD_SIZE]} />
           </mesh>

@@ -158,6 +158,13 @@ export function hurtSound(volume = 0.5): void {
   blip('triangle', 220, ac.currentTime, 0.18, volume, 90);
 }
 
+/** 打嗝「呃」：低频正弦短促下滑（程序合成；进食完成反馈，由 Hud 监听 lastAteAt 触发）。音量克制 */
+export function burpSound(volume = 0.3): void {
+  const ac = audioCtx();
+  if (!ac) return;
+  blip('sine', 150, ac.currentTime, 0.16, volume, 70);
+}
+
 /** 进食「嚼」：三连短促方波脉冲（程序合成；public/sounds 无 eat 素材） */
 export function eatSound(volume = 0.4): void {
   const ac = audioCtx();
@@ -171,6 +178,25 @@ export function levelupSound(volume = 0.5): void {
   if (!ac) return;
   const semis = [12, 16, 19, 24]; // C5 E5 G5 C6
   for (let i = 0; i < semis.length; i++) blip('sine', noteFreq(semis[i]), ac.currentTime + i * 0.1, 0.5, volume);
+}
+
+// ——— 经验球拾取「叮」：1s 窗口内连续拾取音调渐升（Java 手感），窗口外重置 ———
+let xpPickupCount = 0;
+let xpPickupLastAt = 0;
+
+/** 连续拾取升调倍率：第 n 次 ×1.06^n（封顶 1.9 避免刺耳）；纯函数可测 */
+export function xpPickupPitch(count: number): number {
+  return Math.min(1.9, Math.pow(1.06, Math.max(0, count)));
+}
+
+/** 经验球拾取「叮」：短促高音 sine（0.15s），按最近 1s 内拾取计数升调（XpOrbs 拾取回调触发） */
+export function xpPickupSound(volume = 0.35): void {
+  const ac = audioCtx();
+  if (!ac) return;
+  const now = performance.now();
+  xpPickupCount = now - xpPickupLastAt > 1000 ? 0 : xpPickupCount + 1;
+  xpPickupLastAt = now;
+  blip('sine', 1320 * xpPickupPitch(xpPickupCount), ac.currentTime, 0.15, volume);
 }
 
 /** 雷声：低频棕噪声轰隆 + 两次回滚滚雷，低通随时间收紧（程序合成，MC 远雷观感）。
@@ -205,7 +231,108 @@ export function thunder(volume = 1): void {
   src.start();
 }
 
-// 首次手势（点击/按键）时创建/恢复 AudioContext 并补做预载，减少第一次播放的延迟
+/** 水花「扑通」：高频噪声短 burst，低通随时间收紧（程序合成，0.2s；钓鱼咬钩/抛竿落水反馈）。音量克制 */
+export function splashSound(volume = 0.35): void {
+  const ac = audioCtx();
+  if (!ac) return;
+  const dur = 0.2;
+  const buf = ac.createBuffer(1, Math.floor(ac.sampleRate * dur), ac.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) {
+    const t = i / data.length;
+    data[i] = (Math.random() * 2 - 1) * Math.pow(1 - t, 1.8);
+  }
+  const src = ac.createBufferSource();
+  src.buffer = buf;
+  const lp = ac.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(3200, ac.currentTime);
+  lp.frequency.exponentialRampToValueAtTime(600, ac.currentTime + dur);
+  const gain = ac.createGain();
+  gain.gain.value = useGameStore.getState().settings.volume * volume;
+  src.connect(lp);
+  lp.connect(gain);
+  gain.connect(ac.destination);
+  src.start();
+}
+
+// ——— 雨声环境音（程序合成：滤白噪声循环 buffer，start/stop 带音量渐变；Rain.tsx 按天气驱动） ———
+let rainSrc: AudioBufferSourceNode | null = null;
+let rainGain: GainNode | null = null;
+let rainBuf: AudioBuffer | null = null;
+/** 雨声基准音量（克制：环境底噪，远低于动作反馈音） */
+const RAIN_BASE_VOLUME = 0.16;
+
+/** 2s 循环雨声 buffer：轻度棕化的白噪声（密集雨点沙沙声），首尾交叉淡化消除循环咔哒 */
+function rainBuffer(ac: AudioContext): AudioBuffer {
+  if (rainBuf && rainBuf.sampleRate === ac.sampleRate) return rainBuf;
+  const buf = ac.createBuffer(1, ac.sampleRate * 2, ac.sampleRate);
+  const data = buf.getChannelData(0);
+  let last = 0;
+  for (let i = 0; i < data.length; i++) {
+    const white = Math.random() * 2 - 1;
+    last = last * 0.94 + white * 0.06;
+    data[i] = (white * 0.45 + last * 5) * 0.5;
+  }
+  const fade = Math.floor(ac.sampleRate * 0.01);
+  for (let i = 0; i < fade; i++) {
+    const t = i / fade;
+    data[i] = data[i] * t + data[data.length - fade + i] * (1 - t);
+  }
+  rainBuf = buf;
+  return buf;
+}
+
+/** 雨声开/调强度：未播则淡入启动，已在播则渐变到新强度（intensity 1=普通雨，雷暴略大、雪天极轻）。幂等，可每帧调用 */
+export function startRain(intensity = 1): void {
+  const ac = audioCtx();
+  if (!ac) return;
+  const target = useGameStore.getState().settings.volume * RAIN_BASE_VOLUME * intensity;
+  if (rainSrc && rainGain) {
+    rainGain.gain.setTargetAtTime(target, ac.currentTime, 0.5);
+    return;
+  }
+  const src = ac.createBufferSource();
+  src.buffer = rainBuffer(ac);
+  src.loop = true;
+  const lp = ac.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.value = 2600; // 闷一点的环境沙沙声
+  const gain = ac.createGain();
+  gain.gain.setValueAtTime(0.0001, ac.currentTime);
+  gain.gain.setTargetAtTime(target, ac.currentTime, 1.2); // 淡入
+  src.connect(lp);
+  lp.connect(gain);
+  gain.connect(ac.destination);
+  src.start();
+  rainSrc = src;
+  rainGain = gain;
+  src.onended = () => {
+    // 手动 stop 或意外结束都会触发：仅当仍指向自己时清状态（避免清掉期间新开的雨）
+    if (rainSrc === src) {
+      rainSrc = null;
+      rainGain = null;
+    }
+    src.disconnect();
+    lp.disconnect();
+    gain.disconnect();
+  };
+}
+
+/** 雨声停：淡出后停源（转晴/雪天/入水/组件卸载调用）。幂等；淡出期间重开由 startRain 新建源 */
+export function stopRain(): void {
+  const src = rainSrc;
+  const gain = rainGain;
+  rainSrc = null;
+  rainGain = null;
+  if (!ctx || !src || !gain) return;
+  gain.gain.setTargetAtTime(0.0001, ctx.currentTime, 0.4); // 淡出
+  try {
+    src.stop(ctx.currentTime + 1.5);
+  } catch {
+    /* 源已停：忽略 */
+  }
+}
 if (typeof window !== 'undefined') {
   const onGesture = () => {
     gestured = true;

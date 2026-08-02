@@ -1,10 +1,13 @@
 // 钓鱼：浮标抛投（抛物线 → 落水漂浮）→ 等待咬钩（5-30s，雨天 ×0.8、不见天空 ×2，MC）→ 1.5s 窗口 → 收竿得渔获
 // 概率表对齐 MC Java：85% 鱼（60% 鳕鱼/25% 鲑鱼/13% 河豚/2% 热带鱼）、10% 垃圾、5% 宝藏
+// 反馈：落水/咬钩瞬间推水花粒子事件（game.ts breakParticles，BreakParticles 消费）并播扑通声（sound.ts splashSound）
 
-import { AIR, BLOCKS } from './blocks';
+import { AIR, BLOCKS, tileOf } from './blocks';
 import { weather, precipAt } from './weather';
 import { type World } from './world';
 import { WORLD_HEIGHT } from './grid';
+import { breakParticles } from './game';
+import { splashSound } from './sound';
 import { registerWorldScope } from './worldScope';
 
 export type BobberState = 'flying' | 'waiting' | 'bite';
@@ -91,6 +94,13 @@ function rollCatch(): { material: string; count: number } {
   return { material: 'raw_cod', count: 1 };
 }
 
+/** 浮标水花：向破坏粒子队列推一朵水粒子（BreakParticles 每事件 10 粒，MC 水花观感）+ 轻声扑通。
+ *  事件坐标按粒子生成偏移（+0.25~0.75）回退，让水花以浮标为中心散开 */
+function bobberSplash(b: Bobber, volume: number): void {
+  breakParticles.push({ x: b.x - 0.4, y: b.floatY - 0.35, z: b.z - 0.4, tile: tileOf('water_still') });
+  splashSound(0.3 * volume);
+}
+
 /** 每 tick 推进浮标：飞行抛物线 → 落水漂浮 → 等待 → 咬钩下沉（1.5s 窗口错过回等待） */
 export function tickFishing(world: World, dt: number): void {
   const b = bobber.current;
@@ -111,12 +121,13 @@ export function tickFishing(world: World, dt: number): void {
     const id = world.getBlock(bx, by, bz);
     const def = BLOCKS[id];
     if (def?.fluid) {
-      // 落水：半浸漂浮，开始等待
+      // 落水：半浸漂浮，开始等待；一小朵水花 + 轻声扑通
       b.state = 'waiting';
       b.floatY = by + 1 - 0.2;
       b.y = b.floatY;
       b.vx = b.vy = b.vz = 0;
       b.timer = nextBiteWait(world, b);
+      bobberSplash(b, 0.6);
     } else if (def?.solid) {
       // 挂墙/挂地：停住不咬钩（MC 浮标挂上后静置，可收竿）
       b.state = 'waiting';
@@ -137,6 +148,7 @@ export function tickFishing(world: World, dt: number): void {
       b.state = 'bite';
       b.timer = 1.5; // MC 咬钩窗口
       b.y = b.floatY - 0.25; // 浮标猛地下沉
+      bobberSplash(b, 1); // 咬钩水花 + 扑通声（MC 水花粒子观感）
     }
     return;
   }

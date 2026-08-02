@@ -2,16 +2,17 @@
 
 import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { eatState } from '@/lib/actions';
-import { attackState, bossState, debugInfo, survivalStats } from '@/lib/game';
+import { attackState, bossState, debugInfo, eatFeedback, survivalStats } from '@/lib/game';
 import { clearMobs } from '@/lib/mobs';
 import { anyPanelOpen, MAX_HEALTH, MAX_HUNGER, MAX_SATURATION, useGameStore } from '@/lib/store';
 import { effects, clearEffects } from '@/lib/effects';
+import { burpSound } from '@/lib/sound';
 import { levelFromXp } from '@/lib/xp';
 import { loadWorldMeta, type WorldMeta } from '@/lib/persistence';
 import { withBase } from '@/lib/basepath';
 import { armorPoints } from '@/lib/armor';
 import type { Slot } from '@/lib/slots';
-import { slotDurabilityPct, slotName, slotTile } from './slotDisplay';
+import { slotDurabilityPct, slotEnchanted, slotName, slotTile } from './slotDisplay';
 import { McButton } from './McButton';
 import { TouchControls } from './TouchControls';
 import { SettingsDialog } from './SettingsDialog';
@@ -47,8 +48,23 @@ function Notice() {
   );
 }
 
-/** 一排 10 格计量图标（心/鸡腿/护甲），用 Faithful 纹理对齐 MC Java（full=2 点、half=1 点、container/empty=背景） */
-function Meter({ value, kind }: { value: number; kind: 'heart' | 'food' | 'armor' }) {
+/** HUD 动画 keyframes（本轮不改 globals.css，内联注入）：饥饿抖动（该进食了）+ 受伤心脏白闪 */
+const HUD_KEYFRAMES = `
+@keyframes hunger-shake {
+  0%, 100% { transform: translate(0, 0); }
+  25% { transform: translate(0.7px, -0.5px); }
+  50% { transform: translate(-0.6px, 0.4px); }
+  75% { transform: translate(0.5px, 0.6px); }
+}
+@keyframes heart-hurt-flash {
+  from { filter: brightness(2.6) saturate(0.3); }
+  to { filter: none; }
+}
+`;
+
+/** 一排 10 格计量图标（心/鸡腿/护甲），用 Faithful 纹理对齐 MC Java（full=2 点、half=1 点、container/empty=背景）。
+ *  shake：抖动整排图标（饱和度耗尽时的饥饿提示，Java；各图标错相 30ms） */
+function Meter({ value, kind, shake = false }: { value: number; kind: 'heart' | 'food' | 'armor'; shake?: boolean }) {
   return (
     <div className="flex">
       {Array.from({ length: 10 }, (_, i) => {
@@ -58,7 +74,16 @@ function Meter({ value, kind }: { value: number; kind: 'heart' | 'food' | 'armor
           kind === 'heart'
             ? `/textures/gui/hud/heart/${state === 'empty' ? 'container' : state}.png`
             : `/textures/gui/hud/${kind}_${state}.png`;
-        return <img key={i} src={src} alt="" draggable={false} className="h-[18px] w-[18px] select-none drop-shadow [image-rendering:pixelated]" />;
+        return (
+          <img
+            key={i}
+            src={src}
+            alt=""
+            draggable={false}
+            className="h-[18px] w-[18px] select-none drop-shadow [image-rendering:pixelated]"
+            style={shake ? { animation: 'hunger-shake 0.2s linear infinite', animationDelay: `${-i * 30}ms` } : undefined}
+          />
+        );
       })}
     </div>
   );
@@ -101,7 +126,7 @@ function SurvivalCell({ index, slot, active, onClick }: { index: number; slot: S
   return (
     <div title={title} role="button" tabIndex={0} aria-label={ariaLabel} onKeyDown={onKeyDown} onClick={onClick} className={cls}>
       {selBox}
-      <TileIcon tile={tile} size={26} blockId={slot.kind === 'block' ? slot.id : undefined} />
+      <TileIcon tile={tile} size={26} blockId={slot.kind === 'block' ? slot.id : undefined} enchanted={slotEnchanted(slot)} />
       <span className="absolute left-0.5 top-0 text-[10px] leading-3 text-white/70">{index + 1}</span>
       {(slot.kind === 'block' || slot.kind === 'material') && slot.count > 1 && (
         <span className="absolute bottom-0 right-0.5 text-[10px] font-bold leading-3 text-white drop-shadow">
@@ -155,6 +180,20 @@ function EatIndicator() {
   );
 }
 
+/** 吃完打嗝：轮询 lib/game.ts 的 eatFeedback.lastAteAt（进食完成时间戳，actions.finishEating 写入），前进即播一声（音量克制） */
+function EatBurp() {
+  useEffect(() => {
+    let prev = eatFeedback.lastAteAt;
+    const t = setInterval(() => {
+      const cur = eatFeedback.lastAteAt;
+      if (cur > prev) burpSound();
+      prev = cur;
+    }, 150);
+    return () => clearInterval(t);
+  }, []);
+  return null;
+}
+
 /** 氧气气泡条（MC：头入水时显示在饥饿行上方；剩余 <15s 才显示，气泡随剩余秒数逐个变空，快耗尽时最后几个爆泡） */function AirBubbles() {
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -179,6 +218,8 @@ function EatIndicator() {
 function SurvivalBars() {
   const health = useGameStore((s) => s.health);
   const hunger = useGameStore((s) => s.hunger);
+  const saturation = useGameStore((s) => s.saturation);
+  const lastDamageAt = useGameStore((s) => s.lastDamageAt);
   const xpTotal = useGameStore((s) => s.xpTotal);
   const armor = useGameStore((s) => armorPoints(s.armorSlots));
   const [, setTick] = useState(0);
@@ -227,8 +268,12 @@ function SurvivalBars() {
       })()}
       <AirBubbles />
       <div className="flex justify-between">
-        <Meter value={health} kind="heart" />
-        <Meter value={hunger} kind="food" />
+        {/* 受伤后 ~0.5s 心脏白闪（Java 观感）：key 随 lastDamageAt 变化重挂载以重放动画 */}
+        <div key={lastDamageAt} style={lastDamageAt > 0 ? { animation: 'heart-hurt-flash 0.5s ease-out' } : undefined}>
+          <Meter value={health} kind="heart" />
+        </div>
+        {/* 饱和度耗尽且饥饿不满：饥饿图标抖动（Java 该进食提示） */}
+        <Meter value={hunger} kind="food" shake={saturation <= 0 && hunger < MAX_HUNGER} />
       </div>
     </div>
   );
@@ -415,6 +460,9 @@ export function Hud() {
 
   return (
     <div className="pointer-events-none absolute inset-0 z-10 select-none">
+      {/* HUD 动画 keyframes（饥饿抖动 / 心脏白闪） */}
+      <style>{HUD_KEYFRAMES}</style>
+
       {/* 准星 */}
       <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-2xl font-light text-white mix-blend-difference">
         +
@@ -425,6 +473,9 @@ export function Hud() {
 
       {/* 进食读条（MC Java，准星上方） */}
       {!dead && <EatIndicator />}
+
+      {/* 吃完打嗝（监听 lastAteAt） */}
+      <EatBurp />
 
       {/* Boss 血条 */}
       <BossBar />

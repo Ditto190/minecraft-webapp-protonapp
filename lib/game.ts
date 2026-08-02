@@ -81,6 +81,32 @@ export function dayFactorAt(t: number): number {
 /** 受击无敌帧（伤害冷却），damagePlayer 判定用；负无穷表示从未受伤 */
 export const hurtState = { lastAt: Number.NEGATIVE_INFINITY };
 
+/** 相机震动（爆炸等冲击源）：addShake 写入，Player 帧循环消费成衰减噪声偏移 */
+export const cameraShake = { mag: 0, at: 0 };
+
+/** 震动包络时长（ms）：从 at 起线性衰减到 0（Player 消费同款包络） */
+export const SHAKE_DECAY_MS = 600;
+
+/** 叠加一次相机震动：旧震动先按包络折损再累加，封顶 1（连续爆炸不会越叠越猛） */
+export function addShake(mag: number): void {
+  const now = performance.now();
+  const left = cameraShake.mag * Math.max(0, 1 - (now - cameraShake.at) / SHAKE_DECAY_MS);
+  cameraShake.mag = Math.min(1, left + mag);
+  cameraShake.at = now;
+}
+
+/** 进食反馈钩子：最近一次吃完的时间戳（actions.finishEating 写入；Hud 订阅用于播打嗝声） */
+export const eatFeedback = { lastAteAt: 0 };
+
+/** 手部挥动钩子：攻击命中/挥空与放置成功时 Player 写入时间戳（performance.now），HeldItem 读时间戳播挥动动画（松耦合，同 eatFeedback 模式） */
+export const handSwing = { at: 0 };
+
+/** 传送门读秒状态桥：Player 门内读秒每帧写入 0-1 进度（不在门内/死亡/换维度归 0），屏幕紫色渐进 overlay 消费 */
+export const portalState = { charge: 0 };
+
+/** 着火状态桥：玩家正在燃烧的剩余秒数（Player 着火逻辑每帧写入；屏幕火焰覆盖层消费，0 = 未燃烧） */
+export const burningState = { burningLeft: 0 };
+
 /** 生存模式消耗度（MC exhaustion）：满 4 消耗 1 点饱和度/饥饿；wither 凋零 DoT 剩余秒；air 氧气剩余秒（HUD 气泡条，Player 每帧镜像自 survivalMem） */
 export const survivalStats = { exhaustion: 0, wither: 0, air: 15 };
 

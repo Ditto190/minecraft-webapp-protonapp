@@ -5,7 +5,7 @@
 
 import { useEffect, useState } from 'react';
 import { useGameStore } from '@/lib/store';
-import { slotTile } from './slotDisplay';
+import { slotEnchanted, slotTile } from './slotDisplay';
 import { TileIcon } from './TileIcon';
 
 export function CursorItem() {
@@ -30,7 +30,7 @@ export function CursorItem() {
   if (!cursor || !pos) return null;
   return (
     <div className="pointer-events-none fixed z-[100]" style={{ left: pos.x, top: pos.y, transform: 'translate(-50%,-50%)' }}>
-      <TileIcon tile={slotTile(cursor)} size={32} blockId={cursor.kind === 'block' ? cursor.id : undefined} />
+      <TileIcon tile={slotTile(cursor)} size={32} blockId={cursor.kind === 'block' ? cursor.id : undefined} enchanted={slotEnchanted(cursor)} />
       {cursor.kind !== 'tool' && cursor.kind !== 'armor' && cursor.count > 1 && (
         <span className="absolute bottom-0 right-0 text-[10px] font-bold text-white drop-shadow">{cursor.count}</span>
       )}
