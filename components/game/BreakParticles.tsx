@@ -5,11 +5,12 @@ import { useFrame } from '@react-three/fiber';
 import { BoxGeometry, Mesh, Vector3, type Group, type Material } from 'three';
 import { ATLAS_CELL_RATIO, ATLAS_COLS, ATLAS_PAD_RATIO, ATLAS_ROWS, BLOCKS } from '@/lib/blocks';
 import { breakParticles, getActiveWorld, type BreakParticleEvent } from '@/lib/game';
+import { DEATH_SMOKE_TILE } from '@/lib/mobs';
 import { getAtlasMaterials, tilePx } from '@/lib/textures';
 import { useGameStore } from '@/lib/store';
 import { useRendererKind } from './renderer-kind';
 
-const POOL_SIZE = 32;
+const POOL_SIZE = 48; // 32 供破坏碎块 + 余量供死亡白烟（一次死亡 10 粒，不与挖掘抢池）
 const PARTICLES_PER_BREAK = 10;
 const LIFE = 0.85; // 秒
 const GRAVITY = 22;
@@ -24,10 +25,15 @@ interface Particle {
   active: boolean;
   /** 本次激活的基础尺寸（shrink 动画在此基础上缩放） */
   size: number;
+  /** 白烟变体（生物死亡）：白色半透明、无重力上飘、先膨后缩；false = 普通破坏碎块 */
+  smoke: boolean;
 }
 
 /** 模块级粒子池：帧循环里直接改（与 digState/touchInput 同模式） */
 const particlePool: Particle[] = [];
+/** 池共享材质：图集碎块 / 白烟（池初始化时写入；spawn 按事件类型切换 mesh.material，卸载时释放） */
+let sharedMatRef: Material | null = null;
+let smokeMatRef: Material | null = null;
 
 /** BoxGeometry 每面 4 顶点（uv 顺序 (0,1)(1,1)(0,0)(1,0)），按图集子区重写 24 顶点 UV */
 function setGeoUv(geo: BoxGeometry, u0: number, vTop: number, u1: number, vBottom: number): void {
@@ -41,7 +47,8 @@ function setGeoUv(geo: BoxGeometry, u0: number, vTop: number, u1: number, vBotto
   uv.needsUpdate = true;
 }
 
-/** 方块破坏时的碎块粒子：每粒子独立几何（激活时重写 UV 取图集子区），全池共享一份材质/纹理（不再克隆 32 份图集，省 ~147MB 显存），落地反弹后静止消失 */
+/** 方块破坏时的碎块粒子：每粒子独立几何（激活时重写 UV 取图集子区），全池共享一份图集材质（不再克隆 32 份图集，省 ~147MB 显存），落地反弹后静止消失；
+ *  生物死亡白烟变体：tile === DEATH_SMOKE_TILE 的事件切换为白色半透明材质，无重力上飘、先膨后缩（MC 尸体消散 poof） */
 export function BreakParticles() {
   const groupRef = useRef<Group>(null);
   const kind = useRendererKind();
@@ -51,16 +58,17 @@ export function BreakParticles() {
     const group = groupRef.current;
     if (!group) return;
     let cancelled = false;
-    let sharedMat: Material | null = null;
     void getAtlasMaterials(kind).then((mats) => {
       if (cancelled) return;
-      sharedMat = mats.basic({ map: mats.texture, transparent: true });
+      sharedMatRef = mats.basic({ map: mats.texture, transparent: true });
+      // 白烟共享材质：近白半透明、不写深度（团状叠加不互相切块）；所有白烟粒子共用（渐隐用缩放近似，见帧循环）
+      smokeMatRef = mats.basic({ color: '#f5f5f5', transparent: true, opacity: 0.5, depthWrite: false });
       for (let i = 0; i < POOL_SIZE; i++) {
         const geo = new BoxGeometry(1, 1, 1);
-        const mesh = new Mesh(geo, sharedMat);
+        const mesh = new Mesh(geo, sharedMatRef);
         mesh.visible = false;
         group.add(mesh);
-        particlePool.push({ mesh, geo, vel: new Vector3(), spin: new Vector3(), age: 0, active: false, size: BASE_SIZE });
+        particlePool.push({ mesh, geo, vel: new Vector3(), spin: new Vector3(), age: 0, active: false, size: BASE_SIZE, smoke: false });
       }
     });
     return () => {
@@ -70,7 +78,10 @@ export function BreakParticles() {
         p.geo.dispose();
       }
       particlePool.length = 0;
-      sharedMat?.dispose();
+      sharedMatRef?.dispose();
+      smokeMatRef?.dispose();
+      sharedMatRef = null;
+      smokeMatRef = null;
     };
   }, [kind]);
 
@@ -96,6 +107,16 @@ export function BreakParticles() {
       if (p.age >= LIFE) {
         p.active = false;
         p.mesh.visible = false;
+        continue;
+      }
+      if (p.smoke) {
+        // 白烟：无重力上飘 + 轻阻尼；先膨后缩（t→1 缩到 0 代替逐粒子透明渐隐——共享材质不能单独调 opacity）
+        p.vel.multiplyScalar(Math.max(0, 1 - 1.2 * dt));
+        p.mesh.position.x += p.vel.x * dt;
+        p.mesh.position.y += p.vel.y * dt;
+        p.mesh.position.z += p.vel.z * dt;
+        const t = p.age / LIFE;
+        p.mesh.scale.setScalar(p.size * (0.8 + t * 0.8) * (1 - t * t));
         continue;
       }
       p.vel.y -= GRAVITY * dt;
@@ -132,6 +153,8 @@ export function BreakParticles() {
 }
 
 function spawn(e: BreakParticleEvent): void {
+  // 白烟变体（生物死亡，mobs.ts 推 DEATH_SMOKE_TILE）：事件坐标为生物脚部中心，粒子在身体范围内散布上飘
+  const smoke = e.tile === DEATH_SMOKE_TILE;
   const col = e.tile % ATLAS_COLS;
   const row = Math.floor(e.tile / ATLAS_COLS);
   let spawned = 0;
@@ -139,8 +162,23 @@ function spawn(e: BreakParticleEvent): void {
     if (p.active) continue;
     p.active = true;
     p.age = 0;
+    p.smoke = smoke;
     p.size = BASE_SIZE * (0.8 + Math.random() * 0.5); // 尺寸随机，碎块有大有小
     p.mesh.visible = true;
+    if (sharedMatRef && smokeMatRef) p.mesh.material = smoke ? smokeMatRef : sharedMatRef; // 池复用：材质按本次事件类型切回/切换
+    if (smoke) {
+      p.mesh.position.set(
+        e.x + (Math.random() - 0.5) * 0.7,
+        e.y + 0.2 + Math.random() * 1.4,
+        e.z + (Math.random() - 0.5) * 0.7,
+      );
+      p.vel.set((Math.random() - 0.5) * 0.8, 0.9 + Math.random() * 0.8, (Math.random() - 0.5) * 0.8);
+      p.spin.set(0, 0, 0);
+      p.mesh.rotation.set(0, 0, 0);
+      p.mesh.scale.setScalar(p.size * 0.8);
+      if (++spawned >= PARTICLES_PER_BREAK) break;
+      continue;
+    }
     p.mesh.position.set(
       e.x + 0.25 + Math.random() * 0.5,
       e.y + 0.25 + Math.random() * 0.5,

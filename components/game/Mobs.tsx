@@ -2,9 +2,9 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useFrame } from '@react-three/fiber';
-import { BoxGeometry, Group, Mesh, Vector3, type Material } from 'three';
+import { Box3, BoxGeometry, Group, Mesh, Vector3, type Material } from 'three';
 import { playerPosition } from '@/lib/game';
-import { arrows, clearMobs, mobs, type Mob, type MobType } from '@/lib/mobs';
+import { arrows, clearMobs, MOB_DEATH_DURATION, mobs, type Mob, type MobType } from '@/lib/mobs';
 import { professionOf, PROFESSION_INFO, type Profession } from '@/lib/trading';
 import { useGameStore } from '@/lib/store';
 import { getAtlasMaterials, type AtlasMaterials } from '@/lib/textures';
@@ -83,6 +83,8 @@ const golemVineGeo = new BoxGeometry(0.14, 0.3, 0.04);
 const villagerHeadGeo = new BoxGeometry(0.52, 0.46, 0.46);
 const villagerNoseGeo = new BoxGeometry(0.1, 0.24, 0.12);
 const villagerArmsGeo = new BoxGeometry(0.56, 0.2, 0.3);
+// 受击红闪壳：单位盒按各生物部件包围盒缩放（略大于本体），平时隐藏（共享纯色材质不能染红，Java hurt flash 用罩壳近似）
+const flashGeo = new BoxGeometry(1, 1, 1);
 
 type MobMats = Record<string, Material>;
 
@@ -161,6 +163,8 @@ function buildMobMats(mats: AtlasMaterials): MobMats {
     robe: l('#7a5230'),
     villagerSkin: l('#b58a6a'),
     arrow: l('#a8a8a8'),
+    // 受击红闪罩壳：半透明红、无光照（夜里也可见，对齐 Java hurt flash）、不写深度（贴着本体避免 z-fight）
+    hurtFlash: mats.basic({ color: '#ff2a2a', transparent: true, opacity: 0.45, depthWrite: false }),
     enderEye: l('#2fae5f'), // 末影之眼（绿）
     // 村民职业袍色（交易界面同色）
     ...Object.fromEntries(Object.entries(PROFESSION_INFO).map(([p, info]) => [`robe_${p}`, l(info.robe)])),
@@ -437,6 +441,15 @@ function makeMobMesh(type: MobType, mats: MobMats, mob?: Mob): Group {
       addPart(g, golemVineGeo, mats.golemVine, 0.34, 1.7, 0.28);
       break;
   }
+  // 受击红闪壳：按部件包围盒生成略大的外套盒，平时隐藏；存 userData.flash 供帧同步显隐（含死亡态全程）
+  const flash = new Mesh(flashGeo, mats.hurtFlash);
+  const bb = new Box3().setFromObject(g);
+  bb.getCenter(flash.position);
+  bb.getSize(flash.scale);
+  flash.scale.addScalar(0.12); // 罩壳比本体略大一圈
+  flash.visible = false;
+  g.add(flash);
+  g.userData.flash = flash;
   return g;
 }
 
@@ -447,6 +460,8 @@ const seenScratch = new Set<string>();
 const seenArrowsScratch = new Set<number>();
 /** 敌对生物类型（朝向玩家；其余朝移动方向）。模块级常量，避免每生物每帧分配数组字面量 */
 const HOSTILE_TYPES: readonly MobType[] = ['zombie', 'skeleton', 'spider', 'creeper', 'phantom', 'iron_golem'];
+/** 受击红闪阈值（秒）：hurtImmune 从 0.5 倒数，剩余 > 0.25 期间显示红壳 ≈ 受击后 0.25s 红闪（Java hurt flash） */
+const HURT_FLASH_LEFT = 0.25;
 
 /** 生物渲染与 AI 驱动（仅生存模式；网格按 id 复用） */
 export function Mobs() {
@@ -502,6 +517,17 @@ export function Mobs() {
         mesh.scale.setScalar((m.slimeSize ?? 4) * 0.35);
       } else {
         mesh.scale.setScalar(m.baby ? 0.55 : 1);
+      }
+      // 受击红闪（0.25s；死亡态全程保持红，MC 尸体倒地期间为红）与死亡倒地动画（绕 z 倒 90° + 缓沉，结束白烟见 mobs.ts）
+      const flash = mesh.userData.flash as Mesh | undefined;
+      const dying = m.deathTimer !== undefined;
+      if (flash) flash.visible = dying || (m.hurtImmune ?? 0) > HURT_FLASH_LEFT;
+      if (dying) {
+        const p = 1 - Math.max(0, m.deathTimer ?? 0) / MOB_DEATH_DURATION; // 进度 0 → 1
+        mesh.rotation.z = -(Math.PI / 2) * Math.min(1, p * 1.5); // 前 2/3 时间倒完，余下躺地
+        mesh.position.y -= p * 0.3; // 缓沉，配合结束白烟掩盖消失（共享材质无法逐生物调透明）
+      } else if (mesh.rotation.z !== 0) {
+        mesh.rotation.z = 0; // 网格按 id 复用：非死亡态复位
       }
       }
       for (const [id, mesh] of meshMap.current) {
