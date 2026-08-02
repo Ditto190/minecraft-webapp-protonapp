@@ -3,16 +3,18 @@
 import { AIR, BLOCK_BY_KEY, COBBLE, DIRT, GLASS, LOG, PLANKS, WATER, WHEAT_CROP_0, type BlockId } from './blocks';
 import { hash2, mulberry32, SEA_LEVEL, type Terrain } from './noise';
 import { getStorage } from './storage';
-import { CHUNK_SIZE, localIndex, put } from './grid';
+import { CHUNK_SIZE, localIndex, put, WORLD_HEIGHT } from './grid';
 
 const REGION = 64; // 结构区域边长（格）
 
-export type StructureKind = 'village' | 'desert_village' | 'savanna_village' | 'taiga_village' | 'watchtower' | 'igloo' | 'desert_temple' | 'jungle_temple' | 'ruined_portal' | 'ocean_monument' | 'shipwreck';
+export type StructureKind = 'village' | 'desert_village' | 'savanna_village' | 'taiga_village' | 'watchtower' | 'igloo' | 'desert_temple' | 'jungle_temple' | 'ruined_portal' | 'ocean_monument' | 'shipwreck' | 'buried_treasure';
 
 export interface StructureSpot {
   kind: StructureKind;
   x: number;
   z: number;
+  /** 冰屋：是否带地下室（Java 50% 概率） */
+  basement?: boolean;
 }
 
 export interface Structure {
@@ -40,12 +42,27 @@ function flatEnough(terrain: Terrain, x: number, z: number): boolean {
   return Math.max(...hs) - Math.min(...hs) <= 6;
 }
 
-/** 该区域生成什么结构（按群系与区域哈希；河流不生成，海洋出遗迹与沉船） */
+/** 海岸带：本列贴近海平面（滩涂高度带）且 12 格内有海（Java 埋藏的宝藏只出海滩群系；本项目无沙滩群系，用海岸带近似） */
+function isCoast(terrain: Terrain, x: number, z: number): boolean {
+  const h = terrain.heightAt(x, z);
+  if (h < SEA_LEVEL - 1 || h > SEA_LEVEL + 3) return false;
+  for (const [ox, oz] of [[12, 0], [-12, 0], [0, 12], [0, -12], [9, 9], [-9, -9]] as const) {
+    if (terrain.heightAt(x + ox, z + oz) < SEA_LEVEL) return true;
+  }
+  return false;
+}
+
+/** 该区域生成什么结构（按群系与区域哈希；河流不生成，海洋出遗迹与沉船，海岸带出埋藏的宝藏） */
 export function structureAt(seedHash: number, terrain: Terrain, rx: number, rz: number): StructureSpot | null {
   const x = rx * REGION + 32;
   const z = rz * REGION + 32;
   const biome = terrain.biomeAt(x, z);
   const h = terrain.heightAt(x, z);
+  // 埋藏的宝藏：海岸带稀有生成（独立盐哈希，不吃其他结构配额；Java 海滩约每 chunk 1%，按区域 16 chunk 折 15%）
+  // 判在近水线门之前：滩涂高度带（h ≤ SEA_LEVEL+1）会被下方陆地结构门挡掉
+  if (regionHash(seedHash, rx, rz, 11) < 0.15 && isCoast(terrain, x, z)) {
+    return { kind: 'buried_treasure', x, z };
+  }
   // 近水线以下不出陆地结构（海洋结构有自己的深度门）
   if (h <= SEA_LEVEL + 1 && biome !== 'ocean') return null;
   if (!flatEnough(terrain, x, z)) return null;
@@ -71,7 +88,7 @@ export function structureAt(seedHash: number, terrain: Terrain, rx: number, rz: 
       return null;
     case 'snowy':
       if (r < 0.06) return { kind: 'taiga_village', x, z }; // 雪原村庄用云杉材质
-      if (r < 0.1) return { kind: 'igloo', x, z };
+      if (r < 0.1) return { kind: 'igloo', x, z, basement: regionHash(seedHash, rx, rz, 13) < 0.5 }; // Java：50% 冰屋带地下室
       return null;
     case 'desert':
       if (r < 0.09) return { kind: 'desert_village', x, z };
@@ -191,6 +208,7 @@ const VILLAGE_MATS: Record<StructureKind, VillageMats> = {
   ruined_portal: PLAINS_MATS,
   ocean_monument: PLAINS_MATS,
   shipwreck: PLAINS_MATS,
+  buried_treasure: PLAINS_MATS,
 };
 
 function putBase(data: Uint16Array, cx: number, cz: number, x: number, y: number, z: number, id: number): void {
@@ -257,7 +275,12 @@ function writeFarm(s: Structure, terrain: Terrain, cx: number, cz: number, data:
       } else {
         put(data, cx, cz, px, gy, pz, moist);
         const stage = Math.floor(hash2(seedHash, px, pz) * 8);
-        put(data, cx, cz, px, gy + 1, pz, WHEAT_CROP_0 + stage);
+        // 仅补空气格：目标已有方块（如树干）时不放，避免截断树干留悬空树
+        const lx = px - cx * CHUNK_SIZE;
+        const lz = pz - cz * CHUNK_SIZE;
+        if (lx >= 0 && lx < CHUNK_SIZE && lz >= 0 && lz < CHUNK_SIZE && gy + 1 < WORLD_HEIGHT && data[localIndex(lx, gy + 1, lz)] === AIR) {
+          put(data, cx, cz, px, gy + 1, pz, WHEAT_CROP_0 + stage);
+        }
       }
     }
   }
@@ -332,8 +355,8 @@ function writeWatchtower(spot: StructureSpot, terrain: Terrain, cx: number, cz: 
   }
 }
 
-/** 冰屋：雪块穹顶 + 南向门洞 + 冰窗 */
-function writeIgloo(spot: StructureSpot, terrain: Terrain, cx: number, cz: number, data: Uint16Array): void {
+/** 冰屋：雪块穹顶 + 南向门洞 + 冰窗；50% 带地下室（Java：竖井下石砖密室，宝箱必有金苹果） */
+function writeIgloo(spot: StructureSpot, terrain: Terrain, cx: number, cz: number, data: Uint16Array, seedHash: number): void {
   const snow = BLOCK_BY_KEY.snow_block.id;
   const ice = BLOCK_BY_KEY.ice.id;
   const cx0 = spot.x;
@@ -360,6 +383,39 @@ function writeIgloo(spot: StructureSpot, terrain: Terrain, cx: number, cz: numbe
       put(data, cx, cz, cx0 + dx, by + 3, cz0 + R + dz - 1, snow);
     }
   }
+  if (!spot.basement) return;
+  // 地下室：冰屋内 2 宽踏步竖井下石砖密室（无梯子方块，踏步代替梯子；村民/僵尸村民 mob 不存在，只放静态内容）
+  const bricks = K('stone_bricks');
+  const y0 = by - 13; // 密室地板层
+  // 墙面混苔石砖/裂纹石砖（按格坐标确定性）
+  const wall = (wx: number, wz: number) => {
+    const r = hash2(seedHash ^ 0x7c4b1e, wx, wz);
+    return r < 0.3 ? K('mossy_stone_bricks') : r < 0.4 ? K('cracked_stone_bricks') : bricks;
+  };
+  // 石砖密室：7×7 壳、3 高内空（南墙 z=-13 留由楼梯打通）
+  for (let x = -3; x <= 3; x++) {
+    for (let z = -19; z <= -13; z++) {
+      put(data, cx, cz, cx0 + x, y0, cz0 + z, bricks); // 地板
+      put(data, cx, cz, cx0 + x, y0 + 4, cz0 + z, bricks); // 天花
+      const edge = Math.abs(x) === 3 || z === -19 || z === -13;
+      for (let dy = 1; dy <= 3; dy++) {
+        put(data, cx, cz, cx0 + x, y0 + dy, cz0 + z, edge ? wall(cx0 + x, cz0 + z) : AIR);
+      }
+    }
+  }
+  // 踏步竖井：从穹顶地板（z=-2 起）向北逐格下沉 12 格，末端打通密室南墙（写于密室之后，覆盖墙面）
+  for (let i = 0; i <= 11; i++) {
+    for (const sx of [-1, 0] as const) {
+      put(data, cx, cz, cx0 + sx, by - 1 - i, cz0 - 2 - i, AIR); // 踏步上方
+      put(data, cx, cz, cx0 + sx, by - i, cz0 - 2 - i, AIR); // 头部空间
+    }
+  }
+  // 密室内容：宝箱（必有金苹果）+ 酿造台 + 床 + 火把照明
+  put(data, cx, cz, cx0 - 1, y0 + 1, cz0 - 18, K('chest'));
+  fillChest(seedHash, cx0 - 1, y0 + 1, cz0 - 18, IGLOO_LOOT);
+  put(data, cx, cz, cx0 + 1, y0 + 1, cz0 - 18, K('brewing_stand'));
+  put(data, cx, cz, cx0 - 2, y0 + 1, cz0 - 15, K('red_bed'));
+  put(data, cx, cz, cx0 + 2, y0 + 1, cz0 - 14, K('torch'));
 }
 
 // ——— 神庙战利品（确定性预填宝箱；storages 随存档持久化） ———
@@ -372,19 +428,26 @@ const DESERT_LOOT: LootEntry[] = [
   ['emerald', 1, 2, 0.25],
   ['bone', 1, 5, 0.6],
   ['string', 1, 4, 0.6],
+  ['gunpowder', 1, 5, 0.6],
+  ['rotten_flesh', 1, 5, 0.6],
   ['wheat', 1, 4, 0.5],
 ];
 const JUNGLE_LOOT: LootEntry[] = [
   ['gold_ingot', 1, 3, 0.5],
   ['iron_ingot', 1, 3, 0.5],
   ['bone', 1, 4, 0.6],
-  ['arrow', 2, 6, 0.6],
-  ['cooked_pork', 1, 2, 0.4],
+];
+const IGLOO_LOOT: LootEntry[] = [
+  // Java 冰屋地下室宝箱必有 1 个金苹果（其余杂项从简）
+  ['golden_apple', 1, 1, 1.0],
+  ['gold_nugget', 1, 3, 0.6],
+  ['coal', 1, 4, 0.6],
+  ['wheat', 1, 3, 0.5],
+  ['rotten_flesh', 1, 4, 0.5],
 ];
 const PORTAL_LOOT: LootEntry[] = [
   ['gold_ingot', 2, 6, 0.8],
   ['iron_ingot', 1, 3, 0.5],
-  ['emerald', 1, 2, 0.3],
 ];
 const SHIP_LOOT: LootEntry[] = [
   ['iron_ingot', 1, 4, 0.6],
@@ -392,6 +455,22 @@ const SHIP_LOOT: LootEntry[] = [
   ['diamond', 1, 1, 0.2],
   ['leather', 1, 3, 0.5],
   ['emerald', 1, 2, 0.25],
+];
+const SHIP_MAP_LOOT: LootEntry[] = [
+  // Java 沉船地图箱（尾舱）必出藏宝图；纸/书/羽毛为伴生杂项（指南针/钟表项目未做，从缺）
+  ['treasure_map', 1, 1, 1.0],
+  ['paper', 1, 3, 0.9],
+  ['feather', 1, 3, 0.6],
+  ['book', 1, 2, 0.4],
+];
+const TREASURE_LOOT: LootEntry[] = [
+  // Java 埋藏的宝藏必出海洋之心——项目无 heart_of_the_sea 物品（潮涌核心体系未做），从缺；
+  // 其余对齐 Java 战利品池：铁/金/钻石/熟鲑鱼/海晶砂粒（TNT 走 fillChest 的 blockExtra）
+  ['iron_ingot', 2, 4, 0.9],
+  ['gold_ingot', 1, 3, 0.7],
+  ['cooked_salmon', 1, 3, 0.75],
+  ['prismarine_crystals', 1, 3, 0.6],
+  ['diamond', 1, 2, 0.5],
 ];
 
 /** 宝箱战利品预填（只填全空的新箱子；已初始化/被开过的跳过——跨 chunk 生成与重载均幂等） */
@@ -441,6 +520,8 @@ function writeDesertTemple(spot: StructureSpot, terrain: Terrain, cx: number, cz
       for (let dy = 1; dy <= 4; dy++) put(data, cx, cz, bx + x, by + dy, bz + z, AIR);
     }
   }
+  // 石头压力板：蓝色地板正上方（TNT 陷阱触发器，MC 神殿标配）
+  put(data, cx, cz, bx, by + 1, bz, K('stone_pressure_plate'));
   // 南向入口通道 3 宽
   for (let x = -1; x <= 1; x++) for (let z = 3; z <= 10; z++) for (let dy = 1; dy <= 3; dy++) put(data, cx, cz, bx + x, by + dy, bz + z, AIR);
   // 密藏坑：室底下 3 格，四角宝箱 + 室底下 TNT 层（MC 陷阱）
@@ -541,7 +622,7 @@ function writeOceanMonument(spot: StructureSpot, terrain: Terrain, cx: number, c
       const edge = Math.abs(x) === W || Math.abs(z) === W;
       for (let dy = 1; dy <= 7; dy++) {
         if (!edge) {
-          put(data, cx, cz, bx + x, by + dy, bz + z, AIR);
+          put(data, cx, cz, bx + x, by + dy, bz + z, WATER); // 殿内灌水（整栋没入海中，不留干燥气穴）
           continue;
         }
         const win = dy >= 3 && dy <= 4 && ((Math.abs(x) % 6) <= 1 && Math.abs(z) === W || (Math.abs(z) % 6) <= 1 && Math.abs(x) === W);
@@ -578,7 +659,7 @@ function writeOceanMonument(spot: StructureSpot, terrain: Terrain, cx: number, c
   }
 }
 
-/** 沉船：木船壳（尖头收分）+ 甲板 + 桅杆 + 尾舱宝箱 */
+/** 沉船：木船壳（尖头收分）+ 甲板 + 桅杆 + 至多 3 个宝箱（Java：补给箱在船头、地图箱在尾舱、宝藏箱在主舱甲板下） */
 function writeShipwreck(spot: StructureSpot, terrain: Terrain, cx: number, cz: number, data: Uint16Array, seedHash: number): void {
   const spruce = hash2(seedHash ^ 0x51a1b2, spot.x, spot.z) < 0.5;
   const planks = K(spruce ? 'spruce_planks' : 'planks');
@@ -591,10 +672,10 @@ function writeShipwreck(spot: StructureSpot, terrain: Terrain, cx: number, cz: n
   for (let i = 0; i < 9; i++) {
     const hw = HALF[i];
     for (let dz = -hw; dz <= hw; dz++) {
-      // 船底与两舷（2 高）；舱内留空，甲板后铺
+      // 船底与两舷（2 高）；舱内灌水（沉船泡在水里，不留干燥气穴），甲板后铺
       putBase(data, cx, cz, bx + i - 4, by, bz + dz, planks);
       const rim = Math.abs(dz) === hw;
-      for (let dy = 1; dy <= 2; dy++) put(data, cx, cz, bx + i - 4, by + dy, bz + dz, rim ? planks : AIR);
+      for (let dy = 1; dy <= 2; dy++) put(data, cx, cz, bx + i - 4, by + dy, bz + dz, rim ? planks : WATER);
     }
   }
   // 甲板铺满（by+2 层内侧为甲板面）
@@ -604,17 +685,74 @@ function writeShipwreck(spot: StructureSpot, terrain: Terrain, cx: number, cz: n
   // 桅杆：原木 9 高 + 顶横杆
   for (let dy = 3; dy <= 10; dy++) put(data, cx, cz, bx, by + dy, bz, log);
   for (let dz = -2; dz <= 2; dz++) put(data, cx, cz, bx, by + 8, bz + dz, log);
-  // 尾舱 3×3×3 + 宝箱
+  // 尾舱 3×3×3 + 地图箱（Java 地图箱在尾舱，必出藏宝图）
   for (let dx = 2; dx <= 4; dx++) {
     for (let dz = -1; dz <= 1; dz++) {
       for (let dy = 3; dy <= 5; dy++) {
         const edge = dx === 4 || Math.abs(dz) === 1 || dy === 5;
-        put(data, cx, cz, bx + dx, by + dy, bz + dz, edge ? planks : AIR);
+        put(data, cx, cz, bx + dx, by + dy, bz + dz, edge ? planks : WATER); // 尾舱同样灌水
       }
     }
   }
   put(data, cx, cz, bx + 3, by + 3, bz, K('chest'));
-  fillChest(seedHash, bx + 3, by + 3, bz, SHIP_LOOT);
+  fillChest(seedHash, bx + 3, by + 3, bz, SHIP_MAP_LOOT);
+  // 补给箱：船头甲板上（Java 补给箱在船头；战利品沿用 SHIP_LOOT）
+  put(data, cx, cz, bx - 3, by + 3, bz, K('chest'));
+  fillChest(seedHash, bx - 3, by + 3, bz, SHIP_LOOT);
+  // 宝藏箱：主舱甲板下（压在舱底，挖穿甲板可见；战利品沿用 SHIP_LOOT）
+  put(data, cx, cz, bx, by + 1, bz, K('chest'));
+  fillChest(seedHash, bx, by + 1, bz, SHIP_LOOT);
+}
+
+/** 埋藏的宝藏箱坐标：地表下 1-3 格（Java 埋深同为数格沙土；箱占格被地表方块覆盖） */
+export function buriedTreasureChest(seedHash: number, terrain: Terrain, spot: StructureSpot): { x: number; y: number; z: number } {
+  const depth = 1 + Math.floor(hash2(seedHash ^ 0x7a11e5, spot.x, spot.z) * 3);
+  return { x: spot.x, y: terrain.heightAt(spot.x, spot.z) - depth, z: spot.z };
+}
+
+/** 埋藏的宝藏：海岸带地表下埋 1 个宝箱（战利品见 TREASURE_LOOT，Java 对齐组合） */
+function writeBuriedTreasure(spot: StructureSpot, terrain: Terrain, cx: number, cz: number, data: Uint16Array, seedHash: number): void {
+  const c = buriedTreasureChest(seedHash, terrain, spot);
+  put(data, cx, cz, c.x, c.y, c.z, K('chest'));
+  fillChest(seedHash, c.x, c.y, c.z, TREASURE_LOOT, [K('tnt'), 1, 2, 0.6]);
+}
+
+// ——— 藏宝图导航（Java 藏宝图是静态地图物品；本项目简化为右键文案指引，见 actions.ts tryUseHeldItem） ———
+
+/** 已开启的宝藏区域 key（"rx,rz"；内存集合不持久化——重载存档后藏宝图会重新指向开过的宝藏，有意简化） */
+export const openedTreasures = new Set<string>();
+
+/** 坐标处若是埋藏的宝藏箱则标记已开（开宝箱时调用；已开的宝藏藏宝图不再指向） */
+export function markTreasureOpened(seedHash: number, terrain: Terrain, x: number, y: number, z: number): void {
+  const rx = Math.floor(x / REGION);
+  const rz = Math.floor(z / REGION);
+  const spot = structureAt(seedHash, terrain, rx, rz);
+  if (spot?.kind !== 'buried_treasure') return;
+  const c = buriedTreasureChest(seedHash, terrain, spot);
+  if (c.x === x && c.y === y && c.z === z) openedTreasures.add(`${rx},${rz}`);
+}
+
+/** 距 (x,z) 最近的未开启埋藏宝藏箱（藏宝图指向；扫描 ±maxR 区域，找不到返回 null） */
+export function nearestBuriedTreasure(seedHash: number, terrain: Terrain, x: number, z: number, maxR = 8): { x: number; y: number; z: number } | null {
+  const rx0 = Math.floor(x / REGION);
+  const rz0 = Math.floor(z / REGION);
+  let best: { x: number; y: number; z: number } | null = null;
+  let bd = Infinity;
+  for (let drx = -maxR; drx <= maxR; drx++) {
+    for (let drz = -maxR; drz <= maxR; drz++) {
+      const rx = rx0 + drx;
+      const rz = rz0 + drz;
+      if (openedTreasures.has(`${rx},${rz}`)) continue;
+      const spot = structureAt(seedHash, terrain, rx, rz);
+      if (spot?.kind !== 'buried_treasure') continue;
+      const d = (spot.x - x) ** 2 + (spot.z - z) ** 2;
+      if (d < bd) {
+        bd = d;
+        best = buriedTreasureChest(seedHash, terrain, spot);
+      }
+    }
+  }
+  return best;
 }
 
 /** 生成本 chunk 覆盖范围内的结构（检查本区域及相邻区域） */
@@ -652,8 +790,10 @@ export function applyStructures(seedHash: number, terrain: Terrain, cx: number, 
         writeOceanMonument(spot, terrain, cx, cz, data, seedHash);
       } else if (spot.kind === 'shipwreck') {
         writeShipwreck(spot, terrain, cx, cz, data, seedHash);
+      } else if (spot.kind === 'buried_treasure') {
+        writeBuriedTreasure(spot, terrain, cx, cz, data, seedHash);
       } else {
-        writeIgloo(spot, terrain, cx, cz, data);
+        writeIgloo(spot, terrain, cx, cz, data, seedHash);
       }
     }
   }

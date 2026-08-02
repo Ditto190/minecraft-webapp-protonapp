@@ -9,7 +9,7 @@ import { notifyRedstone } from './redstone';
 import { createTerrain, hash2, hashString, mulberry32, SEA_LEVEL, type Biome, type Terrain } from './noise';
 import { generateNetherChunk } from './nether';
 import { generateEndChunk } from './end';
-import { applyOres } from './oregen';
+import { applyAirExposure, applyOres } from './oregen';
 import { applyGeodes } from './geodes';
 import { cascadeLight } from './lights';
 import { applyStructures } from './structures';
@@ -178,6 +178,10 @@ export function generateChunk(terrain: Terrain, cx: number, cz: number, data: Ui
       }
     }
   }
+  // 矿石空气暴露削减（Java discardChanceOnAirExposure）：洞壁上裸露的埋藏型矿（下层煤/深层金/钻石/青金石）
+  // 按概率回退为母岩。须在洞穴雕刻与灌水/岩浆之后（只认空气格，水/岩浆填充的洞腔不算暴露），且在
+  // 洞穴群系装饰之前（装饰只填空气格与地表地板，不影响矿格邻接关系）
+  applyAirExposure(seedHash, terrain, cx, cz, data);
   // 洞穴群系装饰（滴水石洞/繁茂洞穴）：洞地板铺滴水石/苔藓并立笋或杜鹃，洞顶倒挂钟乳/洞穴藤蔓
   for (let x = 0; x < CHUNK_SIZE; x++) {
     for (let z = 0; z < CHUNK_SIZE; z++) {
@@ -280,10 +284,10 @@ export function generateChunk(terrain: Terrain, cx: number, cz: number, data: Ui
       const h = cachedHeightAt(wx, wz);
       if (h < 0) continue;
       const surf = data[localIndex(x, h, z)];
-      // 睡莲：沼泽/丛林未封冻的水面（浮在水面之上的空气格）
+      // 睡莲：仅沼泽未封冻的水面（Java 睡莲为沼泽特产；浮在水面之上的空气格）
       if (h < SEA_LEVEL) {
         if (
-          (biome === 'swamp' || biome === 'jungle') &&
+          biome === 'swamp' &&
           data[localIndex(x, SEA_LEVEL, z)] === WATER &&
           data[localIndex(x, SEA_LEVEL + 1, z)] === AIR &&
           hash2(seedHash ^ 0x1e7b3d, wx, wz) < 0.08
@@ -337,17 +341,13 @@ export function generateChunk(terrain: Terrain, cx: number, cz: number, data: Ui
         case 'forest':
         case 'birch_forest': {
           if (surf !== GRASS || r >= 0.02) break;
+          // Java 蓝兰花仅沼泽生成，森林不出；末位用滨菊（Java 森林常见花）
           data[aboveI] =
-            pick < 0.5 ? K('fern') : pick < 0.65 ? K('short_grass') : pick < 0.8 ? K('poppy') : pick < 0.9 ? K('dandelion') : K('blue_orchid');
+            pick < 0.5 ? K('fern') : pick < 0.65 ? K('short_grass') : pick < 0.8 ? K('poppy') : pick < 0.9 ? K('dandelion') : K('oxeye_daisy');
           break;
         }
         case 'taiga': {
           if (surf !== GRASS && surf !== PODZOL) break;
-          // 薄雪覆盖（针叶林寒带地面）
-          if (hash2(seedHash ^ 0x5e11c4, wx, wz) < 0.25) {
-            data[aboveI] = K('snow_layer');
-            break;
-          }
           if (r >= 0.05) break;
           // 大型蕨（双格，针叶林标志）
           if (pick < 0.2 && h + 2 < WORLD_HEIGHT && data[localIndex(x, h + 2, z)] === AIR) {

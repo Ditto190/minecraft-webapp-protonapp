@@ -3,8 +3,8 @@
 // 煤 0-96 峰 48（山地增量）· 铁双峰（主峰 20 + 山地 80）· 铜峰 48 · 金 y<16（恶地 24-84 富矿）
 // 青金石峰 20 · 红石 y<16 · 钻石 y<16 越深越多 · 绿宝石仅山地 y>40 · 深板岩带 y≤16
 
-import { BLOCK_BY_KEY } from './blocks';
-import { mulberry32, type Biome, type Terrain } from './noise';
+import { AIR, BLOCK_BY_KEY, BLOCKS } from './blocks';
+import { hash2, mulberry32, SEA_LEVEL, type Biome, type Terrain } from './noise';
 import { CHUNK_SIZE, WORLD_HEIGHT, localIndex } from './grid';
 
 const STONE = BLOCK_BY_KEY.stone.id;
@@ -27,6 +27,8 @@ interface Vein {
   hosts?: number[];
   /** 限定群系（缺省全群系） */
   only?: Biome[];
+  /** Java discardChanceOnAirExposure：暴露于空气（6 邻有空气格）的矿块按此概率回退为母岩（缺省 0 = 不削减） */
+  airDiscard?: number;
 }
 
 const KEY = (k: string) => BLOCK_BY_KEY[k].id;
@@ -41,8 +43,8 @@ const VEINS: Vein[] = [
   { id: KEY('andesite'), count: [3, 6], size: [8, 16], minY: 0, maxY: 110 },
   { id: KEY('clay'), count: [1, 3], size: [4, 8], minY: 30, maxY: 44, hosts: [STONE, KEY('dirt'), KEY('sand')] },
   { id: KEY('tuff'), count: [1, 2], size: [6, 12], minY: 0, maxY: 24 },
-  // 煤：0-96 三角峰 48；山地附加富集带（MC：山地煤明显增多）
-  { ...ORE('coal_ore'), count: [10, 16], size: [4, 10], minY: 0, maxY: 96, shape: 'triangle' },
+  // 煤：0-96 三角峰 48（Java 下层煤为埋藏型，空气暴露丢弃率 0.5）；山地附加富集带（MC：山地煤明显增多，上层煤无削减）
+  { ...ORE('coal_ore'), count: [10, 16], size: [4, 10], minY: 0, maxY: 96, shape: 'triangle', airDiscard: 0.5 },
   { ...ORE('coal_ore'), count: [4, 8], size: [4, 9], minY: 56, maxY: 110, only: ['mountains'] },
   // 铁：主峰 20（4-36 三角）+ 山地次峰 80（56-104 三角）；深层偶见粗铁块团（MC 大矿脉标志）
   { ...ORE('iron_ore'), count: [6, 10], size: [3, 7], minY: 4, maxY: 36, shape: 'triangle' },
@@ -50,15 +52,15 @@ const VEINS: Vein[] = [
   { id: KEY('raw_iron_block'), count: [0, 1], size: [2, 4], minY: 0, maxY: 16, hosts: [DEEPSLATE] },
   // 铜：8-72 三角峰 48
   { ...ORE('copper_ore'), count: [4, 7], size: [3, 8], minY: 24, maxY: 72, shape: 'triangle' },
-  // 金：深层 y<16；恶地富矿带 24-84（MC 恶地淘金特性）
-  { ...ORE('gold_ore'), count: [1, 3], size: [2, 5], minY: 0, maxY: 16 },
+  // 金：深层 y<16（埋藏型，暴露丢弃率 0.5）；恶地富矿带 24-84（MC 恶地淘金特性，露天金矿无削减）
+  { ...ORE('gold_ore'), count: [1, 3], size: [2, 5], minY: 0, maxY: 16, airDiscard: 0.5 },
   { ...ORE('gold_ore'), count: [3, 6], size: [3, 7], minY: 24, maxY: 84, only: ['badlands'] },
-  // 青金石：0-40 三角峰 20
-  { ...ORE('lapis_ore'), count: [1, 2], size: [2, 4], minY: 0, maxY: 40, shape: 'triangle' },
+  // 青金石：0-40 三角峰 20（埋藏型：绝不裸露，丢弃率 1.0）
+  { ...ORE('lapis_ore'), count: [1, 2], size: [2, 4], minY: 0, maxY: 40, shape: 'triangle', airDiscard: 1.0 },
   // 红石：y<16
   { ...ORE('redstone_ore'), count: [2, 4], size: [3, 6], minY: 0, maxY: 16 },
-  // 钻石：y<16 越深越多
-  { ...ORE('diamond_ore'), count: [1, 3], size: [2, 5], minY: 0, maxY: 16, shape: 'deep' },
+  // 钻石：y<16 越深越多（埋藏型：绝不裸露，丢弃率 1.0）
+  { ...ORE('diamond_ore'), count: [1, 3], size: [2, 5], minY: 0, maxY: 16, shape: 'deep', airDiscard: 1.0 },
   // 绿宝石：仅山地，y 40-110（MC 特性）
   { ...ORE('emerald_ore'), count: [1, 3], size: [1, 2], minY: 40, maxY: 110, only: ['mountains'] },
 ];
@@ -123,6 +125,73 @@ export function applyOres(seedHash: number, terrain: Terrain, cx: number, cz: nu
         x += Math.floor(rand() * 3) - 1;
         y += Math.floor(rand() * 3) - 1;
         z += Math.floor(rand() * 3) - 1;
+      }
+    }
+  }
+}
+
+// 深层岩浆湖面高度（与 world.ts 的 LAVA_LAKE_TOP 保持一致；跨界邻格推断空气时用）
+const LAVA_LAKE_TOP = 10;
+
+/** 带空气暴露削减的矿块 id → 丢弃概率（普通与深层变体同率） */
+const AIR_DISCARD: ReadonlyMap<number, number> = (() => {
+  const m = new Map<number, number>();
+  for (const v of VEINS) {
+    if (!v.airDiscard) continue;
+    m.set(v.id, v.airDiscard);
+    if (v.dsId) m.set(v.dsId, v.airDiscard);
+  }
+  return m;
+})();
+
+/**
+ * 洞穴雕刻与灌水/岩浆完成后调用：暴露于空气（6 邻有空气格）的埋藏型矿块按概率回退为母岩
+ * （Java discardChanceOnAirExposure：钻石/青金石 1.0 绝不裸露，深层金/下层煤 0.5）。
+ * 只认空气格——被水/岩浆填充的洞腔不算暴露（Java 一致）。
+ * 跨界邻格不读邻 chunk（生成期触发邻 chunk 隐式生成会链式扩散），与甘蔗/仙人掌一致按地形推断：
+ * 该格被洞穴雕空且不在灌水/岩浆填充带内即视为空气。
+ */
+export function applyAirExposure(seedHash: number, terrain: Terrain, cx: number, cz: number, data: Uint16Array): void {
+  if (AIR_DISCARD.size === 0) return;
+  // 跨界邻格是否空气（仅水平向可能出界；垂直向必在本 chunk 内）
+  const neighborAir = (wx: number, wz: number, nx: number, y: number, nz: number): boolean => {
+    const nh = terrain.heightAt(nx, nz);
+    if (nh < 0 || y < 4 || y > nh) return false; // 洞穴雕刻范围 y∈[4,h]
+    if (!terrain.caveAt(nx, y, nz, nh)) return false;
+    if (nh < SEA_LEVEL && y <= SEA_LEVEL) return false; // 海底洞穴灌水（world.ts 海平面以下洞腔回填水）
+    if (terrain.aquiferAt(nx, nz) && y >= 5 && y <= Math.min(nh - 4, SEA_LEVEL - 2)) return false; // 地下含水层
+    if (y <= LAVA_LAKE_TOP) return false; // 深层岩浆湖
+    return true;
+  };
+  for (let x = 0; x < CHUNK_SIZE; x++) {
+    for (let z = 0; z < CHUNK_SIZE; z++) {
+      const wx = cx * CHUNK_SIZE + x;
+      const wz = cz * CHUNK_SIZE + z;
+      for (let y = 0; y < WORLD_HEIGHT; y++) {
+        const i = localIndex(x, y, z);
+        const id = data[i];
+        const p = AIR_DISCARD.get(id);
+        if (p === undefined) continue;
+        let exposed = false;
+        for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] as const) {
+          const ly = y + dy;
+          if (ly < 0 || ly >= WORLD_HEIGHT) continue;
+          const lx = x + dx;
+          const lz = z + dz;
+          if (lx >= 0 && lx < CHUNK_SIZE && lz >= 0 && lz < CHUNK_SIZE) {
+            if (data[localIndex(lx, ly, lz)] === AIR) {
+              exposed = true;
+              break;
+            }
+          } else if (neighborAir(wx, wz, wx + dx, ly, wz + dz)) {
+            exposed = true;
+            break;
+          }
+        }
+        // 按格坐标确定性掷点（与洞穴雕刻一致的盐混合模式）
+        if (exposed && hash2(seedHash ^ Math.imul(y, 0x9e3779b9), wx, wz) < p) {
+          data[i] = BLOCKS[id]?.key.startsWith('deepslate_') ? DEEPSLATE : STONE;
+        }
       }
     }
   }

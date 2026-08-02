@@ -121,4 +121,19 @@ describe('紫水晶洞', () => {
     applyGeodes(sh, TALL_TERRAIN, cx, cz, b);
     expect(Buffer.from(a).equals(Buffer.from(b))).toBe(true);
   });
+
+  it('频率对齐 Java：32×32 区域约 1/6 出洞 ≈ 每 chunk 1/24', () => {
+    const sh = hashString('geode-rate');
+    let hits = 0;
+    const N = 60 * 60;
+    for (let rx = 0; rx < 60; rx++) {
+      for (let rz = 0; rz < 60; rz++) {
+        if (geodeAt(sh, rx, rz)) hits++;
+      }
+    }
+    const rate = hits / N;
+    // 期望 1/6 ≈ 0.1667，统计容差 ±0.03（旧实现为 1/24 ≈ 0.042，远低于下限）
+    expect(rate).toBeGreaterThan(1 / 6 - 0.03);
+    expect(rate).toBeLessThan(1 / 6 + 0.03);
+  });
 });

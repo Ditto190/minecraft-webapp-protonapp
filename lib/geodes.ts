@@ -15,10 +15,10 @@ interface GeodeSpot {
   z: number;
 }
 
-/** 该区域是否有紫水晶洞（约 1/24 区域，中心 y 12-28） */
+/** 该区域是否有紫水晶洞（32×32 区域约 1/6 出洞 ≈ 每 chunk 1/24，Java 频率；中心 y 12-28） */
 export function geodeAt(seedHash: number, rx: number, rz: number): GeodeSpot | null {
   const r0 = hash2(seedHash ^ 0x9e0d1a, rx, rz);
-  if (r0 >= 1 / 24) return null;
+  if (r0 >= 1 / 6) return null;
   return {
     x: rx * REGION + 6 + Math.floor(hash2(seedHash ^ 0x9e0d2b, rx, rz) * 20),
     y: 12 + Math.floor(hash2(seedHash ^ 0x9e0d3c, rx, rz) * 17),
