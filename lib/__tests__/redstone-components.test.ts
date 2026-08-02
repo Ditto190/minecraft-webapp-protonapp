@@ -16,12 +16,14 @@ import { clearMobs, mobs, type Mob } from '../mobs';
 import { VOID_TERRAIN } from '../noise';
 import {
   clearRedstone,
+  cycleRepeaterDelay,
   dustPowerAt,
   notePitchAt,
   observerIdFor,
   pressButton,
   strikeTarget,
   tickRedstone,
+  toggleComparatorMode,
   toggleLever,
   tuneNoteBlock,
 } from '../redstone';
@@ -153,7 +155,7 @@ describe('压力板', () => {
 });
 
 describe('侦测器', () => {
-  it('面朝格方块变化 → 背面输出约 0.1s 定向脉冲（MC）；放置不触发', () => {
+  it('面朝格方块变化 → 延迟 1 红石刻从背面发出持续 1 红石刻的定向脉冲（MC Java）；放置不触发', () => {
     const w = setup();
     w.setBlock(4, 31, 4, K('observer_n')); // 检测 -z（面朝 (4,31,3)），输出 +z
     w.setBlock(4, 30, 5, STONE);
@@ -163,10 +165,12 @@ describe('侦测器', () => {
     tickRedstone(w, 0.1);
     expect(dustPowerAt(4, 31, 5)).toBe(0); // 放置/加载不触发（MC Java）
     w.setBlock(4, 31, 3, STONE); // 面朝格变化
-    tickRedstone(w, 0.1); // tick 比对触发
+    tickRedstone(w, 0.1); // tick 比对发现 → 调度（Java：延迟 1 红石刻发出）
+    expect(dustPowerAt(4, 31, 5)).toBe(0); // 尚未发出
+    tickRedstone(w, 0.1); // 脉冲发出
     expect(dustPowerAt(4, 31, 5)).toBe(15); // 背面输出 15
     expect(dustPowerAt(5, 31, 4)).toBe(0); // 定向：侧向不带电
-    tickRedstone(w, 0.1); // 0.1s 脉冲到期
+    tickRedstone(w, 0.1); // 持续 1 红石刻到期
     expect(dustPowerAt(4, 31, 5)).toBe(0);
   });
 
@@ -179,18 +183,87 @@ describe('侦测器', () => {
     tickRedstone(w, 0.1);
     expect(dustPowerAt(4, 31, 5)).toBe(0); // 无变化不触发
     w.setBlock(4, 31, 3, STONE);
-    tickRedstone(w, 0.1);
+    tickRedstone(w, 0.1); // 发现 → 调度（延迟 1 红石刻）
+    expect(dustPowerAt(4, 31, 5)).toBe(0);
+    tickRedstone(w, 0.1); // 发出
     expect(dustPowerAt(4, 31, 5)).toBe(15);
-    tickRedstone(w, 0.1);
+    tickRedstone(w, 0.1); // 到期
     expect(dustPowerAt(4, 31, 5)).toBe(0);
     w.setBlock(4, 31, 3, K('dirt')); // 再次变化（不同方块 id）
+    tickRedstone(w, 0.1);
     tickRedstone(w, 0.1);
     expect(dustPowerAt(4, 31, 5)).toBe(15); // 再次触发
     tickRedstone(w, 0.1);
     w.setBlock(4, 31, 4, AIR); // 挖掉侦测器
     w.setBlock(4, 31, 3, STONE);
     tickRedstone(w, 0.1);
+    tickRedstone(w, 0.1);
     expect(dustPowerAt(4, 31, 5)).toBe(0);
+  });
+
+  it('检测方块状态而非仅 id：粉功率变化触发（MC Java）', () => {
+    const w = setup();
+    w.setBlock(4, 30, 3, STONE);
+    w.setBlock(4, 31, 3, K('redstone_dust')); // 先放粉（无功率）
+    w.setBlock(4, 31, 4, K('observer_n')); // 登记时粉功率为 0
+    w.setBlock(4, 30, 5, STONE);
+    w.setBlock(4, 31, 5, K('redstone_dust')); // 输出端
+    tickRedstone(w, 0.1);
+    tickRedstone(w, 0.1);
+    expect(dustPowerAt(4, 31, 5)).toBe(0); // 放置不触发
+    w.setBlock(4, 30, 2, STONE);
+    w.setBlock(4, 31, 2, K('redstone_torch')); // 粉功率 0→15（方块 id 不变，Java 中是状态变化）
+    tickRedstone(w, 0.1); // 发现签名变化 → 调度
+    tickRedstone(w, 0.1); // 发出
+    expect(dustPowerAt(4, 31, 5)).toBe(15);
+    tickRedstone(w, 0.1);
+    expect(dustPowerAt(4, 31, 5)).toBe(0);
+  });
+
+  it('检测中继器档位与比较器模式（状态签名，id 不变也触发，MC Java）', () => {
+    const w = setup();
+    w.setBlock(4, 31, 3, K('repeater_e'));
+    w.setBlock(4, 31, 4, K('observer_n'));
+    w.setBlock(4, 30, 5, STONE);
+    w.setBlock(4, 31, 5, K('redstone_dust'));
+    tickRedstone(w, 0.1);
+    tickRedstone(w, 0.1);
+    expect(dustPowerAt(4, 31, 5)).toBe(0);
+    cycleRepeaterDelay(4, 31, 3); // 档位 1→2（id 不变，Java 中是方块状态变化）
+    tickRedstone(w, 0.1);
+    tickRedstone(w, 0.1);
+    expect(dustPowerAt(4, 31, 5)).toBe(15);
+    // 比较器模式切换同理
+    const w2 = setup();
+    w2.setBlock(4, 31, 3, K('comparator_e'));
+    w2.setBlock(4, 31, 4, K('observer_n'));
+    w2.setBlock(4, 30, 5, STONE);
+    w2.setBlock(4, 31, 5, K('redstone_dust'));
+    tickRedstone(w2, 0.1);
+    tickRedstone(w2, 0.1);
+    expect(dustPowerAt(4, 31, 5)).toBe(0);
+    toggleComparatorMode(4, 31, 3); // 比较 → 减法
+    tickRedstone(w2, 0.1);
+    tickRedstone(w2, 0.1);
+    expect(dustPowerAt(4, 31, 5)).toBe(15);
+  });
+
+  it('被活塞推动后发出一次脉冲（Java 飞行器原理）', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, K('piston_u')); // 朝上活塞
+    w.setBlock(4, 31, 4, K('observer_e')); // 面朝 +x，输出 -x
+    w.setBlock(3, 31, 4, STONE);
+    w.setBlock(3, 32, 4, K('redstone_dust')); // 推到 (4,32,4) 后输出端在其 -x = (3,32,4)
+    w.setBlock(5, 30, 4, K('lever'));
+    toggleLever(w, 5, 30, 4); // 活塞推出，侦测器被推到 (4,32,4)
+    expect(w.getBlock(4, 32, 4)).toBe(K('observer_e'));
+    expect(dustPowerAt(3, 32, 4)).toBe(0); // 推动当帧不输出（经 tick 调度）
+    tickRedstone(w, 0.1); // tick 消费 pushedObservers → 调度脉冲
+    expect(dustPowerAt(3, 32, 4)).toBe(0);
+    tickRedstone(w, 0.1); // 脉冲发出（延迟 1 红石刻）
+    expect(dustPowerAt(3, 32, 4)).toBe(15);
+    tickRedstone(w, 0.1); // 到期（持续 1 红石刻）
+    expect(dustPowerAt(3, 32, 4)).toBe(0);
   });
 
   it('observerIdFor 覆盖 6 朝向且 facing 与活塞一致', () => {

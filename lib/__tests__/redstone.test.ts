@@ -228,7 +228,9 @@ describe('红石火把反相（NOT 门）', () => {
 });
 
 describe('固体方块弱充能', () => {
-  it('拉杆→方块→粉 链路导通；关断即断供（MC）', () => {
+  it('拉杆→方块→粉 不导通（MC Java：拉杆是弱充能，弱充能块不驱动粉）；拉杆直供邻接粉不受影响', () => {
+    // 旧断言把「拉杆→方块→粉导通」标注为 (MC)，标注是错的：Java 中拉杆只弱充能支撑块，
+    // 弱充能块激活邻接元件但不驱动邻接粉（只有强充能块才驱动粉）
     const w = setup();
     w.setBlock(4, 30, 4, STONE); // 拉杆的支撑块
     w.setBlock(4, 31, 4, K('lever'));
@@ -238,10 +240,14 @@ describe('固体方块弱充能', () => {
     w.setBlock(6, 30, 4, K('redstone_dust'));
     expect(dustPowerAt(5, 30, 4)).toBe(0);
     toggleLever(w, 4, 31, 4);
-    expect(dustPowerAt(5, 30, 4)).toBe(15); // 石块弱充能 → 邻接粉 15
-    expect(dustPowerAt(6, 30, 4)).toBe(14); // 沿粉衰减
+    expect(dustPowerAt(5, 30, 4)).toBe(0); // 石块被弱充能 → 不驱动粉（MC Java）
+    expect(dustPowerAt(6, 30, 4)).toBe(0);
+    // 对照：拉杆直接邻接的粉仍被供能 15（电源直接供粉，不经方块中转）
+    w.setBlock(5, 30, 4, AIR);
+    w.setBlock(5, 31, 4, K('redstone_dust'));
+    expect(dustPowerAt(5, 31, 4)).toBe(15);
     toggleLever(w, 4, 31, 4);
-    expect(dustPowerAt(5, 30, 4)).toBe(0);
+    expect(dustPowerAt(5, 31, 4)).toBe(0);
   });
 
   it('弱充能方块驱动邻接元件（灯），且弱充能不链式外传（方块→方块不传）', () => {
@@ -260,13 +266,177 @@ describe('固体方块弱充能', () => {
     expect(w.getBlock(3, 30, 4)).toBe(K('redstone_lamp'));
   });
 
-  it('中继器输出充能前方实心块，块外粉导通（MC 强充能简化同层处理）', () => {
+  it('中继器输出充能前方实心块，块外粉导通（MC 强充能：强充能块驱动邻接粉）', () => {
     const w = setup();
     w.setBlock(4, 31, 4, K('repeater_on_e')); // 输出 +x
-    w.setBlock(5, 31, 4, STONE); // 被弱充能
+    w.setBlock(5, 31, 4, STONE); // 被强充能
     w.setBlock(6, 30, 4, STONE);
     w.setBlock(6, 31, 4, K('redstone_dust')); // 贴着石块
     expect(dustPowerAt(6, 31, 4)).toBe(15);
     expect(poweredAt(5, 32, 4)).toBe(true); // 石块邻位视为供能
+  });
+});
+
+describe('粉跨高度对角连接', () => {
+  it('上坡连接：粉沿对角爬坡每步只衰减 1 级；本格上方实心切断（Java 压线规则），移除后恢复', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, STONE);
+    w.setBlock(4, 31, 4, K('redstone_torch'));
+    w.setBlock(5, 30, 4, STONE);
+    w.setBlock(5, 31, 4, K('redstone_dust')); // 15
+    w.setBlock(6, 30, 4, STONE);
+    w.setBlock(6, 31, 4, STONE); // 高一格的台阶
+    w.setBlock(6, 32, 4, K('redstone_dust')); // 上坡粉
+    expect(dustPowerAt(5, 31, 4)).toBe(15);
+    expect(dustPowerAt(6, 32, 4)).toBe(14); // 对角上坡只衰减 1 级
+    w.setBlock(5, 32, 4, STONE); // (5,31,4) 上方变实心 → 切断上坡（Java 压线规则）
+    expect(dustPowerAt(6, 32, 4)).toBe(0);
+    w.setBlock(5, 32, 4, AIR); // 移除后连接恢复
+    expect(dustPowerAt(6, 32, 4)).toBe(14);
+  });
+
+  it('下坡连接：角格实心不切断（Java：上方块实心才切断上坡，下坡保持连接）', () => {
+    const w = setup();
+    w.setBlock(4, 31, 4, STONE);
+    w.setBlock(4, 32, 4, K('redstone_torch'));
+    w.setBlock(5, 31, 4, STONE);
+    w.setBlock(5, 32, 4, K('redstone_dust')); // 15，与火把同层
+    w.setBlock(6, 30, 4, STONE);
+    w.setBlock(6, 31, 4, K('redstone_dust')); // 下坡粉
+    expect(dustPowerAt(6, 31, 4)).toBe(14);
+    w.setBlock(6, 32, 4, STONE); // 下坡角格（与上方粉同层）实心：Java 不切断下坡
+    expect(dustPowerAt(6, 31, 4)).toBe(14);
+  });
+
+  it('功率沿坡道逐级上行（低端电源经连续上坡供到高端，每步 -1）', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, STONE);
+    w.setBlock(4, 31, 4, K('redstone_torch'));
+    w.setBlock(5, 30, 4, STONE);
+    w.setBlock(5, 31, 4, K('redstone_dust')); // 15 低端
+    w.setBlock(6, 30, 4, STONE);
+    w.setBlock(6, 31, 4, STONE);
+    w.setBlock(6, 32, 4, K('redstone_dust')); // 14
+    w.setBlock(7, 31, 4, STONE);
+    w.setBlock(7, 32, 4, STONE);
+    w.setBlock(7, 33, 4, K('redstone_dust')); // 13
+    expect(dustPowerAt(6, 32, 4)).toBe(14);
+    expect(dustPowerAt(7, 33, 4)).toBe(13);
+  });
+});
+
+describe('粉按指向供能', () => {
+  it('一字形粉只供两端方向：中段侧面与正上方不供能，正下方块被弱充能（MC Java）', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, STONE);
+    w.setBlock(4, 31, 4, K('redstone_torch'));
+    w.setBlock(5, 30, 4, STONE);
+    w.setBlock(5, 31, 4, K('redstone_dust'));
+    w.setBlock(6, 30, 4, STONE);
+    w.setBlock(6, 31, 4, K('redstone_dust')); // 一字形 (5)-(6)，指向 ±x
+    w.setBlock(5, 31, 5, K('redstone_lamp')); // 中段北侧：一字形不供侧向
+    w.setBlock(6, 32, 4, K('redstone_lamp')); // 正上方：任何形态都不供
+    w.setBlock(7, 30, 4, K('redstone_lamp')); // (6,31,4) 正下方块被弱充能 → 激活 6 邻元件
+    expect(w.getBlock(5, 31, 5)).toBe(K('redstone_lamp'));
+    expect(w.getBlock(6, 32, 4)).toBe(K('redstone_lamp'));
+    expect(w.getBlock(7, 30, 4)).toBe(K('redstone_lamp_lit'));
+  });
+
+  it('点状粉供水平四向（MC Java）', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, STONE);
+    w.setBlock(4, 31, 4, K('redstone_torch'));
+    w.setBlock(5, 30, 4, STONE);
+    w.setBlock(5, 31, 4, K('redstone_dust')); // 点状（火把不是粉，无连接）
+    w.setBlock(5, 31, 5, K('redstone_lamp'));
+    w.setBlock(5, 31, 3, K('redstone_lamp'));
+    w.setBlock(6, 31, 4, K('redstone_lamp'));
+    expect(w.getBlock(5, 31, 5)).toBe(K('redstone_lamp_lit'));
+    expect(w.getBlock(5, 31, 3)).toBe(K('redstone_lamp_lit'));
+    expect(w.getBlock(6, 31, 4)).toBe(K('redstone_lamp_lit'));
+  });
+
+  it('粉弱充能指向的实心块：激活 6 邻元件但不驱动邻接粉（MC Java）', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, STONE);
+    w.setBlock(4, 31, 4, K('redstone_torch'));
+    w.setBlock(5, 30, 4, STONE);
+    w.setBlock(5, 31, 4, K('redstone_dust')); // 点状 15，指向水平四向
+    w.setBlock(6, 31, 4, STONE); // 被粉弱充能
+    w.setBlock(7, 30, 4, STONE);
+    w.setBlock(7, 31, 4, K('redstone_dust')); // 贴着被弱充能的块：不得电（弱充能不驱动粉）
+    w.setBlock(6, 31, 5, K('redstone_lamp')); // 被充能块的邻接元件 → 亮
+    expect(dustPowerAt(7, 31, 4)).toBe(0);
+    expect(w.getBlock(6, 31, 5)).toBe(K('redstone_lamp_lit'));
+  });
+});
+
+describe('强充能驱动粉', () => {
+  it('红石火把正上方块被强充能：驱动邻接粉 15 并沿粉衰减；挖掉即断供（MC Java）', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, STONE);
+    w.setBlock(4, 31, 4, K('redstone_torch'));
+    w.setBlock(4, 32, 4, STONE); // 火把正上方块 → 强充能
+    w.setBlock(5, 31, 4, STONE);
+    w.setBlock(5, 32, 4, K('redstone_dust')); // 贴着强充能块 → 15
+    w.setBlock(6, 31, 4, STONE);
+    w.setBlock(6, 32, 4, K('redstone_dust')); // 14
+    expect(dustPowerAt(5, 32, 4)).toBe(15);
+    expect(dustPowerAt(6, 32, 4)).toBe(14);
+    w.setBlock(4, 32, 4, AIR); // 挖掉正上方块 → 强充能消失
+    expect(dustPowerAt(5, 32, 4)).toBe(0);
+    expect(dustPowerAt(6, 32, 4)).toBe(0);
+  });
+});
+
+describe('红石火把烧毁（burnout，MC Java：60 游戏刻=3s 内切换 8 次烧毁，收到方块更新才重燃）', () => {
+  /** 自反馈环：火把 → 粉 → 弱充能火把支撑块 → 火把反相（奇数反相 = 振荡） */
+  function torchRing(w: World): void {
+    w.setBlock(0, 29, 4, STONE); // 火把支撑块
+    w.setBlock(0, 30, 4, K('redstone_torch'));
+    w.setBlock(1, 30, 4, K('redstone_dust')); // 15（火把直供）
+    w.setBlock(2, 30, 4, K('redstone_dust')); // 14
+    w.setBlock(1, 29, 4, K('redstone_dust')); // 13（(2,30,4) 下坡对角）
+    w.setBlock(0, 28, 4, K('redstone_dust')); // 12（尾巴：让 (1,29,4) 成一字形指向 ±x，弱充能支撑块 (0,29,4)）
+  }
+
+  it('自反馈环疯狂闪烁后烧毁恒灭；邻近方块更新后重燃并可再次烧毁', () => {
+    const w = setup();
+    torchRing(w);
+    // 确实在振荡：逐 tick 观察 ON/OFF 都出现
+    const seen = new Set<number>();
+    for (let i = 0; i < 4; i++) {
+      tickRedstone(w, 0.1);
+      seen.add(w.getBlock(0, 30, 4));
+    }
+    expect(seen.size).toBe(2);
+    // 3s 窗口内切满 8 次 → 烧毁：恒灭
+    for (let i = 0; i < 20; i++) tickRedstone(w, 0.1);
+    expect(w.getBlock(0, 30, 4)).toBe(K('redstone_torch_off'));
+    // 再跑 4s（超出 3s 窗口，旧翻转全过期）仍灭——烧毁态不自动解除
+    for (let i = 0; i < 40; i++) tickRedstone(w, 0.1);
+    expect(w.getBlock(0, 30, 4)).toBe(K('redstone_torch_off'));
+    // 邻近方块更新（火把正上方放方块）→ 清除烧毁态，重算重燃
+    w.setBlock(0, 31, 4, STONE);
+    expect(w.getBlock(0, 30, 4)).toBe(K('redstone_torch'));
+    // 振荡恢复，翻转计数已重置 → 再次切满 8 次又烧毁
+    for (let i = 0; i < 20; i++) tickRedstone(w, 0.1);
+    expect(w.getBlock(0, 30, 4)).toBe(K('redstone_torch_off'));
+  });
+
+  it('慢速切换不烧毁：3s 窗口外的翻转不计（拉杆慢拨 8 次，火把照常响应）', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, STONE);
+    w.setBlock(4, 31, 4, K('redstone_torch'));
+    w.setBlock(3, 30, 4, K('lever')); // 拉杆贴着支撑块：开 → 火把反相熄灭
+    for (let i = 0; i < 8; i++) {
+      toggleLever(w, 3, 30, 4);
+      tickRedstone(w, 0.5); // 每次翻转间隔 0.5s，8 次跨 3.5s > 3s 窗口
+    }
+    // 未烧毁：第 9/10 次仍能正常翻转
+    toggleLever(w, 3, 30, 4);
+    expect(w.getBlock(4, 31, 4)).toBe(K('redstone_torch_off'));
+    toggleLever(w, 3, 30, 4);
+    expect(w.getBlock(4, 31, 4)).toBe(K('redstone_torch'));
   });
 });

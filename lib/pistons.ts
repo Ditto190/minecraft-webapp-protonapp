@@ -1,5 +1,9 @@
 // 活塞机械：供能推出（至多 12 格）、断能收回、粘性拉回、孤儿头清理
+// 黏液块/蜂蜜块粘连（Java 飞行器/门核心）：推/拉时以推出线为种子做图遍历，粘住相邻可推方块一起动，
+// 被带动的黏液/蜂蜜块继续连带（递归）；总移动数仍受 12 上限（超出整次失败）。
+// 黏液与蜂蜜互不粘；不可推块/活塞/粉·火把等附着类（被推时破坏）不参与粘连（推线内被直接推仍按原样搬移）。
 // 状态完全由方块布局推导（活塞 facing + 前方活塞头），无需持久化
+// 被活塞移动的侦测器记入 pushedObservers（redstone tick 消费：Java 中侦测器被推后发出一次脉冲——飞行器原理）
 
 import { AIR, BLOCK_BY_KEY, BLOCKS, isWaterId, isLavaId, type BlockId } from './blocks';
 import type { World } from './world';
@@ -7,6 +11,13 @@ import type { World } from './world';
 const HEAD = () => BLOCK_BY_KEY.piston_head.id;
 
 const pistonKey = (id: BlockId): string => BLOCKS[id]?.key ?? '';
+
+const posKey = (x: number, y: number, z: number): string => `${x},${y},${z}`;
+
+/** 被活塞移动到新位置的侦测器（推/拉均记；redstone 每 tick 取出并让其在下一红石刻发脉冲） */
+export const pushedObservers = new Set<string>();
+
+const isObserverBlock = (id: BlockId): boolean => pistonKey(id).startsWith('observer_');
 
 export const isPistonId = (id: BlockId): boolean => {
   const k = pistonKey(id);
@@ -44,32 +55,77 @@ function immovable(id: BlockId): boolean {
   return key === 'obsidian' || key === 'crying_obsidian' || key === 'chest' || key === 'barrel' || key === 'furnace' || key === 'brewing_stand' || key === 'enchanting_table';
 }
 
-/** 供能推出：把活塞前方一行（≤12 格）整体前推一格并放活塞头；不可推/无空位则不动 */
+/** 0=非粘连块 1=黏液块 2=蜂蜜块 */
+const stickyKind = (id: BlockId): 0 | 1 | 2 => {
+  const k = pistonKey(id);
+  return k === 'slime_block' ? 1 : k === 'honey_block' ? 2 : 0;
+};
+
+/** 粘连兼容（Java）：黏液与蜂蜜互不粘；粘/非粘之间可粘（单向拉动） */
+const canStick = (a: BlockId, b: BlockId): boolean => {
+  const sa = stickyKind(a);
+  const sb = stickyKind(b);
+  return sa === 0 || sb === 0 || sa === sb;
+};
+
+/** 附着类（粉/火把/植物等 solid:false，Java 中被推时破坏）：不被粘连带走（推线内被直接推仍按现状整体搬移） */
+const breaksOnPush = (id: BlockId): boolean => id !== AIR && BLOCKS[id]?.solid === false;
+
+const MAX_PUSH = 12;
+
+type MoveSet = Map<string, [number, number, number, BlockId]>;
+
+/** 以 (sx,sy,sz) 为种子、沿运动方向 (dx,dy,dz) 收集本次位移的方块集合：
+ *  正前方的块被推挤必随动（撞不可推块整次失败）；黏液/蜂蜜块再粘住六邻的可推方块（递归连带）。
+ *  返回 null = 推不动（撞不可推块/超 12 上限，上限计入被粘连方块）；空 Map = 前方全空 */
+function collectMoveSet(world: World, sx: number, sy: number, sz: number, dx: number, dy: number, dz: number): MoveSet | null {
+  const move: MoveSet = new Map();
+  const queue: [number, number, number][] = [[sx, sy, sz]];
+  while (queue.length > 0) {
+    const [x, y, z] = queue.pop()!;
+    if (move.has(posKey(x, y, z))) continue;
+    const id = world.getBlock(x, y, z);
+    if (id === AIR) continue; // 空位：该分支到头
+    if (immovable(id)) return null; // 位移路径上撞不可推块：整次失败（MC）
+    if (move.size >= MAX_PUSH) return null; // 超 12 块上限（含被粘连方块）：整次失败
+    move.set(posKey(x, y, z), [x, y, z, id]);
+    queue.push([x + dx, y + dy, z + dz]); // 正前方的块被推挤，必须跟着动
+    if (stickyKind(id) === 0) continue; // 非粘连块不带动邻块（其前方已由推挤覆盖）
+    for (const [nx, ny, nz] of Object.values(FACING_VEC)) {
+      if (nx === dx && ny === dy && nz === dz) continue; // 正前方已由推挤覆盖
+      const bx = x + nx;
+      const by = y + ny;
+      const bz = z + nz;
+      const nid = world.getBlock(bx, by, bz);
+      // 不粘连的例外：空气、不可推块（含活塞/活塞头）、附着类、黏液×蜂蜜
+      if (nid === AIR || immovable(nid) || breaksOnPush(nid) || !canStick(id, nid)) continue;
+      queue.push([bx, by, bz]);
+    }
+  }
+  return move;
+}
+
+/** 统一位移：先清后放避免互相覆盖；逐块 setBlock 走既有钩子（notifyRedstone 等）；被移侦测器记新位置 */
+function applyMove(world: World, move: MoveSet, dx: number, dy: number, dz: number): void {
+  for (const [x, y, z] of move.values()) world.setBlock(x, y, z, AIR);
+  for (const [x, y, z, id] of move.values()) {
+    world.setBlock(x + dx, y + dy, z + dz, id);
+    if (isObserverBlock(id)) pushedObservers.add(posKey(x + dx, y + dy, z + dz)); // 侦测器被推/拉：记新位置
+  }
+}
+
+/** 供能推出：前方一行 + 黏液/蜂蜜粘连块（合计 ≤12）整体前移一格并放活塞头（朝空也正常出头，MC）；不可推/超上限则不动 */
 export function tryExtend(world: World, x: number, y: number, z: number): void {
   const def = BLOCKS[world.getBlock(x, y, z)];
   const f = def?.facing ?? 4;
   const [dx, dy, dz] = FACING_VEC[f];
-  // 找一行末尾：连续可推块的终点（首个空气格，作为推出目标）
-  let end = 0;
-  for (let i = 1; i <= 12; i++) {
-    const id = world.getBlock(x + dx * i, y + dy * i, z + dz * i);
-    if (immovable(id)) return; // 行内有不可推块：整行不动
-    if (id === AIR) {
-      end = i;
-      break;
-    }
-    if (i === 12) return; // 12 格内无空位：推不出（MC 规则）
-  }
-  if (end === 0) return;
-  // 从末端往回逐格前推
-  for (let i = end; i >= 1; i--) {
-    const from = world.getBlock(x + dx * (i - 1), y + dy * (i - 1), z + dz * (i - 1));
-    world.setBlock(x + dx * i, y + dy * i, z + dz * i, from);
-  }
+  const move = collectMoveSet(world, x + dx, y + dy, z + dz, dx, dy, dz);
+  if (move === null) return; // 撞不可推块/超 12 上限：整次推不出（MC）
+  applyMove(world, move, dx, dy, dz);
   world.setBlock(x + dx, y + dy, z + dz, HEAD());
 }
 
-/** 断能收回：移除活塞头；粘性活塞把头部前方的块拉回（MC 粘性规则）。
+/** 断能收回：移除活塞头；粘性活塞把头部前方的块（含黏液/蜂蜜粘连块，合计 ≤12）拉回（MC 粘性规则）。
  *  leavePulled：粘性活塞 1-tick 短脉冲（供电 ≤1 红石刻）收回时不拉回方块——块留在推到位（MC Java） */
 export function retract(world: World, x: number, y: number, z: number, leavePulled = false): void {
   const def = BLOCKS[world.getBlock(x, y, z)];
@@ -82,18 +138,19 @@ export function retract(world: World, x: number, y: number, z: number, leavePull
   if (world.getBlock(hx, hy, hz) !== HEAD()) return;
   world.setBlock(hx, hy, hz, AIR);
   if (!sticky || leavePulled) return;
-  // 粘性：把再前一格的块拉到头部原位置（只拉固体，MC 一致）
-  const pulled = world.getBlock(hx + dx, hy + dy, hz + dz);
-  if (pulled === AIR || immovable(pulled)) return;
-  world.setBlock(hx + dx, hy + dy, hz + dz, AIR);
-  world.setBlock(hx, hy, hz, pulled);
+  // 粘性：把再前一格的块（连同粘连块）拉向头部原位置；拉不动（不可推/超上限）则只收头（MC）
+  const move = collectMoveSet(world, hx + dx, hy + dy, hz + dz, -dx, -dy, -dz);
+  if (move === null || move.size === 0) return;
+  applyMove(world, move, -dx, -dy, -dz);
 }
 
-/** 孤儿活塞头清理：背向无活塞的头自动消失（recompute/变动时调用） */
+/** 孤儿活塞头清理：无活塞 facing 指向头格时自动消失（recompute/变动时调用） */
 export function cleanupOrphanHeads(world: World, x: number, y: number, z: number): void {
   if (world.getBlock(x, y, z) !== HEAD()) return;
-  for (const [dx, dy, dz] of Object.values(FACING_VEC)) {
-    if (isPistonId(world.getBlock(x - dx, y - dy, z - dz))) return;
+  for (const [f, [dx, dy, dz]] of Object.entries(FACING_VEC)) {
+    const id = world.getBlock(x - dx, y - dy, z - dz);
+    // 仅当邻格活塞 facing 指向头格才算有主（侧向贴着的无关活塞不保护）
+    if (isPistonId(id) && BLOCKS[id]?.facing === Number(f)) return;
   }
   world.setBlock(x, y, z, AIR);
 }

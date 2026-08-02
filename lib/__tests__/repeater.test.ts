@@ -105,3 +105,59 @@ describe('中继器', () => {
     expect(r.cost).toContainEqual({ item: 'material:redstone', count: 1 });
   });
 });
+
+describe('中继器侧向锁存（MC Java）', () => {
+  it('on 态锁定：无输入但被侧面充能中继器指向 → 保持 on；解锁后按输入翻回', () => {
+    const w = setup();
+    w.setBlock(4, 30, 2, STONE);
+    w.setBlock(4, 31, 2, K('lever'));
+    toggleLever(w, 4, 31, 2); // B 的背向输入，先供上
+    w.setBlock(4, 30, 4, STONE);
+    w.setBlock(4, 31, 4, K('repeater_on_e')); // A：被锁定对象，朝东，无输入
+    w.setBlock(4, 30, 3, STONE);
+    w.setBlock(4, 31, 3, K('repeater_on_s')); // B：锁定源，朝南输出指向 A 的北侧（背向是开着的拉杆）
+    for (let i = 0; i < 4; i++) tickRedstone(w, 0.1);
+    expect(w.getBlock(4, 31, 4)).toBe(K('repeater_on_e')); // 无输入但锁定：保持 on
+    w.setBlock(4, 31, 3, 0); // 解锁
+    for (let i = 0; i < 4; i++) tickRedstone(w, 0.1);
+    expect(w.getBlock(4, 31, 4)).toBe(K('repeater_e')); // 按输入（无）翻回关
+  });
+
+  it('off 态锁定：输入开但被锁定 → 不翻转；解锁后跟随输入翻开', () => {
+    const w = setup();
+    w.setBlock(4, 30, 2, STONE);
+    w.setBlock(4, 31, 2, K('lever'));
+    toggleLever(w, 4, 31, 2); // B 的背向输入，先供上
+    w.setBlock(3, 31, 4, K('lever'));
+    w.setBlock(4, 30, 4, STONE);
+    w.setBlock(4, 31, 4, K('repeater_e')); // A：背向 lever
+    w.setBlock(4, 30, 3, STONE);
+    w.setBlock(4, 31, 3, K('repeater_on_s')); // B：锁定源
+    toggleLever(w, 3, 31, 4); // 输入开
+    for (let i = 0; i < 4; i++) tickRedstone(w, 0.1);
+    expect(w.getBlock(4, 31, 4)).toBe(K('repeater_e')); // 锁定：不随输入翻开
+    w.setBlock(4, 31, 3, 0); // 解锁
+    for (let i = 0; i < 4; i++) tickRedstone(w, 0.1);
+    expect(w.getBlock(4, 31, 4)).toBe(K('repeater_on_e')); // 跟随输入
+  });
+
+  it('充能比较器从侧面指向同样锁存（MC Java）', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, STONE);
+    w.setBlock(4, 31, 4, K('repeater_on_e')); // A：on 态，无输入
+    w.setBlock(4, 30, 3, STONE);
+    w.setBlock(4, 31, 3, K('comparator_s')); // 比较器朝南，输出指向 A
+    w.setBlock(4, 30, 2, STONE);
+    w.setBlock(4, 31, 2, K('lever')); // 比较器背向
+    toggleLever(w, 4, 31, 2); // 比较器输入开（延迟 1 红石刻结算）
+    for (let i = 0; i < 4; i++) tickRedstone(w, 0.1);
+    expect(w.getBlock(4, 31, 3)).toBe(K('comparator_on_s'));
+    for (let i = 0; i < 4; i++) tickRedstone(w, 0.1);
+    expect(w.getBlock(4, 31, 4)).toBe(K('repeater_on_e')); // A 被锁定：保持 on
+    // 比较器断输入 → 解锁 → A 翻回关
+    toggleLever(w, 4, 31, 2);
+    for (let i = 0; i < 6; i++) tickRedstone(w, 0.1);
+    expect(w.getBlock(4, 31, 3)).toBe(K('comparator_s'));
+    expect(w.getBlock(4, 31, 4)).toBe(K('repeater_e'));
+  });
+});

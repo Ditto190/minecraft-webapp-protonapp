@@ -91,19 +91,28 @@ describe('不可推与上限', () => {
     expect(isExtended(w, 4, 30, 4)).toBe(true);
   });
 
-  it('12 格内无空位推不出（MC 上限）', () => {
+  it('12 块+空位可推、13 块不可推（MC 上限恰为推 12 块）', () => {
+    // 12 格石头、第 13 格空气：恰达 Java 上限，应能推出
     const w = setup();
     w.setBlock(4, 30, 4, pistonIdFor(false, 4));
-    for (let y = 31; y <= 42; y++) w.setBlock(4, y, 4, STONE); // 12 格石头
-    tryExtend(w, 4, 30, 4);
-    expect(w.getBlock(4, 31, 4)).toBe(STONE); // 没推出
-    expect(isExtended(w, 4, 30, 4)).toBe(false);
-    // 11 格则可以（供能后正常推出）
+    for (let y = 31; y <= 42; y++) w.setBlock(4, y, 4, STONE); // 12 格石头（y=43 为空位）
+    power(w, 3, 30, 4, true);
+    expect(w.getBlock(4, 31, 4)).toBe(HEAD());
+    expect(w.getBlock(4, 43, 4)).toBe(STONE); // 整行 12 块前推一格
+    expect(isExtended(w, 4, 30, 4)).toBe(true);
+    // 13 格石头：超过上限，推不出
     const w2 = setup();
     w2.setBlock(4, 30, 4, pistonIdFor(false, 4));
-    for (let y = 31; y <= 41; y++) w2.setBlock(4, y, 4, STONE);
-    power(w2, 3, 30, 4, true);
-    expect(isExtended(w2, 4, 30, 4)).toBe(true);
+    for (let y = 31; y <= 43; y++) w2.setBlock(4, y, 4, STONE); // 13 格石头
+    tryExtend(w2, 4, 30, 4);
+    expect(w2.getBlock(4, 31, 4)).toBe(STONE); // 没推出
+    expect(isExtended(w2, 4, 30, 4)).toBe(false);
+    // 11 格更可以（供能后正常推出）
+    const w3 = setup();
+    w3.setBlock(4, 30, 4, pistonIdFor(false, 4));
+    for (let y = 31; y <= 41; y++) w3.setBlock(4, y, 4, STONE);
+    power(w3, 3, 30, 4, true);
+    expect(isExtended(w3, 4, 30, 4)).toBe(true);
   });
 
   it('孤儿活塞头自动消失', () => {
@@ -117,6 +126,22 @@ describe('不可推与上限', () => {
     w.setBlock(4, 31, 4, HEAD());
     cleanupOrphanHeads(w, 4, 31, 4);
     expect(w.getBlock(4, 31, 4)).toBe(HEAD());
+  });
+
+  it('侧向贴着的无关活塞不保护孤儿头（facing 须指向头格）', () => {
+    // 头贴在朝上活塞的东侧：活塞 facing 向上、未指向头格 → 头应消失
+    const w = setup();
+    w.setBlock(4, 30, 4, pistonIdFor(false, 4)); // 朝上
+    w.setBlock(5, 30, 4, HEAD());
+    cleanupOrphanHeads(w, 5, 30, 4);
+    expect(w.getBlock(5, 30, 4)).toBe(AIR);
+    // facing 指向头格的供能活塞（朝东）保护头 → 保留
+    const w2 = setup();
+    w2.setBlock(4, 30, 4, pistonIdFor(false, 1)); // 朝东
+    power(w2, 3, 30, 4, true); // 供能推出：头在 (5,30,4)
+    expect(w2.getBlock(5, 30, 4)).toBe(HEAD());
+    cleanupOrphanHeads(w2, 5, 30, 4);
+    expect(w2.getBlock(5, 30, 4)).toBe(HEAD());
   });
 
   it('isPistonId 覆盖全部朝向变体', () => {
@@ -155,7 +180,7 @@ describe('QC 半连接性（quasi-connectivity）', () => {
     w.setBlock(4, 30, 4, pistonIdFor(false, 4)); // 朝上
     w.setBlock(4, 31, 4, STONE);
     // 火把在活塞对角上方 (5,31,4)：是「门位置」(4,31,4) 的邻居但不是活塞的邻居；
-    // 火把只弱充自己正上方，不会经弱充能变成常规供电
+    // 火把只充能自己正上方（强充能，但正上方是空气），不会经充能变成常规供电
     w.setBlock(5, 31, 4, K('redstone_torch'));
     expect(isExtended(w, 4, 30, 4)).toBe(false); // BUD：QC 供能存在，无方块更新不动作
     // 非邻近的变动（半径内但距活塞 2 格）也不触发
@@ -213,10 +238,11 @@ describe('粘性活塞 1-tick 短脉冲丢块', () => {
     const w = setup();
     observerPiston(w, true);
     w.setBlock(4, 30, 3, K('dirt')); // 侦测器面朝格变化
-    tickRedstone(w, 0.1); // 侦测器发 0.1s 脉冲 → 推出
+    tickRedstone(w, 0.1); // tick 比对发现变化 → 调度脉冲（Java：延迟 1 红石刻发出）
+    tickRedstone(w, 0.1); // 脉冲发出 → 推出
     expect(w.getBlock(5, 30, 5)).toBe(HEAD());
     expect(w.getBlock(6, 30, 5)).toBe(STONE);
-    tickRedstone(w, 0.1); // 脉冲到期断供 → 收回但丢块（MC Java）
+    tickRedstone(w, 0.1); // 脉冲到期断供（持续 1 红石刻）→ 收回但丢块（MC Java）
     expect(w.getBlock(5, 30, 5)).toBe(AIR); // 头收回
     expect(w.getBlock(6, 30, 5)).toBe(STONE); // 方块留在推到位，未被拉回
     expect(isExtended(w, 4, 30, 5)).toBe(false);
@@ -238,11 +264,130 @@ describe('粘性活塞 1-tick 短脉冲丢块', () => {
     const w = setup();
     observerPiston(w, false);
     w.setBlock(4, 30, 3, K('dirt'));
-    tickRedstone(w, 0.1);
+    tickRedstone(w, 0.1); // 发现变化 → 调度脉冲（延迟 1 红石刻，Java）
+    tickRedstone(w, 0.1); // 脉冲发出 → 推出
     expect(w.getBlock(5, 30, 5)).toBe(HEAD());
     expect(w.getBlock(6, 30, 5)).toBe(STONE);
-    tickRedstone(w, 0.1);
+    tickRedstone(w, 0.1); // 脉冲到期
     expect(w.getBlock(5, 30, 5)).toBe(AIR); // 头收回
     expect(w.getBlock(6, 30, 5)).toBe(STONE); // 普通活塞本就不拉回
+  });
+});
+
+describe('黏液块/蜂蜜块粘连推拉', () => {
+  it('黏液块带侧面相邻石头一起推（垂直于运动方向的面也粘）', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, pistonIdFor(false, 4)); // 朝上
+    w.setBlock(4, 31, 4, K('slime_block'));
+    w.setBlock(5, 31, 4, STONE); // 侧面贴着的石头
+    power(w, 3, 30, 4, true);
+    expect(w.getBlock(4, 31, 4)).toBe(HEAD());
+    expect(w.getBlock(4, 32, 4)).toBe(K('slime_block'));
+    expect(w.getBlock(5, 32, 4)).toBe(STONE); // 被粘连带上一格
+    expect(w.getBlock(5, 31, 4)).toBe(AIR);
+  });
+
+  it('递归连带：黏液-黏液-石头链（被带动的黏液块继续连带）', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, pistonIdFor(false, 4)); // 朝上
+    w.setBlock(4, 31, 4, K('slime_block'));
+    w.setBlock(5, 31, 4, K('slime_block')); // 侧面黏液（被第一个连带）
+    w.setBlock(6, 31, 4, STONE); // 贴在第二个黏液侧面的石头（被第二个连带）
+    power(w, 3, 30, 4, true);
+    expect(w.getBlock(4, 32, 4)).toBe(K('slime_block'));
+    expect(w.getBlock(5, 32, 4)).toBe(K('slime_block'));
+    expect(w.getBlock(6, 32, 4)).toBe(STONE);
+    expect(w.getBlock(6, 31, 4)).toBe(AIR);
+  });
+
+  it('12 上限计入被粘连方块：恰 12 可推、13 拒推', () => {
+    // 推线 11 块（黏液+10 石头）+ 侧面被粘连 1 块 = 12：恰达上限，可推
+    const w = setup();
+    w.setBlock(4, 30, 4, pistonIdFor(false, 4)); // 朝上
+    w.setBlock(4, 31, 4, K('slime_block'));
+    for (let y = 32; y <= 41; y++) w.setBlock(4, y, 4, STONE); // 10 格石头
+    w.setBlock(5, 31, 4, STONE); // 被黏液粘连的第 12 块
+    power(w, 3, 30, 4, true);
+    expect(isExtended(w, 4, 30, 4)).toBe(true);
+    expect(w.getBlock(4, 42, 4)).toBe(STONE); // 推线顶端到位
+    expect(w.getBlock(5, 32, 4)).toBe(STONE); // 粘连块到位
+    // 同样布局再多一块被粘连 = 13：整次拒推
+    const w2 = setup();
+    w2.setBlock(4, 30, 4, pistonIdFor(false, 4));
+    w2.setBlock(4, 31, 4, K('slime_block'));
+    for (let y = 32; y <= 41; y++) w2.setBlock(4, y, 4, STONE);
+    w2.setBlock(5, 31, 4, STONE);
+    w2.setBlock(3, 31, 4, STONE); // 另一侧再粘一块 → 第 13 块
+    tryExtend(w2, 4, 30, 4);
+    expect(w2.getBlock(4, 31, 4)).toBe(K('slime_block')); // 没推出
+    expect(w2.getBlock(4, 32, 4)).toBe(STONE); // 推线原样
+    expect(isExtended(w2, 4, 30, 4)).toBe(false);
+  });
+
+  it('黏液与蜂蜜相邻：互不粘（各走各的），但各自仍粘普通方块', () => {
+    // 推黏液，侧面蜂蜜留在原地
+    const w = setup();
+    w.setBlock(4, 30, 4, pistonIdFor(false, 4));
+    w.setBlock(4, 31, 4, K('slime_block'));
+    w.setBlock(5, 31, 4, K('honey_block'));
+    power(w, 3, 30, 4, true);
+    expect(w.getBlock(4, 32, 4)).toBe(K('slime_block'));
+    expect(w.getBlock(5, 31, 4)).toBe(K('honey_block')); // 未被带走
+    // 推蜂蜜，侧面黏液留在原地；蜂蜜仍粘住另一侧石头
+    const w2 = setup();
+    w2.setBlock(4, 30, 4, pistonIdFor(false, 4));
+    w2.setBlock(4, 31, 4, K('honey_block'));
+    w2.setBlock(5, 31, 4, K('slime_block'));
+    w2.setBlock(3, 31, 4, STONE);
+    power(w2, 3, 30, 4, true);
+    expect(w2.getBlock(4, 32, 4)).toBe(K('honey_block'));
+    expect(w2.getBlock(5, 31, 4)).toBe(K('slime_block')); // 未被带走
+    expect(w2.getBlock(3, 32, 4)).toBe(STONE); // 蜂蜜粘普通方块正常
+  });
+
+  it('不粘连例外：侧面黑曜石/火把不被带走（推仍成功）', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, pistonIdFor(false, 4));
+    w.setBlock(4, 31, 4, K('slime_block'));
+    w.setBlock(5, 31, 4, K('obsidian')); // 不可推块不粘
+    w.setBlock(3, 31, 4, K('torch')); // 附着类不粘
+    power(w, 3, 30, 4, true);
+    expect(w.getBlock(4, 32, 4)).toBe(K('slime_block'));
+    expect(w.getBlock(5, 31, 4)).toBe(K('obsidian')); // 留原地
+    expect(w.getBlock(3, 31, 4)).toBe(K('torch')); // 留原地
+  });
+
+  it('粘性活塞收回把粘连块一并拉回', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, pistonIdFor(true, 4)); // 朝上粘性
+    w.setBlock(4, 31, 4, K('slime_block'));
+    w.setBlock(5, 31, 4, STONE); // 粘连的石头
+    power(w, 3, 30, 4, true);
+    expect(w.getBlock(4, 32, 4)).toBe(K('slime_block'));
+    expect(w.getBlock(5, 32, 4)).toBe(STONE);
+    power(w, 3, 30, 4, false);
+    expect(w.getBlock(4, 31, 4)).toBe(K('slime_block')); // 拉回头部位置
+    expect(w.getBlock(4, 32, 4)).toBe(AIR);
+    expect(w.getBlock(5, 31, 4)).toBe(STONE); // 粘连块一并拉回
+    expect(w.getBlock(5, 32, 4)).toBe(AIR);
+  });
+
+  it('被粘连带动的侦测器仍发脉冲（回归：飞行器原理）', () => {
+    // 朝东活塞推黏液块，侦测器粘在黏液顶面被一并带走（不经推线，纯粘连路径）
+    const w = setup();
+    w.setBlock(4, 30, 4, pistonIdFor(false, 1)); // 朝东
+    w.setBlock(5, 30, 4, K('slime_block'));
+    w.setBlock(5, 31, 4, K('observer_w')); // 面朝 -x 检测、向 +x 输出；粘在黏液顶面
+    w.setBlock(7, 31, 4, K('redstone_lamp')); // 推到 (6,31,4) 后输出端正对灯
+    power(w, 3, 30, 4, true);
+    expect(w.getBlock(6, 30, 4)).toBe(K('slime_block'));
+    expect(w.getBlock(6, 31, 4)).toBe(K('observer_w')); // 被粘连推到新位置
+    expect(w.getBlock(7, 31, 4)).toBe(K('redstone_lamp')); // 推动当帧不输出（经 tick 调度）
+    tickRedstone(w, 0.1); // tick 消费 pushedObservers → 调度脉冲
+    expect(w.getBlock(7, 31, 4)).toBe(K('redstone_lamp'));
+    tickRedstone(w, 0.1); // 脉冲发出（延迟 1 红石刻）→ 灯亮
+    expect(w.getBlock(7, 31, 4)).toBe(K('redstone_lamp_lit'));
+    tickRedstone(w, 0.1); // 到期（持续 1 红石刻）→ 灯灭
+    expect(w.getBlock(7, 31, 4)).toBe(K('redstone_lamp'));
   });
 });
