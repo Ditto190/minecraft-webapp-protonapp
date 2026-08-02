@@ -17,6 +17,8 @@ export interface ItemDrop {
   id: number;
   drop: DropKind;
   count: number;
+  /** 可合并身份键（spawn 时算一次缓存；工具/装备为 null 不参与合并）——避免合并扫描逐个现场拼字符串 */
+  mergeKey: string | null;
   /** 工具/装备的剩余耐久（其他类别为 undefined） */
   durability?: number;
   /** 工具/装备的附魔（透传，避免死亡/容器掉落丢附魔） */
@@ -56,7 +58,7 @@ function spawn(drop: DropKind, x: number, y: number, z: number, count: number, d
     // 附近同种掉落并入现存堆（不超过 64）；Java：合并保留被并入堆的原年龄，不刷新消失计时
     for (const d of itemDrops) {
       if (count <= 0) break;
-      if (d.count >= MAX_STACK || mergeKeyOf(d.drop) !== mk) continue;
+      if (d.count >= MAX_STACK || d.mergeKey !== mk) continue;
       const dx = d.x - x;
       const dy = d.y - y;
       const dz = d.z - z;
@@ -68,7 +70,7 @@ function spawn(drop: DropKind, x: number, y: number, z: number, count: number, d
     if (count <= 0) return;
   }
   if (itemDrops.length >= MAX_DROPS) itemDrops.shift(); // 超上限丢弃最旧的
-  itemDrops.push({ id: nextId++, drop, count, durability, ench, x, y, z, velY: 2, age: 0 });
+  itemDrops.push({ id: nextId++, drop, count, mergeKey: mk, durability, ench, x, y, z, velY: 2, age: 0 });
 }
 
 export function spawnBlockDrop(blockId: BlockId, x: number, y: number, z: number, count = 1): void {

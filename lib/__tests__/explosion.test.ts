@@ -153,3 +153,23 @@ describe('爆炸伤害遮挡（exposure）', () => {
     expect(dmgHalf).toBeLessThan(dmgOpen);
   });
 });
+
+describe('加载半径边缘爆炸', () => {
+  it('贴边爆炸不隐式生成未加载 chunk，已加载侧破坏照常', () => {
+    const w = newWorld('exp-edge');
+    w.setBlock(14, 10, 15, DIRT); // 已加载侧的对照方块（chunk (0,0) 内）
+    const before = w.chunks.size;
+    // 爆心在 chunk (0,0) 的 x=15 东缘：破坏半径 R=4 跨进未加载的 chunk (1,0)，
+    // 旧实现的破坏循环与射线采样会对越界格 getBlock → 隐式同步生成整圈 chunk
+    explodeAt(w, 15.5, 10.5, 15.5, FAR_PLAYER, () => {}, TNT_OPTS);
+    expect(w.chunks.size).toBe(before); // 未隐式生成任何 chunk
+    // 已加载侧行为不变：钉死随机数 0.5，泥土 p = 1-(1+0.5)/6 = 0.75 > 0.5 必碎
+    const rand = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    try {
+      explodeAt(w, 14.5, 10.5, 14.5, FAR_PLAYER, () => {}, TNT_OPTS);
+    } finally {
+      rand.mockRestore();
+    }
+    expect(w.getBlock(14, 10, 15)).toBe(AIR);
+  });
+});

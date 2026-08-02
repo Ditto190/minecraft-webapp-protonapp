@@ -50,10 +50,16 @@ import { noteBlock } from './sound';
 import { storages } from './storage';
 import { igniteTnt } from './tnt';
 import { type World } from './world';
-import { CHUNK_SIZE, CHUNK_VOLUME, chunkKey } from './grid';
+import { CHUNK_SIZE, CHUNK_VOLUME, chunkKey, WORLD_HEIGHT } from './grid';
 import { registerWorldScope } from './worldScope';
 
 const key = (x: number, y: number, z: number): string => `${x},${y},${z}`;
+
+/** 读块但不隐式触发未加载 chunk 生成（未加载按 AIR 处理）：加载半径边缘的红石扫描/播种不再拖动 chunk 生成 */
+function getBlockLoaded(world: World, x: number, y: number, z: number): BlockId {
+  if (!world.isChunkLoaded(x, z)) return AIR;
+  return world.getBlock(x, y, z);
+}
 
 /** 粉网络功率图（0-15） */
 const power = new Map<string, number>();
@@ -73,6 +79,10 @@ const dustChargeBy = new Map<string, Set<string>>();
 const pointDirs = new Map<string, number>();
 /** 比较器前方格 → 输出电平（比较器激活前方元件的登记；无方块类型要求，灯/活塞直连输出面有效） */
 const compFront = new Map<string, number>();
+/** 元件登记表：反应扫描要处理的元件位置（火把含熄灭态/灯/门/TNT/活塞/活塞头/中继器/比较器/音符盒）。
+ *  与 sources 同款 "x,y,z" 键；notifyRedstone（所有 setBlock 必经路径）增量维护 + rescanSources 对新加载 chunk 补扫，
+ *  让 recompute 第 5 步只遍历登记项（半径内）而不再做 35³ 全量扫描 */
+const components = new Set<string>();
 
 const DUST = () => BLOCK_BY_KEY.redstone_dust.id;
 const TORCH = () => BLOCK_BY_KEY.redstone_torch.id;
@@ -147,6 +157,11 @@ function isConsumerId(id: BlockId): boolean {
   return id === LAMP() || id === LAMP_LIT() || id === TNT() || id === NOTE() || def.shape === 'door' || isPistonId(id) || def.key === 'piston_head' || isRepeaterIdInternal(id) || isComparatorId(id);
 }
 
+/** 反应扫描关心的全部元件：红石火把（含熄灭态，反相/烧毁反应）+ 消费端 */
+function isComponentId(id: BlockId): boolean {
+  return id === TORCH() || id === TORCH_OFF() || isConsumerId(id);
+}
+
 const DIRS = [
   [1, 0, 0],
   [-1, 0, 0],
@@ -177,12 +192,12 @@ function dustNeighbors(world: World, x: number, y: number, z: number, cb: (nx: n
 /** 粉的指向位掩码（MC Java）：有连接的方向（同层/对角上下坡的粉）；无任何连接的点状粉指水平四向。
  *  一字形只指两端——中段侧面的方块不被弱充能 */
 function computePointDirs(world: World, x: number, y: number, z: number): number {
-  const upBlocked = isConductor(world.getBlock(x, y + 1, z));
+  const upBlocked = isConductor(getBlockLoaded(world, x, y + 1, z));
   let m = 0;
   for (let i = 0; i < 4; i++) {
     const [dx, dz] = HDIRS[i];
-    if (world.getBlock(x + dx, y, z + dz) === DUST()) m |= 1 << i;
-    else if ((!upBlocked && world.getBlock(x + dx, y + 1, z + dz) === DUST()) || world.getBlock(x + dx, y - 1, z + dz) === DUST()) m |= 1 << i;
+    if (getBlockLoaded(world, x + dx, y, z + dz) === DUST()) m |= 1 << i;
+    else if ((!upBlocked && getBlockLoaded(world, x + dx, y + 1, z + dz) === DUST()) || getBlockLoaded(world, x + dx, y - 1, z + dz) === DUST()) m |= 1 << i;
   }
   return m === 0 ? 0b1111 : m;
 }
@@ -230,7 +245,7 @@ function blockEnergized(world: World, x: number, y: number, z: number): boolean 
     const ny = y + dy;
     const nz = z + dz;
     const nk = key(nx, ny, nz);
-    if (sources.has(nk) && !(dy === 1 && world.getBlock(nx, ny, nz) === TORCH())) {
+    if (sources.has(nk) && !(dy === 1 && getBlockLoaded(world, nx, ny, nz) === TORCH())) {
       const f = dirSources.get(nk);
       if (f === undefined) return true;
       const [fx, fy, fz] = FACING_VEC[f];
@@ -322,6 +337,7 @@ function recompute(world: World, cx: number, cy: number, cz: number): void {
   const pushCell = (x: number, y: number, z: number): void => {
     const k = key(x, y, z);
     if (cleared.has(k)) return;
+    if (!world.isChunkLoaded(x, z)) return; // 未加载不读块（防隐式生成）；残留功率登记随 chunk 重载后的重算清理
     if (world.getBlock(x, y, z) !== DUST() && !power.has(k)) return; // 粉格，或曾带电的粉格（方块刚被改动）
     cleared.add(k);
     flood.push([x, y, z]);
@@ -353,6 +369,7 @@ function recompute(world: World, cx: number, cy: number, cz: number): void {
   //    同时重建强/弱充能指向（撤销侧的清理见 removeSource / notifyRedstone）
   const queue: [number, number, number, number][] = [];
   const trySet = (x: number, y: number, z: number, level: number): void => {
+    if (!world.isChunkLoaded(x, z)) return; // 边缘播种不越界（防隐式生成）
     if (world.getBlock(x, y, z) !== DUST()) return;
     const k = key(x, y, z);
     if ((power.get(k) ?? 0) >= level) return;
@@ -362,14 +379,15 @@ function recompute(world: World, cx: number, cy: number, cz: number): void {
   for (const k of sources) {
     const [x, y, z] = k.split(',').map(Number);
     if (!inRange(x, y, z) && !touchesCleared(x, y, z)) continue;
+    if (!world.isChunkLoaded(x, z)) continue; // 未加载电源：不读块（防隐式生成），登记保留
     const id = world.getBlock(x, y, z);
     // 强充能：火把正上方块、中继器/脉冲侦测器输出方向的实心方块（驱动邻接粉与元件，MC）
     for (const [wx, wy, wz] of strongTargetsOf(x, y, z, id, k)) {
-      if (isConductor(world.getBlock(wx, wy, wz))) strong.set(key(wx, wy, wz), 15);
+      if (isConductor(getBlockLoaded(world, wx, wy, wz))) strong.set(key(wx, wy, wz), 15);
     }
     // 弱充能：拉杆/按钮/压力板/红石块指向的实心方块（只激活元件，不驱动粉，MC）
     for (const [wx, wy, wz] of weakTargetsOf(x, y, z, id)) {
-      if (isConductor(world.getBlock(wx, wy, wz))) weak.add(key(wx, wy, wz));
+      if (isConductor(getBlockLoaded(world, wx, wy, wz))) weak.add(key(wx, wy, wz));
     }
     if (isRepeaterOnId(id)) {
       // 中继器：只向输出方向（front）供能 15 级（信号再生，MC 核心特性）；
@@ -391,6 +409,7 @@ function recompute(world: World, cx: number, cy: number, cz: number): void {
   for (const [k, out] of compOutputs) {
     const [x, y, z] = k.split(',').map(Number);
     if (!inRange(x, y, z) && !touchesCleared(x, y, z)) continue;
+    if (!world.isChunkLoaded(x, z)) continue; // 未加载比较器：不读块（防隐式生成），登记保留
     const id = world.getBlock(x, y, z);
     if (!isComparatorId(id)) continue;
     const f = BLOCKS[id].facing ?? 0;
@@ -400,7 +419,7 @@ function recompute(world: World, cx: number, cy: number, cz: number): void {
       trySet(x + dx, y + dy, z + dz, out);
       trySet(x + dx, y + dy + 1, z + dz, out);
       compFront.set(fk, out);
-      if (isConductor(world.getBlock(x + dx, y + dy, z + dz))) strong.set(fk, out);
+      if (isConductor(getBlockLoaded(world, x + dx, y + dy, z + dz))) strong.set(fk, out);
     } else {
       compFront.delete(fk);
       strong.delete(fk);
@@ -428,130 +447,156 @@ function recompute(world: World, cx: number, cy: number, cz: number): void {
     if (lvl <= 0) continue;
     const [x, y, z] = k.split(',').map(Number);
     if (!inRange(x, y, z)) continue;
+    if (!world.isChunkLoaded(x, z)) continue; // 未加载粉格：不重建指向（防隐式生成），功率登记保留
     const m = computePointDirs(world, x, y, z);
     pointDirs.set(k, m);
     const charged = new Set<string>();
     for (let i = 0; i < 4; i++) {
       if ((m & (1 << i)) === 0) continue;
       const [dx, dz] = HDIRS[i];
-      if (!isConductor(world.getBlock(x + dx, y, z + dz))) continue;
+      if (!isConductor(getBlockLoaded(world, x + dx, y, z + dz))) continue;
       const bk = key(x + dx, y, z + dz);
       if ((dustCharge.get(bk) ?? 0) < lvl) dustCharge.set(bk, lvl);
       charged.add(bk);
     }
-    if (isConductor(world.getBlock(x, y - 1, z))) {
+    if (isConductor(getBlockLoaded(world, x, y - 1, z))) {
       const bk = key(x, y - 1, z);
       if ((dustCharge.get(bk) ?? 0) < lvl) dustCharge.set(bk, lvl);
       charged.add(bk);
     }
     if (charged.size > 0) dustChargeBy.set(k, charged);
   }
-  // 5. 半径内元件反应（先收集再回写，避免边算边改）
+  // 5. 半径内元件反应（先收集再回写，避免边算边改）。
+  //    登记表驱动：只遍历「登记表中落在半径内的元件」+「变动格与其 6 邻的活读补漏」
+  //    （补漏针对登记未覆盖的情形，如直写 data 未重扫的 chunk），不再做 35³ 全量扫描；
+  //    未加载 chunk 的登记项跳过且不读块（getBlock 会隐式触发全量生成）。
+  //    收集后按旧 35³ 扫描的逐点顺序排序（x 外层、y 中层、z 内层），反应收集/回写次序不变
   const reacts: (() => void)[] = [];
   let torchChanged = false; // 火把反相翻转需安排结算重播（等价 MC 的火把延迟）
-  for (let x = cx - R; x <= cx + R; x++) {
-    for (let y = Math.max(0, cy - R); y <= cy + R; y++) {
-      for (let z = cz - R; z <= cz + R; z++) {
-        const id = world.getBlock(x, y, z);
-        // 红石火把反相（NOT 门）：下方附着块被充能则熄灭，失去充能复亮；
-        // 烧毁（MC Java：3s 内切换 8 次）则恒灭，直到收到邻近方块更新（notifyRedstone 清除烧毁态）
-        if (id === TORCH() || id === TORCH_OFF()) {
-          const k = key(x, y, z);
-          if (burntTorches.has(k)) {
-            if (id === TORCH()) {
-              reacts.push(() => world.setBlock(x, y, z, TORCH_OFF())); // 烧毁态保底恒灭
-              torchChanged = true;
-            }
-            continue;
-          }
-          if (id === TORCH() && blockEnergized(world, x, y - 1, z)) {
-            recordTorchFlip(x, y, z); // 计入翻转；达阈值登记烧毁（本次照常熄灭）
-            reacts.push(() => world.setBlock(x, y, z, TORCH_OFF()));
-            torchChanged = true;
-          } else if (id === TORCH_OFF() && !blockEnergized(world, x, y - 1, z)) {
-            if (!recordTorchFlip(x, y, z)) {
-              reacts.push(() => world.setBlock(x, y, z, TORCH()));
-              torchChanged = true;
-            }
-            // 烧毁：本次不点亮（烧毁集已登记，后续走上方恒灭分支）
-          }
-          continue;
+  const scanCells: [number, number, number][] = [];
+  const seenCells = new Set<string>();
+  for (const k of components) {
+    const [x, y, z] = k.split(',').map(Number);
+    if (Math.abs(x - cx) > R || Math.abs(y - cy) > R || Math.abs(z - cz) > R) continue;
+    if (!world.isChunkLoaded(x, z)) continue;
+    seenCells.add(k);
+    scanCells.push([x, y, z]);
+  }
+  for (let d = -1; d < DIRS.length; d++) {
+    const [dx, dy, dz] = d < 0 ? [0, 0, 0] : DIRS[d];
+    const nx = cx + dx;
+    const ny = cy + dy;
+    const nz = cz + dz;
+    if (ny < 0 || ny >= WORLD_HEIGHT) continue;
+    const nk = key(nx, ny, nz);
+    if (seenCells.has(nk) || !world.isChunkLoaded(nx, nz)) continue;
+    if (!isComponentId(world.getBlock(nx, ny, nz))) continue;
+    seenCells.add(nk);
+    scanCells.push([nx, ny, nz]);
+  }
+  scanCells.sort((a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2]);
+  for (const [x, y, z] of scanCells) {
+    const id = world.getBlock(x, y, z);
+    // 红石火把反相（NOT 门）：下方附着块被充能则熄灭，失去充能复亮；
+    // 烧毁（MC Java：3s 内切换 8 次）则恒灭，直到收到邻近方块更新（notifyRedstone 清除烧毁态）
+    if (id === TORCH() || id === TORCH_OFF()) {
+      const k = key(x, y, z);
+      if (burntTorches.has(k)) {
+        if (id === TORCH()) {
+          reacts.push(() => world.setBlock(x, y, z, TORCH_OFF())); // 烧毁态保底恒灭
+          torchChanged = true;
         }
-        if (!isConsumerId(id)) continue;
-        const on = poweredAt(x, y, z);
-        if (id === LAMP() && on) reacts.push(() => world.setBlock(x, y, z, LAMP_LIT()));
-        else if (id === LAMP_LIT() && !on) reacts.push(() => world.setBlock(x, y, z, LAMP()));
-        else if (id === TNT() && on) {
+        continue;
+      }
+      if (id === TORCH() && blockEnergized(world, x, y - 1, z)) {
+        recordTorchFlip(x, y, z); // 计入翻转；达阈值登记烧毁（本次照常熄灭）
+        reacts.push(() => world.setBlock(x, y, z, TORCH_OFF()));
+        torchChanged = true;
+      } else if (id === TORCH_OFF() && !blockEnergized(world, x, y - 1, z)) {
+        if (!recordTorchFlip(x, y, z)) {
+          reacts.push(() => world.setBlock(x, y, z, TORCH()));
+          torchChanged = true;
+        }
+        // 烧毁：本次不点亮（烧毁集已登记，后续走上方恒灭分支）
+      }
+      continue;
+    }
+    if (!isConsumerId(id)) {
+      components.delete(key(x, y, z)); // 失效登记自检除名（直写 data 替换等非常规路径）
+      continue;
+    }
+    const on = poweredAt(x, y, z);
+    if (id === LAMP() && on) reacts.push(() => world.setBlock(x, y, z, LAMP_LIT()));
+    else if (id === LAMP_LIT() && !on) reacts.push(() => world.setBlock(x, y, z, LAMP()));
+    else if (id === TNT() && on) {
+      reacts.push(() => {
+        world.setBlock(x, y, z, AIR);
+        igniteTnt(x, y, z);
+      });
+    } else if (id === NOTE()) {
+      // 音符盒：充能上升沿发声（音高按右击调音记录，默认 0 = C4）
+      const k = key(x, y, z);
+      const prev = noteStates.get(k) ?? false;
+      noteStates.set(k, on);
+      if (on && !prev) {
+        const semi = notePitches.get(k) ?? 0;
+        reacts.push(() => noteBlock(semi));
+      }
+    } else if (isPistonId(id)) {
+      // 活塞：供能推出、断能收回（粘性拉回）。
+      // QC 半连接性（MC Java）：上方一格 (x,y+1,z) 按门位置做供电判定；QC 供能时只在收到
+      // 邻近方块更新（本次重算的变动格与活塞 6 邻接，含活塞自身被放置）才动作（BUD 态），常规供电即时动作
+      const k = key(x, y, z);
+      const qc = poweredAt(x, y + 1, z);
+      const updated = Math.abs(x - cx) + Math.abs(y - cy) + Math.abs(z - cz) <= 1;
+      if ((on || qc) && !isExtended(world, x, y, z)) {
+        if (on || updated) {
+          pistonOnAt.set(k, simTime);
           reacts.push(() => {
-            world.setBlock(x, y, z, AIR);
-            igniteTnt(x, y, z);
+            tryExtend(world, x, y, z);
+            // 推出失败（行堵/超 12 块上限）：回滚供电起始记录，防条目泄漏
+            if (!isExtended(world, x, y, z)) pistonOnAt.delete(k);
           });
-        } else if (id === NOTE()) {
-          // 音符盒：充能上升沿发声（音高按右击调音记录，默认 0 = C4）
-          const k = key(x, y, z);
-          const prev = noteStates.get(k) ?? false;
-          noteStates.set(k, on);
-          if (on && !prev) {
-            const semi = notePitches.get(k) ?? 0;
-            reacts.push(() => noteBlock(semi));
-          }
-        } else if (isPistonId(id)) {
-          // 活塞：供能推出、断能收回（粘性拉回）。
-          // QC 半连接性（MC Java）：上方一格 (x,y+1,z) 按门位置做供电判定；QC 供能时只在收到
-          // 邻近方块更新（本次重算的变动格与活塞 6 邻接，含活塞自身被放置）才动作（BUD 态），常规供电即时动作
-          const k = key(x, y, z);
-          const qc = poweredAt(x, y + 1, z);
-          const updated = Math.abs(x - cx) + Math.abs(y - cy) + Math.abs(z - cz) <= 1;
-          if ((on || qc) && !isExtended(world, x, y, z)) {
-            if (on || updated) {
-              pistonOnAt.set(k, simTime);
-              reacts.push(() => {
-                tryExtend(world, x, y, z);
-                // 推出失败（行堵/超 12 块上限）：回滚供电起始记录，防条目泄漏
-                if (!isExtended(world, x, y, z)) pistonOnAt.delete(k);
-              });
-            }
-          } else if (!on && !qc && isExtended(world, x, y, z)) {
-            // 粘性活塞 1-tick 短脉冲：供电时长 ≤1 红石刻（0.1s，+0.05s 帧调度裕量）时收回不拉回方块（MC Java）；
-            // 同一时刻内供断（delta=0，如同帧拉杆开关）不算短脉冲，正常拉回
-            const started = pistonOnAt.get(k);
-            pistonOnAt.delete(k);
-            const shortPulse = isStickyPistonId(id) && started !== undefined && started < simTime && simTime - started <= 0.15;
-            reacts.push(() => retract(world, x, y, z, shortPulse));
-          }
-        } else if (isRepeaterIdInternal(id)) {
-          // 中继器：输入（背向）状态变化 → 按延迟档调度翻转（tickRedstone 结算）；
-          // 侧向锁存（MC）：被另一充能中继器/比较器从侧面指向时锁定，输出保持、撤销待结算翻转
-          const f = BLOCKS[id].facing ?? 0;
-          const [dx, , dz] = FACING_VEC[f];
-          if (repeaterLocked(world, x, y, z, f)) {
-            const idx = pendingFlips.findIndex((fl) => fl.key === key(x, y, z));
-            if (idx >= 0) pendingFlips.splice(idx, 1);
-          } else if (inputAt(world, x, y, z, dx, dz) !== isRepeaterOnId(id)) {
-            scheduleFlip(x, y, z);
-          }
-        } else if (isComparatorId(id)) {
-          // 比较器：输入变化 → 调度 1 红石刻后结算（MC 延迟；tickRedstone 到期按实时输入提交，去抖）
-          const out = computeCompOut(world, x, y, z);
-          if (out !== (compOutputs.get(key(x, y, z)) ?? 0)) scheduleCompEval(key(x, y, z));
-        } else if (BLOCKS[id]?.key === 'piston_head') {
-          // 孤儿活塞头：背向无活塞自动消失
-          reacts.push(() => cleanupOrphanHeads(world, x, y, z));
-        } else {
-          const def = BLOCKS[id];
-          if (def?.shape === 'door') {
-            // 门：供能开、断能合（上下两格同步；注册序每朝向 [bottom, top, open_bottom, open_top]）
-            const f = def.facing!;
-            const baseId = BLOCK_BY_KEY.oak_door_bottom_n.id + f * 4;
-            const wantOpen = on;
-            if (def.doorOpen !== wantOpen) {
-              const bottomY = def.doorHalf === 'top' ? y - 1 : y;
-              reacts.push(() => {
-                world.setBlock(x, bottomY, z, baseId + (wantOpen ? 2 : 0));
-                world.setBlock(x, bottomY + 1, z, baseId + (wantOpen ? 3 : 1));
-              });
-            }
-          }
+        }
+      } else if (!on && !qc && isExtended(world, x, y, z)) {
+        // 粘性活塞 1-tick 短脉冲：供电时长 ≤1 红石刻（0.1s，+0.05s 帧调度裕量）时收回不拉回方块（MC Java）；
+        // 同一时刻内供断（delta=0，如同帧拉杆开关）不算短脉冲，正常拉回
+        const started = pistonOnAt.get(k);
+        pistonOnAt.delete(k);
+        const shortPulse = isStickyPistonId(id) && started !== undefined && started < simTime && simTime - started <= 0.15;
+        reacts.push(() => retract(world, x, y, z, shortPulse));
+      }
+    } else if (isRepeaterIdInternal(id)) {
+      // 中继器：输入（背向）状态变化 → 按延迟档调度翻转（tickRedstone 结算）；
+      // 侧向锁存（MC）：被另一充能中继器/比较器从侧面指向时锁定，输出保持、撤销待结算翻转
+      const f = BLOCKS[id].facing ?? 0;
+      const [dx, , dz] = FACING_VEC[f];
+      if (repeaterLocked(world, x, y, z, f)) {
+        const idx = pendingFlips.findIndex((fl) => fl.key === key(x, y, z));
+        if (idx >= 0) pendingFlips.splice(idx, 1);
+      } else if (inputAt(world, x, y, z, dx, dz) !== isRepeaterOnId(id)) {
+        scheduleFlip(x, y, z);
+      }
+    } else if (isComparatorId(id)) {
+      // 比较器：输入变化 → 调度 1 红石刻后结算（MC 延迟；tickRedstone 到期按实时输入提交，去抖）
+      const out = computeCompOut(world, x, y, z);
+      if (out !== (compOutputs.get(key(x, y, z)) ?? 0)) scheduleCompEval(key(x, y, z));
+    } else if (BLOCKS[id]?.key === 'piston_head') {
+      // 孤儿活塞头：背向无活塞自动消失
+      reacts.push(() => cleanupOrphanHeads(world, x, y, z));
+    } else {
+      const def = BLOCKS[id];
+      if (def?.shape === 'door') {
+        // 门：供能开、断能合（上下两格同步；注册序每朝向 [bottom, top, open_bottom, open_top]）
+        const f = def.facing!;
+        const baseId = BLOCK_BY_KEY.oak_door_bottom_n.id + f * 4;
+        const wantOpen = on;
+        if (def.doorOpen !== wantOpen) {
+          const bottomY = def.doorHalf === 'top' ? y - 1 : y;
+          reacts.push(() => {
+            world.setBlock(x, bottomY, z, baseId + (wantOpen ? 2 : 0));
+            world.setBlock(x, bottomY + 1, z, baseId + (wantOpen ? 3 : 1));
+          });
         }
       }
     }
@@ -574,6 +619,9 @@ function recompute(world: World, cx: number, cy: number, cz: number): void {
 export function notifyRedstone(world: World, x: number, y: number, z: number, oldId: BlockId, newId: BlockId): void {
   if (oldId === newId) return;
   const k = key(x, y, z);
+  // 元件登记表增量维护（本格进出元件；反应回写的 setBlock 也走这里，登记必须先于 applying 早退）
+  if (isComponentId(oldId)) components.delete(k);
+  if (isComponentId(newId)) components.add(k);
   const wasSource = sources.has(k); // 含压力板/侦测器/标靶等临时电源
   if (isSourceId(oldId) || wasSource) removeSource(x, y, z, k);
   weak.delete(k); // 本格曾弱充能：方块已变，指向失效
@@ -711,6 +759,7 @@ export function clearRedstone(): void {
   dustChargeBy.clear();
   pointDirs.clear();
   compFront.clear();
+  components.clear();
   scannedChunks.clear();
   pendingFlips.length = 0;
   delays.clear();
@@ -732,17 +781,39 @@ export function clearRedstone(): void {
 
 // ——— 电源重扫：换维度/读档后从已加载 chunk 重建登记表 ———
 
+/** blockId 标志表：bit0 电源、bit1 侦测器、bit2 反应元件。首次重扫时建一次，
+ *  rescanSources 内层 32,768 格从逐格 startsWith/正则降为两次数组读取 */
+const FLAG_SOURCE = 1;
+const FLAG_OBSERVER = 2;
+const FLAG_COMPONENT = 4;
+let blockFlagTable: Uint8Array | null = null;
+function blockFlags(): Uint8Array {
+  if (blockFlagTable) return blockFlagTable;
+  const t = new Uint8Array(BLOCKS.length);
+  for (let id = 0; id < BLOCKS.length; id++) {
+    let f = 0;
+    if (isSourceId(id)) f |= FLAG_SOURCE;
+    if (isObserverId(id)) f |= FLAG_OBSERVER;
+    if (isComponentId(id)) f |= FLAG_COMPONENT;
+    t[id] = f;
+  }
+  blockFlagTable = t;
+  return t;
+}
+
 /** 已扫过的 chunk（按 key；chunk 卸载重载后数据与扫描时一致，无需重扫） */
 const scannedChunks = new Set<string>();
 
 /**
- * 换维度/读档后重建电源登记：遍历已加载 chunk 找出电源方块（红石火把/开着的拉杆/红石块/on 态中继器），
- * 并对新发现的电源做局部重算恢复供能（灯亮、粉带电）。逐帧调用安全：只扫新加载的 chunk（增量）。
+ * 换维度/读档后重建登记：遍历已加载 chunk 找出电源方块（红石火把/开着的拉杆/红石块/on 态中继器）、
+ * 反应元件（登记表，recompute 第 5 步的扫描入口），并对新发现的电源做局部重算恢复供能（灯亮、粉带电）。
+ * 逐帧调用安全：只扫新加载的 chunk（增量）；内层经 blockFlags 标志表两次数组读取判定，不做逐格字符串匹配。
  * 同时重新登记侦测器（记录面朝格现状签名，不因读档误触发）与按下态按钮（不持久，读档后 1s 回弹）。
  * 注：后台惰性补齐的存档 chunk 若替换了已扫 chunk 的数据（applySavedChunk）可能漏扫，该 chunk 卸载重载后自动补扫。
  */
 export function rescanSources(world: World): void {
   const found: [number, number, number][] = [];
+  const flags = blockFlags();
   for (const chunk of world.chunks.values()) {
     const ck = chunkKey(chunk.cx, chunk.cz);
     if (scannedChunks.has(ck)) continue;
@@ -751,18 +822,21 @@ export function rescanSources(world: World): void {
     const baseZ = chunk.cz * CHUNK_SIZE;
     for (let i = 0; i < CHUNK_VOLUME; i++) {
       const id = chunk.data[i] as BlockId;
-      if (!isSourceId(id) && !isObserverId(id)) continue;
+      const fl = flags[id];
+      if (fl === 0) continue;
       const x = baseX + (i % CHUNK_SIZE);
       const y = Math.floor(i / (CHUNK_SIZE * CHUNK_SIZE));
       const z = baseZ + (Math.floor(i / CHUNK_SIZE) % CHUNK_SIZE);
       const k = key(x, y, z);
-      if (isObserverId(id)) {
+      if ((fl & FLAG_COMPONENT) !== 0) components.add(k);
+      if ((fl & FLAG_OBSERVER) !== 0) {
         // 侦测器：记录面朝格现状签名（读档不触发脉冲，MC Java 放置/加载不触发）
         const f = BLOCKS[id].facing ?? 0;
         const [dx, dy, dz] = FACING_VEC[f];
         observers.set(k, obsSignature(world, x + dx, y + dy, z + dz));
         continue;
       }
+      if ((fl & FLAG_SOURCE) === 0) continue;
       sources.add(k);
       if (isRepeaterOnId(id)) dirSources.set(k, BLOCKS[id].facing ?? 0);
       if (isButtonOnId(id)) pendingPulses.push({ key: k, at: simTime + 1, kind: 'button' });
@@ -820,7 +894,7 @@ function repeaterLocked(world: World, x: number, y: number, z: number, f: number
     [sx, sz],
     [-sx, -sz],
   ] as const) {
-    const nid = world.getBlock(x + dx, y, z + dz);
+    const nid = getBlockLoaded(world, x + dx, y, z + dz);
     if (!isRepeaterOnId(nid) && !isComparatorOnId(nid)) continue; // 须是充能态中继器/比较器
     const nf = BLOCKS[nid].facing ?? 0;
     const [fx, , fz] = FACING_VEC[nf];
@@ -840,7 +914,7 @@ function inputAt(world: World, x: number, y: number, z: number, dx: number, dz: 
   }
   if (strong.has(bk) || weak.has(bk) || dustCharge.has(bk)) return true;
   if ((power.get(bk) ?? 0) > 0) return true; // 背格粉（Java 粉自动指向中继器背向）
-  const bid = world.getBlock(x - dx, y, z - dz);
+  const bid = getBlockLoaded(world, x - dx, y, z - dz);
   if (isComparatorId(bid) && (compOutputs.get(bk) ?? 0) > 0) {
     const cf = BLOCKS[bid].facing ?? 0;
     const [fx, , fz] = FACING_VEC[cf];
@@ -893,7 +967,7 @@ function fullnessSignal(sum: number, slotCount: number): number {
 /** 容器的装满度信号 0-15；不是容器返回 null（MC Java：容器满度取代后侧红石信号）。
  *  槽内最大堆叠：方块/材料 STACK_MAX(64)，工具/装备不可堆叠按 1（本项目无 16 堆叠物品） */
 function containerSignalAt(world: World, x: number, y: number, z: number): number | null {
-  const bk = blockKeyOf(world.getBlock(x, y, z));
+  const bk = blockKeyOf(getBlockLoaded(world, x, y, z));
   const k = key(x, y, z);
   if (bk === 'chest' || bk === 'barrel') {
     const slots = storages.get(k);
@@ -979,7 +1053,7 @@ const observers = new Map<string, string>();
 
 /** 侦测器面朝格的状态签名（MC Java 侦测器检测方块状态而非仅 id）：方块 id + 粉功率 / 中继器档位 / 比较器模式与输出电平 */
 function obsSignature(world: World, x: number, y: number, z: number): string {
-  const id = world.getBlock(x, y, z);
+  const id = getBlockLoaded(world, x, y, z); // 贴边侦测器的面朝格可能在未加载 chunk：按 AIR，不隐式生成
   const k = key(x, y, z);
   if (id === DUST()) return `${id}:${power.get(k) ?? 0}`;
   if (isRepeaterIdInternal(id)) return `${id}:${delays.get(k) ?? 1}`;
@@ -1019,6 +1093,7 @@ function tickObservers(world: World): void {
   observerRemoveScratch.length = 0;
   for (const [k, prev] of observers) {
     const [x, y, z] = k.split(',').map(Number);
+    if (!world.isChunkLoaded(x, z)) continue; // 未加载：不读块（防隐式生成），登记与签名保留
     const id = world.getBlock(x, y, z);
     if (!isObserverId(id)) {
       observerRemoveScratch.push(k); // 兜底：被挖/推走（正常由 notifyRedstone 清理）
@@ -1056,6 +1131,7 @@ export function tickRedstone(world: World, dt: number): void {
     }
     for (const p of due) {
       const [x, y, z] = p.key.split(',').map(Number);
+      if (!world.isChunkLoaded(x, z)) continue; // 脉冲发出时 chunk 已卸载：不隐式生成，脉冲丢弃
       const id = world.getBlock(x, y, z);
       if (!isObserverId(id)) continue;
       const f = BLOCKS[id].facing ?? 0;
@@ -1072,6 +1148,7 @@ export function tickRedstone(world: World, dt: number): void {
     }
     for (const p of due) {
       const [x, y, z] = p.key.split(',').map(Number);
+      if (!world.isChunkLoaded(x, z)) continue; // 到期时 chunk 已卸载：不隐式生成（按钮回弹由重载后 rescanSources 补排）
       if (p.kind === 'button') {
         // 按钮回弹（可能已被挖掉/读档后方块不在）
         const id = world.getBlock(x, y, z);
@@ -1091,6 +1168,7 @@ export function tickRedstone(world: World, dt: number): void {
     }
     for (const f of due) {
       const [x, y, z] = f.key.split(',').map(Number);
+      if (!world.isChunkLoaded(x, z)) continue; // 结算时 chunk 已卸载：不隐式生成
       const id = world.getBlock(x, y, z);
       if (!isComparatorId(id)) continue;
       const out = computeCompOut(world, x, y, z);
@@ -1121,6 +1199,7 @@ export function tickRedstone(world: World, dt: number): void {
   }
   for (const f of due) {
     const [x, y, z] = f.key.split(',').map(Number);
+    if (!world.isChunkLoaded(x, z)) continue; // 结算时 chunk 已卸载：不隐式生成
     const id = world.getBlock(x, y, z);
     if (!isRepeaterIdInternal(id)) continue;
     const facing = BLOCKS[id].facing ?? 0;

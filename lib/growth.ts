@@ -33,7 +33,7 @@ const MAX_AGE = 15;
 const columnAges = new Map<string, number>();
 const columnKey = (x: number, z: number): string => `${x},${z}`;
 
-let acc = 0;
+let sampleDebt = 0; // 待处理抽样数：按 dt 以「每拍 SAMPLES_PER_CHUNK 次」的速率折算累计，分数部分留到下次调用
 const rand = mulberry32(0x9e3779b9);
 
 /** 水平四邻是否有实心方块 */
@@ -61,16 +61,19 @@ function tryGrow(world: World, x: number, y: number, z: number, key: 'cactus' | 
 }
 
 /**
- * 每 ~2s：每个已加载 chunk 按 Java 随机刻密度抽样（换算见文件头）。
- * 命中柱作物仅顶段（上方为空气）计数/拔节——Java 中随机刻也只作用于顶段，下方茎段被抽中无效；
- * 命中贴实心的仙人掌则整列塌落破坏
+ * 每 ~2s 每 chunk 等效抽 SAMPLES_PER_CHUNK 格（Java 随机刻密度，换算见文件头）。
+ * 抽样摊到拍间各次调用上：按 dt 折算本次应抽样本数（一拍节奏与 Java 等效概率密度不变；
+ * dt=2 整拍调用时一次抽满 960，与旧的拍边界一次性结算等价），消除拍边界 960×chunk 次
+ * getBlock 的集中尖刺。命中规则不变：柱作物仅顶段（上方为空气）计数/拔节——Java 中随机刻
+ * 也只作用于顶段，下方茎段被抽中无效；命中贴实心的仙人掌则整列塌落破坏
  */
 export function tickGrowth(world: World, dt: number): void {
-  acc += dt;
-  if (acc < 2) return;
-  acc = 0;
+  sampleDebt += (SAMPLES_PER_CHUNK * dt) / 2;
+  const n = Math.floor(sampleDebt);
+  if (n <= 0) return;
+  sampleDebt -= n;
   for (const chunk of world.chunks.values()) {
-    for (let n = 0; n < SAMPLES_PER_CHUNK; n++) {
+    for (let i = 0; i < n; i++) {
       const x = chunk.cx * 16 + Math.floor(rand() * 16);
       const z = chunk.cz * 16 + Math.floor(rand() * 16);
       const y = Math.floor(rand() * WORLD_HEIGHT);

@@ -27,6 +27,24 @@ const key = (x: number, y: number, z: number): string => `${x},${y},${z}`;
 /** 每 tick 最多处理的耕地数（湿润检查每块要扫 9×9×2，限量避免大农场卡顿） */
 const FARMLAND_BATCH = 64;
 
+/** 每 tick 最多处理的作物数（大农场分摊到多个 tick，轮转游标与 farmlands 同款） */
+const CROP_BATCH = 256;
+
+type ChunkT = World['chunks'] extends Map<string, infer C> ? C : never;
+/** 光照查询的上次 chunk 引用（仅单次 tickCrops 内有效，函数入口重置；chunk 数据原地可变，引用安全） */
+let lightCacheCk = '';
+let lightCacheChunk: ChunkT | null = null;
+
+/** 按方块坐标取所在 chunk（带单条目缓存；同 chunk 连续查询省掉 key 拼接与 Map 查找） */
+function chunkAt(world: World, x: number, z: number): ChunkT | undefined {
+  const ck = `${x >> 4},${z >> 4}`;
+  if (ck === lightCacheCk) return lightCacheChunk ?? undefined;
+  const c = world.chunks.get(ck);
+  lightCacheCk = ck;
+  lightCacheChunk = c ?? null;
+  return c;
+}
+
 /** world.setBlock 钩子：登记/注销作物与耕地（生成过程直接写 data 不走这里） */
 export function notifyCropBlockSet(x: number, y: number, z: number, newId: BlockId): void {
   const k = key(x, y, z);
@@ -57,7 +75,7 @@ function hasWaterNear(world: World, x: number, y: number, z: number): boolean {
 
 /** 作物所在格的有效光照：方块光与（白天时的）天空光取大者 */
 function lightAt(world: World, x: number, y: number, z: number, day: boolean): number {
-  const c = world.chunks.get(`${x >> 4},${z >> 4}`);
+  const c = chunkAt(world, x, z);
   if (!c) return 0;
   // localIndex 公式与 world.ts 一致（此处内联避免运行时循环依赖）
   const i = (y * 16 + (z & 15)) * 16 + (x & 15);
@@ -66,7 +84,7 @@ function lightAt(world: World, x: number, y: number, z: number, day: boolean): n
 
 /** 能否见天（Java canSeeSky 的简化）：天空光满格 15 即所在列无遮挡直见天空（侧面渗透 ≤14，规则见 lib/lights.ts） */
 function canSeeSky(world: World, x: number, y: number, z: number): boolean {
-  const c = world.chunks.get(`${x >> 4},${z >> 4}`);
+  const c = chunkAt(world, x, z);
   if (!c) return false;
   const i = (y * 16 + (z & 15)) * 16 + (x & 15);
   return c.sky[i] >= 15;
@@ -135,12 +153,16 @@ export function rescanCropsChunk(world: World, cx: number, cz: number): void {
  *   每 tick 限量处理 FARMLAND_BATCH 块（大农场分摊到多个 tick，避免主线程卡顿），
  *   处理完仍有效的重新加到 Set 尾部，天然形成轮转游标
  * - 作物：下方耕地没了则以掉落物形式弹出（按阶段掉种子/小麦，同收割）；
- *   所在格光照 ≤7 且不能见天同样弹出（Java canSurvive）；存活且光照 ≥9 才生长
+ *   所在格光照 ≤7 且不能见天同样弹出（Java canSurvive）；存活且光照 ≥9 才生长；
+ *   每 tick 限量处理 CROP_BATCH 棵（大农场分摊到多个 tick，轮转游标与 farmlands 同款），
+ *   光照查询经 chunkAt 单条目缓存（同一 chunk 的连续作物省掉重复 key 拼接与 Map 查找）
  */
 export function tickCrops(world: World, dt: number): void {
   growAcc += dt;
   if (growAcc < 2) return;
   growAcc = 0;
+  lightCacheCk = '';
+  lightCacheChunk = null; // 缓存仅限本次 tick（chunk 数据原地可变，跨 tick 重查防卸载残留）
   const dryId = BLOCK_BY_KEY.farmland.id;
   const moistId = BLOCK_BY_KEY.farmland_moist.id;
   const dirtId = BLOCK_BY_KEY.dirt.id;
@@ -175,19 +197,24 @@ export function tickCrops(world: World, dt: number): void {
   }
 
   const day = dayFactorAt(worldClock.t) > 0.4;
-  for (const k of [...crops]) {
+  const cropBatch: string[] = [];
+  for (const k of crops) {
+    if (cropBatch.length >= CROP_BATCH) break;
+    cropBatch.push(k);
+  }
+  for (const k of cropBatch) {
+    crops.delete(k);
     const [x, y, z] = k.split(',').map(Number);
-    if (!world.chunks.has(`${x >> 4},${z >> 4}`)) continue;
-    const id = world.getBlock(x, y, z);
-    if (!isWheatCropId(id) || id >= WHEAT_CROP_7) {
-      crops.delete(k); // 已成熟或被移除，停止追踪
+    if (!world.chunks.has(`${x >> 4},${z >> 4}`)) {
+      crops.add(k); // 未加载的保留登记（移到队尾），本轮不结算
       continue;
     }
+    const id = world.getBlock(x, y, z);
+    if (!isWheatCropId(id) || id >= WHEAT_CROP_7) continue; // 已成熟或被移除，停止追踪（delete 后不重新加入）
     const below = world.getBlock(x, y - 1, z);
     if (!isFarmlandId(below)) {
       // Java：耕地没了（退化/被踩/被挖）→ 作物以掉落物形式弹出，不是直接吞掉
       popCrop(world, x, y, z);
-      crops.delete(k);
       continue;
     }
     // Java canSurvive：作物格光照 ≤7 且不能见天 → 弹出（与下面的生长光照规则区分：
@@ -195,12 +222,13 @@ export function tickCrops(world: World, dt: number): void {
     const light = lightAt(world, x, y, z, day);
     if (light <= 7 && !canSeeSky(world, x, y, z)) {
       popCrop(world, x, y, z);
-      crops.delete(k);
       continue;
     }
-    if (light < 9) continue;
-    const chance = below === moistId ? 1 / 6 : 1 / 12;
-    if (rand() < chance) world.setBlock(x, y, z, id + 1);
+    if (light >= 9) {
+      const chance = below === moistId ? 1 / 6 : 1 / 12;
+      if (rand() < chance) world.setBlock(x, y, z, id + 1);
+    }
+    crops.add(k); // 仍未成熟：重新入队尾（setBlock 升阶段钩子也会 add，幂等）
   }
 }
 

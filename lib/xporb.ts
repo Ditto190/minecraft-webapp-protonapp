@@ -33,6 +33,7 @@ const MERGE_RANGE = 0.5;
 
 /** 经验球合并（MC）：邻近球两两合并，value 相加（单球值无上限）；较老那颗存活——年龄/消失计时取老 */
 export function mergeXpOrbs(range = MERGE_RANGE): void {
+  if (xpOrbs.length < 2) return; // 单球/空场每帧都有：省掉 new Set 与 O(n²) 扫描
   const dead = new Set<number>();
   for (let i = 0; i < xpOrbs.length; i++) {
     if (dead.has(i)) continue;

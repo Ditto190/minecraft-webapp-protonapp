@@ -440,3 +440,19 @@ describe('红石火把烧毁（burnout，MC Java：60 游戏刻=3s 内切换 8 �
     expect(w.getBlock(4, 31, 4)).toBe(K('redstone_torch'));
   });
 });
+
+describe('加载半径边缘不隐式生成 chunk', () => {
+  it('边缘放红石（recompute 扫描/播种 R=17 越界）：不生成新 chunk，近端供能照常', () => {
+    const w = setup();
+    // 装置全部贴着 chunk (0,0) 的 x=15 东缘：东邻 chunk (1,0) 未加载
+    w.setBlock(15, 30, 15, STONE);
+    const before = w.chunks.size;
+    w.setBlock(15, 31, 15, K('redstone_torch')); // 电源登记 + recompute：旧实现 35³ 扫描/6 邻播种会隐式生成 (±1..2) 圈 chunk
+    w.setBlock(14, 31, 15, K('redstone_dust')); // 清除 flood 与播种同样贴边
+    expect(w.getBlock(14, 31, 15)).toBe(K('redstone_dust'));
+    expect(dustPowerAt(14, 31, 15)).toBe(15); // 已加载侧供能行为不变
+    w.setBlock(15, 31, 15, AIR); // 挖掉电源再触发一次 recompute
+    expect(dustPowerAt(14, 31, 15)).toBe(0);
+    expect(w.chunks.size).toBe(before); // 全程未隐式生成任何 chunk
+  });
+});

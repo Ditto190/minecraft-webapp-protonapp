@@ -40,11 +40,15 @@ function pathAbsorption(world: World, x: number, y: number, z: number, bx: numbe
   const uy = dy / dist;
   const uz = dz / dist;
   // Java 水/岩浆爆炸抗性 100：爆心浸入流体时吸能足以吞掉全部射线（爆心在空气中则不加，避免过度防护水下方块）
-  const origin = world.getBlock(Math.floor(x), Math.floor(y), Math.floor(z));
+  // 未加载 chunk 不读块（按空气）：getBlock 会隐式触发全量生成，加载半径边缘的爆炸会把生成拖出视距
+  const origin = world.isChunkLoaded(Math.floor(x), Math.floor(z)) ? world.getBlock(Math.floor(x), Math.floor(y), Math.floor(z)) : AIR;
   let sum = isWaterId(origin) || isLavaId(origin) ? 100 : 0;
   // 采样到目标格边界为止（回溯半格，避免把目标格自身算进途经；目标格抗性由调用方单独计入）
   for (let s = 0.3; s < dist - 0.5; s += 0.3) {
-    const id = world.getBlock(Math.floor(x + ux * s), Math.floor(y + uy * s), Math.floor(z + uz * s));
+    const sx = Math.floor(x + ux * s);
+    const sz = Math.floor(z + uz * s);
+    if (!world.isChunkLoaded(sx, sz)) continue; // 未加载方向不衰减（按空气），不隐式生成
+    const id = world.getBlock(sx, Math.floor(y + uy * s), sz);
     if (id === AIR || isWaterId(id) || isLavaId(id)) continue;
     const res = blastResistanceOf(id);
     if (res === Infinity) return Infinity; // 黑曜石墙/基岩吞掉射线，其后方块全部幸免（MC）
@@ -115,6 +119,8 @@ export function explodeAt(
   for (let bx = cx - R; bx <= cx + R; bx++) {
     for (let by = cy - R; by <= cy + R; by++) {
       for (let bz = cz - R; bz <= cz + R; bz++) {
+        // 未加载 chunk 跳过且不读块：getBlock 会隐式触发全量生成（边缘 TNT 把整圈 chunk 同步生成，冻结数百 ms）
+        if (!world.isChunkLoaded(bx, bz)) continue;
         const id = world.getBlock(bx, by, bz);
         if (id === AIR) continue;
         const ownRes = blastResistanceOf(id);
