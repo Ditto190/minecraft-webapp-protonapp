@@ -20,14 +20,16 @@ export function BrewingDialog() {
   const brewingSlotMouseDown = useGameStore((s) => s.brewingSlotMouseDown);
   const [, setTick] = useState(0);
 
-  // 酿造进度连续变化：打开时 250ms 刷新
+  // 酿造进度连续变化：打开时 250ms 刷新（关闭时不启动 interval）
   useEffect(() => {
     if (!brewKey) return;
     const t = setInterval(() => setTick((n) => n + 1), 250);
     return () => clearInterval(t);
   }, [brewKey]);
 
-  const b = brewKey ? getBrew(brewKey) : null;
+  // 关闭时直接不渲染：hooks 已全部调用，顺序稳定
+  if (!brewKey) return null;
+  const b = getBrew(brewKey);
 
   return (
     <Dialog

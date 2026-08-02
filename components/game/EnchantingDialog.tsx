@@ -91,6 +91,9 @@ export function EnchantingDialog() {
     [kind, rollSeed, effectiveLevel, power, currentEnch],
   );
 
+  // 关闭时直接不渲染：避免每次背包/经验变化都重建 JSX（hooks 已全部调用，顺序稳定；
+  // 换物重摇的 useEffect 在早退之前，关闭期间行为不变）
+  if (!open) return null;
   return (
     <Dialog
       open={open !== null}

@@ -53,6 +53,8 @@ export function TradingDialog() {
   const slotDoubleClick = useGameStore((s) => s.slotDoubleClick);
   const [preview, setPreview] = useState(0);
 
+  // 关闭时直接不渲染：避免每次背包变化都全量重算各交易可负担性（每项 canAfford 扫 36 格）与 JSX（hooks 已全部调用，顺序稳定）
+  if (tradeMob === null) return null;
   const prof = tradeMob !== null ? professionOf(tradeMob) : null;
   const trades = prof ? TRADES[prof] : [];
   const allSlots = [...hotbarSlots, ...mainSlots];

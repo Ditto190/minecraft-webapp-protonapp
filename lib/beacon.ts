@@ -113,10 +113,20 @@ export function interactBeacon(
   return { notice: `信标激活：${avail[0].name}${suffix(avail[0].key)}`, consume: heldMaterial, ok: true };
 }
 
+/** tickBeacons 的 tiers 暂存表（模块级复用，避免每帧 new Map；beaconTiers 是导出引用不可换绑，只能原地同步） */
+const tiersScratch = new Map<keyof Effects, 1 | 2>();
+
 /** 每 tick：校验激活信标的金字塔仍在（损坏则失效），范围内玩家刷新所选效果（MC 每 4s 施加 11s，简化为持续刷新 5s）；
- *  4 层金字塔的主效果登记为 II 级（beaconTiers；生命恢复恒 I 级，MC 副效果二选一） */
+ *  4 层金字塔的主效果登记为 II 级（beaconTiers；生命恢复恒 I 级，MC 副效果二选一）。
+ *  金字塔层数不做跨帧缓存：信标失效须在下一次 tick 立即可见（setBlock 无同步通知渠道可订阅），
+ *  有激活信标时每帧 scanPyramid 是正确性底线；无信标（绝大多数帧）走早退零开销 */
 export function tickBeacons(world: World, px: number, py: number, pz: number): void {
-  const tiers = new Map<keyof Effects, 1 | 2>();
+  // 无激活信标直接返回：此时 beaconTiers 必已空（失效/清空路径都会重建），防御性 clear 兜底
+  if (activeBeacons.size === 0) {
+    if (beaconTiers.size > 0) beaconTiers.clear();
+    return;
+  }
+  const tiers = tiersScratch;
   for (const [key, b] of activeBeacons) {
     const level = world.getBlock(b.x, b.y, b.z) !== BLOCK_BY_KEY.beacon.id ? 0 : scanPyramid(world, b.x, b.y, b.z);
     if (level === 0) {
@@ -131,8 +141,10 @@ export function tickBeacons(world: World, px: number, py: number, pz: number): v
       if (level >= 4 && b.effect !== 'regen') tiers.set(b.effect, 2); // 4 层副效果：主效果 II 级（生命恢复恒 I 级；多只 4 层信标同效果同为 II）
     }
   }
-  beaconTiers.clear();
+  // 原地同步 beaconTiers（消费端持有导出引用）：删失效键、写当前键
+  for (const k of beaconTiers.keys()) if (!tiers.has(k)) beaconTiers.delete(k);
   for (const [k, v] of tiers) beaconTiers.set(k, v);
+  tiers.clear();
 }
 
 /** 清空（测试/重置用） */

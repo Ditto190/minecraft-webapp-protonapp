@@ -145,11 +145,21 @@ function SurvivalCell({ index, slot, active, onClick }: { index: number; slot: S
   );
 }
 
-/** 攻击冷却蓄力条（MC 1.9 Java 风格：准星下方小横条，冷却走满即隐藏）；50ms 轮询运行时单例，不进 React 状态 */
+/** 攻击冷却蓄力条（MC 1.9 Java 风格：准星下方小横条，冷却走满即隐藏）；50ms 轮询运行时单例，
+ *  显示值（进度/隐藏态）变化才触发 React 渲染——空闲零渲染，蓄力期仍 50ms 精度 */
 function AttackIndicator() {
   const [, setTick] = useState(0);
+  /** 上次渲染时的显示值（-1 = 隐藏态） */
+  const last = useRef(-1);
   useEffect(() => {
-    const t = setInterval(() => setTick((n) => n + 1), 50);
+    const t = setInterval(() => {
+      const p = attackState.progress;
+      const shown = p >= 1 ? -1 : p;
+      if (shown !== last.current) {
+        last.current = shown;
+        setTick((n) => n + 1);
+      }
+    }, 50);
     return () => clearInterval(t);
   }, []);
   const p = attackState.progress;
@@ -163,11 +173,23 @@ function AttackIndicator() {
   );
 }
 
-/** 进食/饮用读条（MC Java 按住右键使用：准星上方小进度条，读满/取消即隐藏；进食琥珀色、饮用天蓝色区分）；50ms 轮询运行时单例，不进 React 状态 */
+/** 进食/饮用读条（MC Java 按住右键使用：准星上方小进度条，读满/取消即隐藏；进食琥珀色、饮用天蓝色区分）；
+ *  50ms 轮询运行时单例，显示值（active/进度/种类）变化才触发 React 渲染——空闲零渲染，读条期仍 50ms 精度 */
 function EatIndicator() {
   const [, setTick] = useState(0);
+  /** 上次渲染时的显示值 */
+  const last = useRef({ active: false, progress: 0, kind: '' as string });
   useEffect(() => {
-    const t = setInterval(() => setTick((n) => n + 1), 50);
+    const t = setInterval(() => {
+      const l = last.current;
+      if (
+        eatState.active !== l.active ||
+        (eatState.active && (eatState.progress !== l.progress || eatState.kind !== l.kind))
+      ) {
+        last.current = { active: eatState.active, progress: eatState.progress, kind: eatState.kind };
+        setTick((n) => n + 1);
+      }
+    }, 50);
     return () => clearInterval(t);
   }, []);
   if (!eatState.active) return null;
@@ -197,10 +219,27 @@ function EatBurp() {
   return null;
 }
 
-/** 氧气气泡条（MC：头入水时显示在饥饿行上方；剩余 <15s 才显示，气泡随剩余秒数逐个变空，快耗尽时最后几个爆泡） */function AirBubbles() {
+/** 氧气气泡条（MC：头入水时显示在饥饿行上方；剩余 <15s 才显示，气泡随剩余秒数逐个变空，快耗尽时最后几个爆泡）；
+ *  200ms 轮询：渲染输出只依赖 10 个气泡的离散状态，状态签名不变就不重渲染（水下空气连续变化但气泡按 1.5s 档离散跳变） */
+function AirBubbles() {
   const [, setTick] = useState(0);
+  /** 上次渲染的气泡状态签名（'' = 隐藏态） */
+  const last = useRef('');
   useEffect(() => {
-    const t = setInterval(() => setTick((n) => n + 1), 200);
+    const t = setInterval(() => {
+      const air = survivalStats.air;
+      let sig = '';
+      if (air < 15) {
+        for (let i = 0; i < 10; i++) {
+          const threshold = (i + 1) * 1.5;
+          sig += air >= threshold ? 'a' : air >= threshold - 3 ? 'b' : 'e';
+        }
+      }
+      if (sig !== last.current) {
+        last.current = sig;
+        setTick((n) => n + 1);
+      }
+    }, 200);
     return () => clearInterval(t);
   }, []);
   const air = survivalStats.air;
@@ -422,11 +461,19 @@ function PauseOverlay() {
   );
 }
 
-/** Boss 血条（凋灵在附近时置顶显示，MC 紫色条） */
+/** Boss 血条（凋灵在附近时置顶显示，MC 紫色条）；250ms 轮询，显示值（名称/血量/上限）变化才触发 React 渲染——无 Boss 时零渲染 */
 function BossBar() {
   const [, setTick] = useState(0);
+  /** 上次渲染时的显示值 */
+  const last = useRef({ name: '', hp: 0, max: 0 });
   useEffect(() => {
-    const t = setInterval(() => setTick((n) => n + 1), 250);
+    const t = setInterval(() => {
+      const l = last.current;
+      if (bossState.name !== l.name || bossState.hp !== l.hp || bossState.max !== l.max) {
+        last.current = { name: bossState.name, hp: bossState.hp, max: bossState.max };
+        setTick((n) => n + 1);
+      }
+    }, 250);
     return () => clearInterval(t);
   }, []);
   if (!bossState.name) return null;

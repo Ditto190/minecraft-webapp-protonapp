@@ -10,6 +10,9 @@ export interface RaycastHit {
   face: [number, number, number];
 }
 
+/** DDA 步进法线暂存（模块级复用；命中时拷贝进返回值，绝不允许直接返回本数组） */
+const faceScratch: [number, number, number] = [0, 0, 0];
+
 export function raycastBlock(
   world: World,
   ox: number,
@@ -44,7 +47,12 @@ export function raycastBlock(
   let tMaxY = dy !== 0 ? (dy > 0 ? y + 1 - oy : oy - y) * tDeltaY : Infinity;
   let tMaxZ = dz !== 0 ? (dz > 0 ? z + 1 - oz : oz - z) * tDeltaZ : Infinity;
 
-  let face: [number, number, number] = [0, 0, 0];
+  // DDA 步进法线写入模块级暂存（原实现每步 new 一个三元组，6 格射程约十几次分配/调用）；
+  // 命中瞬间拷贝进返回值——返回对象仍是每次调用独立分配，调用方可跨调用持有
+  // （actions.ts tryPlace 连发两次射线后仍读前者、Player 准星射线与同帧 mobInReach 墙检串联，均依赖此语义）
+  faceScratch[0] = 0;
+  faceScratch[1] = 0;
+  faceScratch[2] = 0;
   let t = 0;
 
   while (t <= maxDist) {
@@ -52,23 +60,29 @@ export function raycastBlock(
     // 可命中的方块：实心、cross（花草/火把）、非实心薄片（雪层/红石粉/压力板——MC 均可挖掘）；includeFluid 时还可命中流体（装水）
     const def = BLOCKS[id];
     if (id !== AIR && def && (def.solid || def.shape === 'cross' || (def.shape === 'slab' && def.digTime !== undefined) || (includeFluid && def.fluid))) {
-      return { block: [x, y, z], face };
+      return { block: [x, y, z], face: [faceScratch[0], faceScratch[1], faceScratch[2]] };
     }
     if (tMaxX < tMaxY && tMaxX < tMaxZ) {
       t = tMaxX;
       tMaxX += tDeltaX;
       x += stepX;
-      face = [-stepX, 0, 0];
+      faceScratch[0] = -stepX;
+      faceScratch[1] = 0;
+      faceScratch[2] = 0;
     } else if (tMaxY < tMaxZ) {
       t = tMaxY;
       tMaxY += tDeltaY;
       y += stepY;
-      face = [0, -stepY, 0];
+      faceScratch[0] = 0;
+      faceScratch[1] = -stepY;
+      faceScratch[2] = 0;
     } else {
       t = tMaxZ;
       tMaxZ += tDeltaZ;
       z += stepZ;
-      face = [0, 0, -stepZ];
+      faceScratch[0] = 0;
+      faceScratch[1] = 0;
+      faceScratch[2] = -stepZ;
     }
   }
   return null;

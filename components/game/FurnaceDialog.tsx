@@ -29,14 +29,16 @@ export function FurnaceDialog() {
   const furnaceSlotMouseDown = useGameStore((s) => s.furnaceSlotMouseDown);
   const [, setTick] = useState(0);
 
-  // 烧炼进度连续变化：打开时 250ms 刷新
+  // 烧炼进度连续变化：打开时 250ms 刷新（关闭时不启动 interval）
   useEffect(() => {
     if (!furnaceKey) return;
     const t = setInterval(() => setTick((n) => n + 1), 250);
     return () => clearInterval(t);
   }, [furnaceKey]);
 
-  const f = furnaceKey ? getFurnace(furnaceKey) : null;
+  // 关闭时直接不渲染：hooks 已全部调用，顺序稳定
+  if (!furnaceKey) return null;
+  const f = getFurnace(furnaceKey);
 
   return (
     <Dialog

@@ -17,7 +17,7 @@ import { outerHeightAt, pickOuterIsland } from '@/lib/end';
 import { gatewayState } from '@/lib/endfight';
 import { raycastBlock } from '@/lib/raycast';
 import { resolveAnchorRespawn } from '@/lib/respawnanchor';
-import { arrows, checkEndermanStare, damageMob, mobInReach, mobs, spawnMobAt, type Arrow } from '@/lib/mobs';
+import { arrows, checkEndermanStare, damageMob, mobInReach, mobs, spawnMobAt, type Arrow, type Mob } from '@/lib/mobs';
 import { crystalInReach, hitCrystal, tickCrystals } from '@/lib/endfight';
 import { tickFishing } from '@/lib/fishing';
 import { SEA_LEVEL, type Biome } from '@/lib/noise';
@@ -25,7 +25,7 @@ import { aabbFree, collideAxis, PLAYER_HALF_W, PLAYER_HEIGHT, type Aabb } from '
 import { playSound, splashSound } from '@/lib/sound';
 import { useGameStore } from '@/lib/store';
 import { anyPanelOpen } from '@/lib/store-types';
-import { resetSurvivalMem, tickSurvival, type SurvivalMem } from '@/lib/survival';
+import { resetSurvivalMem, tickSurvival, type SurvivalActions, type SurvivalEnv, type SurvivalMem, type SurvivalSnapshotLite } from '@/lib/survival';
 import { effects, effectLvls, tickEffects } from '@/lib/effects';
 import { beaconTiers, tickBeacons } from '@/lib/beacon';
 import { attackCooldownScale, TOOLS } from '@/lib/tools';
@@ -105,6 +105,46 @@ function fireballInReach(ox: number, oy: number, oz: number, dx: number, dy: num
   return best;
 }
 
+/** __mc 调试单例（自动化实测用）：模块级复用，帧循环原地覆写字段，避免开发/调试态每帧分配 20 字段大对象。
+ *  静态字段（模块单例/函数引用）在此固定；逐帧字段（pos/tp/camera/scene/gl/fps/world/yawPitch）在帧循环覆写 */
+const mcDebug: {
+  pos: { x: number; y: number; z: number };
+  tp: Aabb | null;
+  [key: string]: unknown;
+} = {
+  pos: { x: 0, y: 0, z: 0 },
+  pp: playerPosition, // 可写：测试传送（实际玩家状态在下方 tp）
+  tp: null, // 当前帧的物理状态对象（重生等重赋值后会变；帧循环覆写）
+  tpTo: (x: number, y: number, z: number) => {
+    // 传送（对最近一帧的物理状态写字段；tp 每帧覆写，重生重赋值也安全）
+    const t = mcDebug.tp;
+    if (!t) return;
+    t.x = x;
+    t.y = y;
+    t.z = z;
+  },
+  store: useGameStore,
+  touch: touchInput,
+  mobs, // 生物列表（只读排查用）
+  clock: worldClock, // 昼夜时钟（可写）
+  digState, // 挖掘进度（排障用）
+  targetBlock, // 准星命中（排障用）
+  drops: itemDrops, // 掉落物实体（排障用）
+  spawn: spawnMobAt, // 生成生物（实测用）
+  tryPlace, // 右键交互（实测用）
+  mobInReach, // 准星内生物（实测用）
+};
+
+/** tickSurvival 参数对象（模块级复用：每帧写字段替代对象字面量分配；tickSurvival 只同步读值不保留引用） */
+const survivalEnv: SurvivalEnv = { dt: 0, flying: false, inWater: false, headInWater: false, onGround: false, velY: 0 };
+const survivalSnap: SurvivalSnapshotLite = { worldMode: '', health: 0, hunger: 0, saturation: 0 };
+const survivalActs: SurvivalActions = {
+  damagePlayer: () => undefined,
+  setHealth: () => undefined,
+  setHunger: () => undefined,
+  setSaturation: () => undefined,
+};
+
 export function Player() {
   const camera = useThree((s) => s.camera);
   const gl = useThree((s) => s.gl);
@@ -172,6 +212,8 @@ export function Player() {
   const portalAcc = useRef(0);
   /** 末影人对视检查计时 */
   const stareAcc = useRef(0);
+  /** 末影龙缓存：存活期内免每帧 mobs.find（被移除时 includes 失效重扫；龙只存在于末地维度） */
+  const cachedDragon = useRef<Mob | null>(null);
 
   // 维度切换：重置位置状态（落点由 WorldRenderer 经 spawnPoint 下发）
   const dimension = useGameStore((s) => s.dimension);
@@ -347,35 +389,19 @@ export function Player() {
     if (!world) return;
     const dt = Math.min(delta, 0.05);
 
-    // 调试钩子（自动化实测用；开发环境，或生产带 ?mcdebug 时暴露——正常用户不可见）
+    // 调试钩子（自动化实测用；开发环境，或生产带 ?mcdebug 时暴露——正常用户不可见）。模块级单例原地覆写，零分配
     if (process.env.NODE_ENV === 'development' || window.location.search.includes('mcdebug')) {
-      (window as unknown as { __mc?: unknown }).__mc = {
-        pos: { x: playerPosition.x, y: playerPosition.y, z: playerPosition.z },
-        pp: playerPosition, // 可写：测试传送（实际玩家状态在下方 tp）
-        tp: pos.current, // 当前帧的物理状态对象（重生等重赋值后会变）
-        tpTo: (x: number, y: number, z: number) => {
-          // 传送（对当前 pos.current 写字段；重生重赋值也安全）
-          if (!pos.current) return;
-          pos.current.x = x;
-          pos.current.y = y;
-          pos.current.z = z;
-        },        camera: state.camera,
-        scene: state.scene,
-        gl: state.gl,
-        fps: debugInfo.fps,
-        store: useGameStore,
-        world,
-        touch: touchInput,
-        mobs, // 生物列表（只读排查用）
-        clock: worldClock, // 昼夜时钟（可写）
-        yawPitch: yawPitch.current, // 触屏视角（可写：自动化对准）
-        digState, // 挖掘进度（排障用）
-        targetBlock, // 准星命中（排障用）
-        drops: itemDrops, // 掉落物实体（排障用）
-        spawn: spawnMobAt, // 生成生物（实测用）
-        tryPlace, // 右键交互（实测用）
-        mobInReach, // 准星内生物（实测用）
-      };
+      mcDebug.pos.x = playerPosition.x;
+      mcDebug.pos.y = playerPosition.y;
+      mcDebug.pos.z = playerPosition.z;
+      mcDebug.tp = pos.current;
+      mcDebug.camera = state.camera;
+      mcDebug.scene = state.scene;
+      mcDebug.gl = state.gl;
+      mcDebug.fps = debugInfo.fps;
+      mcDebug.world = world;
+      mcDebug.yawPitch = yawPitch.current; // 触屏视角（可写：自动化对准）
+      (window as unknown as { __mc?: unknown }).__mc = mcDebug;
     }
 
     // FOV：设置基准值 + 冲刺时 +10%（MC 冲刺视角），平滑过渡
@@ -645,17 +671,21 @@ export function Player() {
     const headInWater = isWaterId(
       world.getBlock(Math.floor(p.x), Math.floor(p.y + EYE), Math.floor(p.z)),
     );
-    tickSurvival(
-      { dt, flying, inWater, headInWater, onGround: onGround.current, velY: velY.current },
-      survivalMem.current,
-      { worldMode: gs.worldMode, health: gs.health, hunger: gs.hunger, saturation: gs.saturation },
-      {
-        damagePlayer: gs.damagePlayer,
-        setHealth: gs.setHealth,
-        setHunger: gs.setHunger,
-        setSaturation: gs.setSaturation,
-      },
-    );
+    survivalEnv.dt = dt;
+    survivalEnv.flying = flying;
+    survivalEnv.inWater = inWater;
+    survivalEnv.headInWater = headInWater;
+    survivalEnv.onGround = onGround.current;
+    survivalEnv.velY = velY.current;
+    survivalSnap.worldMode = gs.worldMode;
+    survivalSnap.health = gs.health;
+    survivalSnap.hunger = gs.hunger;
+    survivalSnap.saturation = gs.saturation;
+    survivalActs.damagePlayer = gs.damagePlayer;
+    survivalActs.setHealth = gs.setHealth;
+    survivalActs.setHunger = gs.setHunger;
+    survivalActs.setSaturation = gs.setSaturation;
+    tickSurvival(survivalEnv, survivalMem.current, survivalSnap, survivalActs);
     survivalStats.air = survivalMem.current.air; // 镜像给 HUD 气泡条（氧气 15s，见 lib/survival.ts）
 
     // 岩浆灼烧：接触即掉血（4 心/秒，MC；抗火药水免疫）；离开后再烧 ~15s（着火 1 点/秒，入水熄灭）
@@ -732,8 +762,14 @@ export function Player() {
     }
     // 信标：校验金字塔并给范围内玩家刷新所选效果（MC）
     tickBeacons(world, p.x, p.y, p.z);
-    // 末影水晶：龙在存活水晶附近时缓慢回血（MC 治疗光束）
-    tickCrystals(mobs.find((m) => m.type === 'ender_dragon') ?? null, dt);
+    // 末影水晶：龙在存活水晶附近时缓慢回血（MC 治疗光束）。
+    // 龙只存在于末地（mobs 按维度隔离，非末地 find 恒为 null）：非末地跳过查找；
+    // 末地内缓存命中（includes 校验，O(n) 引用比较无闭包分配），被移除/重生成才重扫
+    let dragon = cachedDragon.current;
+    if (dragon !== null && !mobs.includes(dragon)) dragon = null;
+    if (dragon === null && gs.dimension === 'end') dragon = mobs.find((m) => m.type === 'ender_dragon') ?? null;
+    cachedDragon.current = dragon;
+    tickCrystals(dragon, dt);
     // 钓鱼浮标：飞行/漂浮/咬钩推进
     tickFishing(world, dt);
     // 末影人对视激怒：准星盯上末影人即激怒（MC 规则，每秒检查一次）
@@ -762,7 +798,8 @@ export function Player() {
 
     // 脚步声：着地行走时按实际位移触发（顶墙走不响）
     const hDist = Math.hypot(p.x - prevStep.current.x, p.z - prevStep.current.z);
-    prevStep.current = { x: p.x, z: p.z };
+    prevStep.current.x = p.x; // 字段直写，避免每帧对象字面量分配
+    prevStep.current.z = p.z;
     // MC 消耗度：步行不消耗（MC Java），冲刺 0.1/格，游泳 0.01/格
     if (gs.worldMode === 'survival') {
       survivalStats.exhaustion += hDist * (inFluid ? 0.01 : sprinting ? 0.1 : 0);

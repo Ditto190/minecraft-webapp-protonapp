@@ -458,10 +458,14 @@ const arrowDir = new Vector3();
 /** 帧循环复用的去重集合（避免每帧分配） */
 const seenScratch = new Set<string>();
 const seenArrowsScratch = new Set<number>();
-/** 敌对生物类型（朝向玩家；其余朝移动方向）。模块级常量，避免每生物每帧分配数组字面量 */
-const HOSTILE_TYPES: readonly MobType[] = ['zombie', 'skeleton', 'spider', 'creeper', 'phantom', 'iron_golem'];
+/** 敌对生物类型（朝向玩家；其余朝移动方向）。模块级 Set 常量：每生物每帧查成员，Set.has 替代数组线性 includes */
+const HOSTILE_TYPES: ReadonlySet<MobType> = new Set(['zombie', 'skeleton', 'spider', 'creeper', 'phantom', 'iron_golem']);
 /** 受击红闪阈值（秒）：hurtImmune 从 0.5 倒数，剩余 > 0.25 期间显示红壳 ≈ 受击后 0.25s 红闪（Java hurt flash） */
 const HURT_FLASH_LEFT = 0.25;
+/** 距离门（格²）：水平距玩家超 48 格的生物只同步位置，跳过朝向/缩放/红闪（远景不可辨；AI 在 lib/sim，与网格无关） */
+const FAR_SYNC_DIST_SQ = 48 * 48;
+/** 网格键缓存：键含剪毛/驯服状态位，状态位不变就不重建模板字符串（生物对象与 mobs 数组同生命周期，WeakMap 随其回收） */
+const meshKeyCache = new WeakMap<Mob, { sheared: boolean; tamed: boolean; key: string }>();
 
 /** 生物渲染与 AI 驱动（仅生存模式；网格按 id 复用） */
 export function Mobs() {
@@ -495,8 +499,15 @@ export function Mobs() {
       const seen = seenScratch;
       seen.clear();
       for (const m of mobs) {
-        // 羊剪毛/狼驯服会换模型：网格键带状态位，状态变时旧网格被回收重建
-        const meshKey = `${m.id}:${m.sheared ? 1 : 0}${m.tamed ? 1 : 0}`;
+        // 羊剪毛/狼驯服会换模型：网格键带状态位，状态变时旧网格被回收重建；键按生物缓存，状态位不变不重建模板字符串
+        let kc = meshKeyCache.get(m);
+        const sheared = !!m.sheared;
+        const tamed = !!m.tamed;
+        if (!kc || kc.sheared !== sheared || kc.tamed !== tamed) {
+          kc = { sheared, tamed, key: `${m.id}:${m.sheared ? 1 : 0}${m.tamed ? 1 : 0}` };
+          meshKeyCache.set(m, kc);
+        }
+        const meshKey = kc.key;
         seen.add(meshKey);
         let mesh = meshMap.current.get(meshKey);
         if (!mesh) {
@@ -505,8 +516,13 @@ export function Mobs() {
           meshMap.current.set(meshKey, mesh);
         }
       mesh.position.set(m.x, m.y, m.z);
+      // 距离门：水平距玩家 >48 格只同步位置（朝向/缩放/红闪冻结在上次同步值，远景不可辨；
+      // Boss 条/吼声等远程消费都读 lib 状态而非网格，不受影响）
+      const pdx = m.x - playerPosition.x;
+      const pdz = m.z - playerPosition.z;
+      if (pdx * pdx + pdz * pdz > FAR_SYNC_DIST_SQ) continue;
       // 朝向：敌对朝玩家，被动朝移动方向
-      const def = m.fleeTimer > 0 || !HOSTILE_TYPES.includes(m.type);
+      const def = m.fleeTimer > 0 || !HOSTILE_TYPES.has(m.type);
       mesh.rotation.y = def && m.wanderMoving
         ? Math.atan2(Math.cos(m.wanderDir), Math.sin(m.wanderDir))
         : Math.atan2(playerPosition.x - m.x, playerPosition.z - m.z);

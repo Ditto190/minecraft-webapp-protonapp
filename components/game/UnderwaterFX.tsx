@@ -24,6 +24,8 @@ export function skyFog(renderDistance: number): { near: number; far: number } {
 
 /** 帧循环复用的相机朝向向量（气泡定位用，零分配） */
 const bubbleDir = new Vector3();
+/** 帧循环复用的天空雾距暂存（与 skyFog 同式原地写入，避免每帧两个小对象字面量） */
+const fogScratch = { near: 0, far: 0 };
 
 /** 头没入水中时切换为水下雾效，离开后恢复天空（雾距随设置）；水下间歇推呼出气泡粒子事件（breakParticles，BreakParticles 消费） */
 export function UnderwaterFX() {
@@ -69,15 +71,21 @@ export function UnderwaterFX() {
         fog.near = LAVA_FOG_NEAR;
         fog.far = LAVA_FOG_FAR;
       } else {
-        const { near, far } = skyFog(useGameStore.getState().settings.renderDistance);
+        // 恢复天空雾距（与 skyFog 同式，写模块级暂存避免每帧分配）；
         // 下界雾浓（MC 下界能见度低、红雾弥漫）；末地/主世界正常雾距
-        const target = useGameStore.getState().dimension === 'nether' ? { near: near * 0.3, far: far * 0.5 } : { near, far };
-        if (fog.near !== target.near || fog.far !== target.far) {
+        const gs = useGameStore.getState();
+        fogScratch.near = gs.settings.renderDistance * 16 * 0.55;
+        fogScratch.far = gs.settings.renderDistance * 16 + 16;
+        if (gs.dimension === 'nether') {
+          fogScratch.near *= 0.3;
+          fogScratch.far *= 0.5;
+        }
+        if (fog.near !== fogScratch.near || fog.far !== fogScratch.far) {
           // 恢复天空：颜色取 DayNight 当前计算的大气色
           bg.setRGB(atmosphere.r, atmosphere.g, atmosphere.b);
           fog.color.setRGB(atmosphere.r, atmosphere.g, atmosphere.b);
-          fog.near = target.near;
-          fog.far = target.far;
+          fog.near = fogScratch.near;
+          fog.far = fogScratch.far;
         }
       }
     }

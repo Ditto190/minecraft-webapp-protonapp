@@ -29,6 +29,8 @@ export function GrindstoneDialog() {
   const grindSlotMouseDown = useGameStore((s) => s.grindSlotMouseDown);
   const grindTakeOutput = useGameStore((s) => s.grindTakeOutput);
 
+  // 关闭时直接不渲染：避免每次背包变化都重算输出与 JSX（hooks 已全部调用，顺序稳定）
+  if (open === null) return null;
   const result = grindResult(grindSlots[0], grindSlots[1]);
 
   return (
