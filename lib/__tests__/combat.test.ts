@@ -1,4 +1,4 @@
-// MC Java 1.9 战斗数值：攻击冷却伤害缩放（attackCooldownScale）+ 斧头伤害/攻速
+// MC Java 1.9 战斗数值：攻击冷却伤害缩放（attackCooldownScale）+ 工具伤害/攻速
 
 import { describe, expect, it } from 'vitest';
 import { attackCooldownScale, TOOLS } from '../tools';
@@ -48,12 +48,33 @@ describe('斧头 Java 数值（1.9 战斗更新）', () => {
     expect(TOOLS.netherite_axe.attackCd).toBeCloseTo(1 / 1.0, 6);
   });
 
-  it('剑攻速 1.6（冷却 0.625s）与镐/锹/锄/剪刀/钓竿 4 攻速（0.25s）保持', () => {
+  it('剑攻速 1.6（冷却 0.625s）与剪刀/钓竿 4 攻速（0.25s）保持', () => {
     for (const t of ['wooden_sword', 'stone_sword', 'iron_sword', 'diamond_sword', 'netherite_sword', 'golden_sword'] as const) {
       expect(TOOLS[t].attackCd, t).toBeCloseTo(1 / 1.6, 6);
     }
-    for (const t of ['wooden_pickaxe', 'diamond_pickaxe', 'iron_shovel', 'netherite_hoe', 'shears', 'fishing_rod'] as const) {
+    for (const t of ['shears', 'fishing_rod'] as const) {
       expect(TOOLS[t].attackCd, t).toBe(0.25);
     }
+  });
+
+  it('镐攻速 1.2（冷却 ≈0.83s）、锹 1.0（冷却 1s）——MC Java（旧版一律 0.25s 是偏差）', () => {
+    for (const t of ['wooden_pickaxe', 'stone_pickaxe', 'iron_pickaxe', 'diamond_pickaxe', 'netherite_pickaxe', 'golden_pickaxe'] as const) {
+      expect(TOOLS[t].attackCd, t).toBeCloseTo(1 / 1.2, 6);
+    }
+    for (const t of ['wooden_shovel', 'stone_shovel', 'iron_shovel', 'diamond_shovel', 'netherite_shovel', 'golden_shovel'] as const) {
+      expect(TOOLS[t].attackCd, t).toBe(1);
+    }
+  });
+
+  it('锄攻速按层级：木 1、石 2、铁 3、钻/合金 4（MC Java；本注册表无金锄）', () => {
+    expect(TOOLS.wooden_hoe.attackCd).toBe(1);
+    expect(TOOLS.stone_hoe.attackCd).toBe(0.5);
+    expect(TOOLS.iron_hoe.attackCd).toBeCloseTo(1 / 3, 6);
+    expect(TOOLS.diamond_hoe.attackCd).toBe(0.25);
+    expect(TOOLS.netherite_hoe.attackCd).toBe(0.25);
+  });
+
+  it('铁锹攻击伤害 4（锹系 2/3/4/5/6 递增；原值 3 是笔误）', () => {
+    expect(TOOLS.iron_shovel.attackDamage).toBe(4);
   });
 });

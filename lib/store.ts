@@ -47,6 +47,8 @@ export const MAX_HUNGER = 20;
 /** MC 饱和度上限（隐藏值，先于饥饿消耗） */
 export const MAX_SATURATION = 5;
 const HURT_COOLDOWN = 500; // ms 受击无敌帧
+/** 无敌帧当次承受的伤害（Java lastHurt：无敌帧内更高伤害只补差额的基准；hurtState 在 game.ts 不便扩字段，故放这里） */
+let lastHurtAmount = 0;
 
 // ——— 光标拖拽（MC Java 语义）：状态在 zustand（cursorSlot），拖动过程为模块级 ephemeral 状态 ———
 
@@ -270,7 +272,15 @@ export const useGameStore = create<GameStore>()((set, get) => ({
     // MC：创造模式玩家无敌，不受任何伤害（虚空 /kill 由各自路径单独处理，不经此函数）
     if (get().worldMode === 'creative') return false;
     const now = performance.now();
-    if (now - hurtState.lastAt < HURT_COOLDOWN) return false;
+    // 无敌帧（MC 0.5s，Java lastHurt 规则）：期内新伤害 ≤ 上次承受则完全免疫，更高只补差额（lastHurtAmount 记新攻击全值）
+    if (now - hurtState.lastAt < HURT_COOLDOWN) {
+      if (amount <= lastHurtAmount) return false;
+      const last = lastHurtAmount;
+      lastHurtAmount = amount;
+      amount -= last;
+    } else {
+      lastHurtAmount = amount;
+    }
     hurtState.lastAt = now;
     survivalStats.exhaustion += 0.1; // MC：受击也消耗能量
     set((s) => {
@@ -284,10 +294,15 @@ export const useGameStore = create<GameStore>()((set, get) => ({
       let armorSlots = s.armorSlots;
       if (points > 0) {
         armorSlots = { ...s.armorSlots };
+        // MC：每件护甲每击掉 max(1, floor(减伤前伤害/4)) 耐久；护甲上的耐久附魔按 60%+40%/(lvl+1) 概率免除损耗
+        // （Java 护甲公式，与工具/武器的 1/(lvl+1) 不同——damageHeldTool）
+        const wear = Math.max(1, Math.floor(amount / 4));
         for (const piece of ['helmet', 'chestplate', 'leggings', 'boots'] as const) {
           const cur = armorSlots[piece];
           if (!cur) continue;
-          const durability = cur.durability - 1;
+          const unb = cur.ench?.unbreaking ?? 0;
+          if (unb > 0 && Math.random() < 0.6 + 0.4 / (unb + 1)) continue;
+          const durability = cur.durability - wear;
           armorSlots[piece] = durability > 0 ? { ...cur, durability } : null;
         }
       }
@@ -404,8 +419,9 @@ export const useGameStore = create<GameStore>()((set, get) => ({
     if (!slot || slot.kind !== 'material') return false;
     const food = FOODS[slot.material];
     if (!food) return false;
-    if (s.hunger >= MAX_HUNGER) {
-      s.setNotice('还不饿'); // MC：满饥饿不能进食；拒绝要给反馈，不静默吞掉操作
+    // MC：满饥饿不能进食（紫颂果例外：alwaysEdible 随时可吃）；拒绝要给反馈，不静默吞掉操作
+    if (s.hunger >= MAX_HUNGER && slot.material !== 'chorus_fruit') {
+      s.setNotice('还不饿');
       return false;
     }
     const hunger = Math.min(MAX_HUNGER, s.hunger + food.hunger);

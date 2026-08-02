@@ -61,7 +61,9 @@ describe('命中伤害范围（3 格内 5 点伤害）', () => {
     const m = spawnMobAt('cow', 10.5, 20, 10.5);
     m.hp = 3;
     strikeLightning(w, 10.5, 20, 10.5);
-    expect(mobs.includes(m)).toBe(false);
+    // 击杀进入死亡态：尸体短暂保留（倒地动画计时结束才移除——见 mob-death.test.ts）
+    expect(m.hp).toBeLessThanOrEqual(0);
+    expect(m.deathTimer).toBeGreaterThan(0);
   });
 });
 

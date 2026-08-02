@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { armorDef, armorPoints, armorToughness, damageAfterArmor, emptyArmorSlots, type ArmorMaterial, type ArmorSlots } from '../armor';
 import { hurtState } from '../game';
 import { clearDrops, itemDrops } from '../items';
@@ -46,7 +46,7 @@ describe('皮甲装备', () => {
     expect(s.hotbarSlots[0]).toEqual({ kind: 'armor', piece: 'helmet', durability: 55 }); // 旧的回手
   });
 
-  it('全套皮甲按 Java 两段式减伤（7 点吃 10：max(1.4, 7-5)/25 = 8% → 9.2），每次受伤每件装备 -1 耐久', () => {
+  it('全套皮甲按 Java 两段式减伤（7 点吃 10：max(1.4, 7-5)/25 = 8% → 9.2），每件护甲掉 max(1, floor(减伤前伤害/4))=2 耐久（MC）', () => {
     for (const p of ['helmet', 'chestplate', 'leggings', 'boots'] as const) {
       useGameStore.getState().addArmor(p);
       useGameStore.getState().equipSelectedArmor();
@@ -54,9 +54,9 @@ describe('皮甲装备', () => {
     useGameStore.getState().damagePlayer(10);
     const s = useGameStore.getState();
     expect(s.health).toBeCloseTo(20 - 9.2, 6); // Java 公式：reduction = max(7/5, 7-10/2)/25 = 0.08
-    expect(s.armorSlots.helmet!.durability).toBe(54);
-    expect(s.armorSlots.chestplate!.durability).toBe(79);
-    expect(s.armorSlots.boots!.durability).toBe(64);
+    expect(s.armorSlots.helmet!.durability).toBe(53); // 55 - max(1, floor(10/4))
+    expect(s.armorSlots.chestplate!.durability).toBe(78);
+    expect(s.armorSlots.boots!.durability).toBe(63);
   });
 
   it('无护甲时伤害不减', () => {
@@ -78,6 +78,29 @@ describe('皮甲装备', () => {
     hurtState.lastAt = Number.NEGATIVE_INFINITY;
     useGameStore.getState().damagePlayer(10);
     expect(useGameStore.getState().health).toBeCloseTo(10 - 9.2, 6);
+  });
+
+  it('受击无敌帧：期内更弱伤害完全免疫、更高伤害只补差额（Java lastHurt）', () => {
+    expect(useGameStore.getState().damagePlayer(6)).toBe(true);
+    expect(useGameStore.getState().health).toBe(14);
+    expect(useGameStore.getState().damagePlayer(4)).toBe(false); // 4 ≤ 6：完全免疫
+    expect(useGameStore.getState().health).toBe(14);
+    expect(useGameStore.getState().damagePlayer(10)).toBe(true); // 10 > 6：只补差额 10-6=4
+    expect(useGameStore.getState().health).toBe(10);
+  });
+
+  it('护甲耐久附魔：按 60%+40%/(lvl+1) 概率免除损耗（MC 护甲公式）', () => {
+    useGameStore.setState({ armorSlots: { ...emptyArmorSlots(), chestplate: { durability: 80, ench: { unbreaking: 3 } } } });
+    // 耐久 III 免除率 0.6+0.4/4 = 0.7：roll 0.5 → 免除不掉；roll 0.99 → 正常掉 max(1, floor(10/4))=2
+    let rnd = vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    useGameStore.getState().damagePlayer(10);
+    rnd.mockRestore();
+    expect(useGameStore.getState().armorSlots.chestplate!.durability).toBe(80);
+    hurtState.lastAt = Number.NEGATIVE_INFINITY;
+    rnd = vi.spyOn(Math, 'random').mockReturnValue(0.99);
+    useGameStore.getState().damagePlayer(10);
+    rnd.mockRestore();
+    expect(useGameStore.getState().armorSlots.chestplate!.durability).toBe(78);
   });
 
   it('死亡时装备槽物品也散落', () => {

@@ -13,7 +13,7 @@ export const XP_MOB: Record<MobType, number> = {
   creeper: 5,
   zombified_piglin: 5,
   piglin: 5,
-  piglin_brute: 10, // MC 蛮兵经验高
+  piglin_brute: 20, // MC 蛮兵经验高（Java 20）
   blaze: 10,
   wither_skeleton: 5,
   ghast: 5,
@@ -37,7 +37,7 @@ export const XP_MOB: Record<MobType, number> = {
 export const XP_ORE: Record<string, [number, number]> = {
   coal: [0, 2],
   lapis: [2, 5],
-  redstone: [2, 5],
+  redstone: [1, 5],
   quartz: [2, 5],
   diamond: [3, 7],
   emerald: [3, 7],

@@ -23,7 +23,7 @@ export interface SurvivalMem {
   regenTick: number;
   /** 凋零 DOT 计时器（满 1 秒扣 1 血） */
   witherTick: number;
-  /** 再生药水计时器（满 2 秒回 1 血） */
+  /** 再生药水计时器（I 级满 2.5 秒回 1 血，MC 50 tick） */
   regenPotionTick: number;
 }
 
@@ -84,10 +84,10 @@ export function tickSurvival(
     mem.witherTick = 0;
   }
 
-  // 再生药水：效果期内回血（MC：I 级每 2 秒 1 点，II 级每 1 秒 1 点）
+  // 再生药水：效果期内回血（MC：I 级每 50 tick 即 2.5 秒 1 点，II 级每 25 tick 即 1.25 秒 1 点）
   if (effects.regen > 0) {
     mem.regenPotionTick += env.dt;
-    if (mem.regenPotionTick >= (effectLvls.regen >= 2 ? 1 : 2) && s.health < MAX_HEALTH) {
+    if (mem.regenPotionTick >= (effectLvls.regen >= 2 ? 1.25 : 2.5) && s.health < MAX_HEALTH) {
       mem.regenPotionTick = 0;
       actions.setHealth(Math.min(MAX_HEALTH, s.health + 1));
     }

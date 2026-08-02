@@ -131,7 +131,8 @@ describe('凋灵战斗', () => {
     void w;
     mobs.push(mkWither(8.5, 40, 8.5));
     damageMob(mobs[0], 300, { x: 0, z: 0 }, 0, w);
-    expect(itemDrops.some((d) => d.drop.kind === 'material' && d.drop.material === 'nether_star')).toBe(true);
+    expect(itemDrops.some((d) => d.drop.kind === 'material' && d.drop.material === 'nether_star')).toBe(true); // 掉落在死亡开始即结算
+    for (let i = 0; i < 20 && mobs.length > 0; i++) tickMobs(w, 0.1, { x: 8.5, y: 40, z: 8.5 }, () => undefined); // 死亡倒地动画结束才移除
     expect(mobs.length).toBe(0);
   });
 });

@@ -2,7 +2,7 @@
 // 铁傀儡（村庄守卫）、生物摔落伤害、鸡下蛋、掉落表修正、末影之眼飞行距离、烈焰人三连发
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { STONE } from '../blocks';
+import { BLOCK_BY_KEY, STONE } from '../blocks';
 import { worldClock } from '../game';
 import { clearDrops, itemDrops } from '../items';
 import {
@@ -288,9 +288,9 @@ describe('幻翼（失眠惩罚）', () => {
 });
 
 describe('铁傀儡（村庄守卫）', () => {
-  it('defs：HP 100、掉 1-2 铁锭', () => {
+  it('defs：HP 100、掉 3-5 铁锭（MC）', () => {
     expect(MOB_DEFS.iron_golem.hp).toBe(100);
-    expect(MOB_DEFS.iron_golem.drops).toContainEqual({ material: 'iron_ingot', count: [1, 2] });
+    expect(MOB_DEFS.iron_golem.drops).toContainEqual({ material: 'iron_ingot', count: [3, 5] });
   });
 
   it('真实村庄附近刷 1 只铁傀儡并锚定村庄（不重复刷）', { timeout: 30000 }, () => {
@@ -394,6 +394,8 @@ describe('生物摔落伤害', () => {
     w.setBlock(8, 44, 8, STONE);
     mobs.push(mkMob({ type: 'zombie', x: 8.5, y: 41.05, z: 8.5, onGround: false, velY: -1, fallDist: 30, hp: 5 }));
     tickMobs(w, 0.05, player, () => undefined);
+    expect(mobs[0].deathTimer).toBeGreaterThan(0); // 摔死也进死亡态（尸体短暂保留，MC 死亡演出）
+    for (let i = 0; i < 20 && mobs.length > 0; i++) tickMobs(w, 0.1, player, () => undefined); // 倒地动画结束才移除
     expect(mobs).toHaveLength(0);
   });
 
@@ -434,14 +436,39 @@ describe('鸡下蛋', () => {
 });
 
 describe('掉落表修正（MC）', () => {
-  it('蜘蛛加掉 0-1 蜘蛛眼', () => {
-    expect(MOB_DEFS.spider.drops).toContainEqual({ material: 'spider_eye', count: [0, 1] });
+  it('蜘蛛眼：仅玩家击杀时 1/3 概率掉 1 个（MC 稀有掉落，不在普通掉落表）', () => {
+    expect(MOB_DEFS.spider.drops.some((d) => d.material === 'spider_eye')).toBe(false);
+    // 环境击杀（无 attackerPos）：不掉蜘蛛眼，丝线照掉
     mobs.push(mkMob({ type: 'spider', x: 1, y: 41, z: 1, hp: 1 }));
-    const rnd = vi.spyOn(Math, 'random').mockReturnValue(0.99);
+    let rnd = vi.spyOn(Math, 'random').mockReturnValue(0.99);
     damageMob(mobs[0], 4);
     rnd.mockRestore();
-    expect(itemDrops.some((d) => d.drop.kind === 'material' && d.drop.material === 'spider_eye')).toBe(true);
+    expect(itemDrops.some((d) => d.drop.kind === 'material' && d.drop.material === 'spider_eye')).toBe(false);
     expect(itemDrops.some((d) => d.drop.kind === 'material' && d.drop.material === 'string')).toBe(true);
+    clearDrops();
+    clearMobs(); // 第一只蜘蛛尸体还在死亡态（动画未结束），清掉再测下一只
+    // 玩家击杀：roll 0.2 < 1/3 → 掉 1 个
+    mobs.push(mkMob({ type: 'spider', x: 1, y: 41, z: 1, hp: 1 }));
+    rnd = vi.spyOn(Math, 'random').mockReturnValue(0.2);
+    damageMob(mobs[0], 4, { x: 0, z: 0 });
+    rnd.mockRestore();
+    expect(itemDrops.some((d) => d.drop.kind === 'material' && d.drop.material === 'spider_eye')).toBe(true);
+  });
+
+  it('凋灵骷髅头：仅玩家击杀，基础 2.5% + 抢夺每级 +1%（MC 稀有掉落）', () => {
+    // 环境击杀（无 attackerPos）：roll 远低于 2.5% 也不掉
+    mobs.push(mkMob({ type: 'wither_skeleton', x: 1, y: 41, z: 1, hp: 1 }));
+    let rnd = vi.spyOn(Math, 'random').mockReturnValue(0.001);
+    damageMob(mobs[0], 4);
+    rnd.mockRestore();
+    expect(itemDrops.some((d) => d.drop.kind === 'block' && d.drop.blockId === BLOCK_BY_KEY.wither_skeleton_skull.id)).toBe(false);
+    clearMobs(); // 第一只尸体还在死亡态（动画未结束），清掉再测下一只
+    // 玩家击杀 + 抢夺 III（5.5%）：roll 0.05 命中（旧固定 3% 则不中）
+    mobs.push(mkMob({ type: 'wither_skeleton', x: 1, y: 41, z: 1, hp: 1 }));
+    rnd = vi.spyOn(Math, 'random').mockReturnValue(0.05);
+    damageMob(mobs[0], 4, { x: 0, z: 0 }, 3);
+    rnd.mockRestore();
+    expect(itemDrops.some((d) => d.drop.kind === 'block' && d.drop.blockId === BLOCK_BY_KEY.wither_skeleton_skull.id)).toBe(true);
   });
 
   it('僵尸猪灵掉腐肉 + 金粒（不再掉骨头/金锭）', () => {

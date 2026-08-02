@@ -57,6 +57,7 @@ describe('羊', () => {
     damageMob(mobs[0], 20, { x: 0, z: 0 });
     expect(itemDrops.some((d) => d.drop.kind === 'block' && d.drop.blockId === K('pink_wool'))).toBe(true);
     clearDrops();
+    clearMobs(); // 第一只羊尸体还在死亡态（动画未结束），清掉再测第二只
     mobs.push(mkMob('sheep', 8, 40, 8, { woolColor: 'white', sheared: true }));
     damageMob(mobs[0], 20, { x: 0, z: 0 });
     expect(itemDrops.some((d) => d.drop.kind === 'block' && d.drop.blockId === K('white_wool'))).toBe(false);

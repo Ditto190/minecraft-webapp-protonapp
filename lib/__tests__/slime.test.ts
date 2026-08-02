@@ -60,11 +60,13 @@ describe('三档体型与分裂', () => {
       const small = makeSlime(8.5, 41, 8.5, 1);
       mobs.push(small);
       damageMob(small, 999, undefined, 0, w);
-      expect(mobs.filter((m) => m.type === 'slime' && m.slimeSize === 1).length).toBe(0); // 无分裂
+      // 无分裂：没有新生的活小史莱姆（被杀的处于死亡态，倒地动画期间尸体短暂保留）
+      expect(mobs.filter((m) => m.type === 'slime' && m.slimeSize === 1 && m.hp > 0).length).toBe(0);
       if (itemDrops.some((d) => d.drop.kind === 'material' && d.drop.material === 'slime_ball')) dropped++;
       clearDrops();
     }
     expect(dropped).toBeGreaterThan(0); // 0-2 随机，12 次至少掉一次
+    for (let i = 0; i < 20 && mobs.length > 0; i++) tickMobs(w, 0.1, { x: 8.5, y: 41, z: 8.5 }, () => undefined); // 尸体动画结束才移除
     expect(mobs.length).toBe(0);
   });
 

@@ -54,6 +54,7 @@ describe('XP 来源', () => {
   it('杀怪得经验（敌对 5，烈焰人 10）', () => {
     expect(XP_MOB.zombie).toBe(5);
     expect(XP_MOB.blaze).toBe(10);
+    expect(XP_MOB.piglin_brute).toBe(20); // Java 蛮兵 20（普通怪最高档）
     expect(XP_MOB.pig).toBe(2);
     expect(XP_MOB.villager).toBe(0);
     const w = new World('xp-mob', undefined, VOID_TERRAIN);

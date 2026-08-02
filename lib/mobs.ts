@@ -2,7 +2,7 @@
 
 import { AIR, BLOCK_BY_KEY, BLOCKS, GRASS, isWaterId } from './blocks';
 import { hash2, type Biome } from './noise';
-import { dayFactorAt, bossState, pearlTeleport, survivalStats, worldClock } from './game';
+import { breakParticles, dayFactorAt, bossState, pearlTeleport, survivalStats, worldClock } from './game';
 import { effects } from './effects';
 import { useGameStore } from './store';
 import { XP_BREED, XP_MOB } from './xp';
@@ -41,7 +41,8 @@ export interface MobDef {
 export const MOB_DEFS: Record<MobType, MobDef> = {
   zombie: { name: '僵尸', hp: 20, speed: 2.3, hostile: true, burnsAtDay: true, damage: 3, attackRange: 1.4, attackCd: 1.2, drops: [{ material: 'rotten_flesh', count: [0, 2] }] },
   skeleton: { name: '骷髅', hp: 20, speed: 2.3, hostile: true, burnsAtDay: true, damage: 3, attackRange: 16, attackCd: 2, drops: [{ material: 'bone', count: [0, 2] }, { material: 'arrow', count: [0, 2] }] },
-  spider: { name: '蜘蛛', hp: 16, speed: 3.2, hostile: true, burnsAtDay: false, damage: 2, attackRange: 1.4, attackCd: 1, drops: [{ material: 'string', count: [0, 2] }, { material: 'spider_eye', count: [0, 1] }] },
+  // 蜘蛛：蜘蛛眼为玩家击杀稀有掉落（1/3 概率），不在普通掉落表——见 damageMob（MC）
+  spider: { name: '蜘蛛', hp: 16, speed: 3.2, hostile: true, burnsAtDay: false, damage: 2, attackRange: 1.4, attackCd: 1, drops: [{ material: 'string', count: [0, 2] }] },
   creeper: { name: '苦力怕', hp: 20, speed: 2.2, hostile: true, burnsAtDay: false, damage: 0, attackRange: 3, attackCd: 1.5, drops: [{ material: 'gunpowder', count: [0, 2] }] },
   pig: { name: '猪', hp: 10, speed: 1.5, hostile: false, burnsAtDay: false, damage: 0, attackRange: 0, attackCd: 0, drops: [{ material: 'raw_pork', count: [1, 3] }] },
   cow: { name: '牛', hp: 10, speed: 1.4, hostile: false, burnsAtDay: false, damage: 0, attackRange: 0, attackCd: 0, drops: [{ material: 'leather', count: [0, 2] }, { material: 'raw_beef', count: [1, 3] }] },
@@ -49,17 +50,17 @@ export const MOB_DEFS: Record<MobType, MobDef> = {
   villager: { name: '村民', hp: 20, speed: 1.2, hostile: false, burnsAtDay: false, damage: 0, attackRange: 0, attackCd: 0, drops: [] },
   mooshroom: { name: '蘑菇牛', hp: 10, speed: 1.4, hostile: false, burnsAtDay: false, damage: 0, attackRange: 0, attackCd: 0, drops: [{ material: 'leather', count: [0, 2] }, { material: 'raw_beef', count: [1, 3] }] },
   // 僵尸猪灵：中立敌对——不被激怒时不攻击；受伤则群体仇恨（MC 下界特色）；掉腐肉 + 金粒（MC）
-  zombified_piglin: { name: '僵尸猪灵', hp: 20, speed: 2.4, hostile: true, burnsAtDay: false, damage: 4, attackRange: 1.4, attackCd: 1.2, drops: [{ material: 'rotten_flesh', count: [0, 1] }, { material: 'gold_nugget', count: [0, 1] }] },
+  zombified_piglin: { name: '僵尸猪灵', hp: 20, speed: 2.4, hostile: true, burnsAtDay: false, damage: 8, attackRange: 1.4, attackCd: 1.2, drops: [{ material: 'rotten_flesh', count: [0, 1] }, { material: 'gold_nugget', count: [0, 1] }] },
   // 猪灵：中立敌对——玩家穿任一金装备则不主动攻击（MC 金甲豁免）；受伤群体仇恨；可以物易物；死亡掉金粒（MC 概率掉落简化）
   piglin: { name: '猪灵', hp: 16, speed: 2.6, hostile: true, burnsAtDay: false, damage: 4, attackRange: 1.6, attackCd: 1, drops: [{ material: 'gold_nugget', count: [0, 2] }] },
   // 猪灵蛮兵：堡垒守卫——始终敌对、不受金甲豁免、不接受易物（MC）
-  piglin_brute: { name: '猪灵蛮兵', hp: 50, speed: 2.8, hostile: true, burnsAtDay: false, damage: 7, attackRange: 1.6, attackCd: 1, drops: [] },
+  piglin_brute: { name: '猪灵蛮兵', hp: 50, speed: 2.8, hostile: true, burnsAtDay: false, damage: 13, attackRange: 1.6, attackCd: 1, drops: [] },
   // 烈焰人：悬浮飞行，远程火球（MC 下界堡垒标志怪）
   blaze: { name: '烈焰人', hp: 20, speed: 2.0, hostile: true, burnsAtDay: false, damage: 4, attackRange: 14, attackCd: 2.5, drops: [{ material: 'blaze_rod', count: [0, 1] }] },
   // 凋灵骷髅：堡垒近战，命中附加凋零 DOT（MC）
-  wither_skeleton: { name: '凋灵骷髅', hp: 20, speed: 2.6, hostile: true, burnsAtDay: false, damage: 5, attackRange: 1.4, attackCd: 1.2, drops: [{ material: 'coal', count: [0, 1] }, { material: 'bone', count: [0, 2] }] },
+  wither_skeleton: { name: '凋灵骷髅', hp: 20, speed: 2.6, hostile: true, burnsAtDay: false, damage: 8, attackRange: 1.4, attackCd: 1.2, drops: [{ material: 'coal', count: [0, 1] }, { material: 'bone', count: [0, 2] }] },
   // 恶魂：高空悬浮，远程爆炸火球（MC 下界空中巨怪）
-  ghast: { name: '恶魂', hp: 10, speed: 0.8, hostile: true, burnsAtDay: false, damage: 0, attackRange: 40, attackCd: 3, drops: [{ material: 'ghast_tear', count: [0, 1] }, { material: 'gunpowder', count: [0, 1] }] },
+  ghast: { name: '恶魂', hp: 10, speed: 0.8, hostile: true, burnsAtDay: false, damage: 0, attackRange: 40, attackCd: 3, drops: [{ material: 'ghast_tear', count: [0, 1] }, { material: 'gunpowder', count: [0, 2] }] },
   // 羊：毛色随机（掉落同色羊毛；剪刀剪毛可再生，见 tickMobs 吃草）
   sheep: { name: '羊', hp: 8, speed: 1.2, hostile: false, burnsAtDay: false, damage: 0, attackRange: 0, attackCd: 0, drops: [] },
   // 狼：野生中立（被打群体仇恨才攻击；hostile 走 aggro 门控）；骨头驯服后跟随玩家并护主
@@ -80,7 +81,7 @@ export const MOB_DEFS: Record<MobType, MobDef> = {
   // 幻翼：失眠惩罚怪——玩家 ≥3 天没睡，夜晚在头顶高空来袭（盘旋→俯冲→拉升）；白天自燃同僵尸；无幻翼膜材料，掉 0-1 羽毛
   phantom: { name: '幻翼', hp: 20, speed: 4.5, hostile: true, burnsAtDay: true, damage: 4, attackRange: 1.8, attackCd: 2, drops: [{ material: 'feather', count: [0, 1] }] },
   // 铁傀儡：村庄守卫——中立，猎杀威胁玩家的敌对怪；玩家攻击村民或它则仇恨玩家；高伤 7-14 随机（MC 普通 7-21 取低段）
-  iron_golem: { name: '铁傀儡', hp: 100, speed: 1.1, hostile: true, burnsAtDay: false, damage: 7, attackRange: 1.8, attackCd: 1, drops: [{ material: 'iron_ingot', count: [1, 2] }] },
+  iron_golem: { name: '铁傀儡', hp: 100, speed: 1.1, hostile: true, burnsAtDay: false, damage: 7, attackRange: 1.8, attackCd: 1, drops: [{ material: 'iron_ingot', count: [3, 5] }] },
 };
 
 export interface Mob {
@@ -158,6 +159,13 @@ export interface Mob {
   fallDist?: number;
   /** 距离消失计时（32-64 格持续远离 20-40s 后消失，MC 随机刻消失简版） */
   despawnTimer?: number;
+  /** 受伤免疫帧（MC 0.5s，按游戏刻递减）：剩余秒数与当次攻击伤害（Java lastHurt，期内更高伤害只补差额） */
+  hurtImmune?: number;
+  lastHurt?: number;
+  /** 死亡态剩余秒数（hp≤0 进入：倒地渐隐期间不 AI/不碰撞/不可被攻击，归零才真正移除并出白烟；渲染见 Mobs.tsx） */
+  deathTimer?: number;
+  /** 末影人水触伤害累计（攒整点结算——逐帧小伤害会被受伤免疫帧吞掉） */
+  waterAcc?: number;
   /** 击退水平冲量（击退附魔施加，随时间指数衰减；Boss/铁傀儡免疫） */
   kbx?: number;
   kbz?: number;
@@ -174,7 +182,7 @@ export interface Arrow {
   age: number;
   /** 玩家发射（命中生物而非玩家；缺省为骷髅射向玩家的箭） */
   fromPlayer?: boolean;
-  /** 烈焰人火球（更大更亮，命中伤害 4）或恶魂爆裂火球（命中/撞墙爆炸）或凋灵骷髅弹（爆炸 + 凋零 DOT）或末影珍珠（落点传送）或末影之眼（飞向要塞后悬停碎裂/掉落） */
+  /** 烈焰人火球（更大更亮，命中 5 伤 + 点燃玩家 5 秒，MC）或恶魂爆裂火球（命中/撞墙爆炸）或凋灵骷髅弹（爆炸 + 凋零 DOT）或末影珍珠（落点传送）或末影之眼（飞向要塞后悬停碎裂/掉落） */
   kind?: 'fireball' | 'ghast' | 'pearl' | 'wither_skull' | 'eye' | 'shulker';
 }
 
@@ -190,7 +198,7 @@ const SPAWN_MIN = 24;
 const SPAWN_MAX = 48;
 const SPAWN_INTERVAL = 4; // 秒
 const CHASE_RANGE = 40;
-const BURN_DAMAGE = 2; // 每秒（白天）
+const BURN_DAMAGE = 1; // 每秒（白天自燃；Java 着火 1 伤/秒）
 /** 铁傀儡猎杀对象（MC：威胁村庄的敌对怪） */
 const GOLEM_TARGETS: readonly MobType[] = ['zombie', 'skeleton', 'spider', 'creeper', 'phantom'];
 /** 摔落免疫（MC：鸡缓降不摔伤；烈焰人/恶魂等飞行者本就走悬浮分支，列名防御） */
@@ -198,6 +206,8 @@ const FALL_IMMUNE: readonly MobType[] = ['chicken', 'phantom', 'blaze', 'ghast',
 
 /** 幻翼失眠状态：连续未睡觉的完整游戏日数（≥3 的夜晚来袭，睡过清零）与来袭间隔计时 */
 export const phantomState = { insomniaDays: 0, timer: 0 };
+/** 玩家着火状态（烈焰人小火球点燃 5 秒，MC；DOT 1/s 在 tickMobs 结算，入水/死亡/雨天露天熄灭；抗火不点燃——见 tickArrows） */
+export const playerFire = { left: 0, acc: 0 };
 /** 上一帧的昼夜时钟（区分自然跨日与睡觉回拨：床把 worldClock.t 直接设回日出 0） */
 let lastClockT = worldClock.t;
 
@@ -210,6 +220,16 @@ export function onSlept(): void {
 /** tickMobs 遍历深度与延迟移除队列：遍历中 damageMob 不立即 splice（否则反向遍历索引错位、当前 mob 被前移双结算），遍历结束统一清理 */
 let tickDepth = 0;
 const pendingKill: Mob[] = [];
+
+/** 死亡倒地动画时长（秒）：hp≤0 后尸体保留这么久，由 tickMobs 倒数到 0 才移除（MC 死亡演出约 1s） */
+export const MOB_DEATH_DURATION = 0.8;
+/** 死亡白烟粒子事件的 tile 哨兵值：BreakParticleEvent.tile 本义是图集索引（负数非法，借作白烟标记），BreakParticles.tsx 据此渲染白色上飘粒子 */
+export const DEATH_SMOKE_TILE = -1;
+
+/** 推一条死亡白烟事件（BreakParticles 每帧消费，身体位置爆出白色上飘粒子，MC 尸体消散 poof） */
+function pushDeathSmoke(m: Mob): void {
+  breakParticles.push({ x: m.x, y: m.y, z: m.z, tile: DEATH_SMOKE_TILE });
+}
 
 /** 移除 mob：遍历中（tickDepth>0）入延迟队列，否则立即 splice */
 function removeMob(mob: Mob): void {
@@ -236,8 +256,8 @@ export function isNight(): boolean {
   return dayFactorAt(worldClock.t) < 0.4;
 }
 
-/** 白天自燃判定：头顶露天（y+2 向上无遮挡）且头部不在水中（树荫/洞穴/水下不烧，MC 一致） */
-function exposedToSky(world: World, m: Mob): boolean {
+/** 白天自燃判定：头顶露天（y+2 向上无遮挡）且头部不在水中（树荫/洞穴/水下不烧，MC 一致）；参数为任意坐标点（生物/玩家共用） */
+function exposedToSky(world: World, m: { x: number; y: number; z: number }): boolean {
   const bx = Math.floor(m.x);
   const bz = Math.floor(m.z);
   if (isWaterId(world.getBlock(bx, Math.floor(m.y) + 1, bz))) return false;
@@ -251,8 +271,8 @@ function exposedToSky(world: World, m: Mob): boolean {
 const precipCache = new Map<string, boolean>();
 let precipCacheKind: WeatherKind | null = null;
 
-/** 该生物处是否正在下雨（MC：仅雨抑制自燃——雪与干旱群系不保护；沙漠全局雨天也照烧） */
-function rainingAt(world: World, m: Mob): boolean {
+/** 该位置是否正在下雨（MC：仅雨抑制自燃/浇灭着火——雪与干旱群系不算；沙漠全局雨天也照烧） */
+function rainingAt(world: World, m: { x: number; y: number; z: number }): boolean {
   if (weather.kind === 'clear') return false;
   if (precipCacheKind !== weather.kind) {
     precipCache.clear();
@@ -834,9 +854,10 @@ function tickArrows(
       }
       const hitMob = mobs.find(
         (m) =>
-          m.type === 'ender_dragon'
+          m.hp > 0 && // 死亡态尸体不挡箭（MC）
+          (m.type === 'ender_dragon'
             ? Math.abs(m.x - a.x) < 2.5 && a.y > m.y - 1 && a.y < m.y + 2.5 && Math.abs(m.z - a.z) < 2.5
-            : Math.abs(m.x - a.x) < 0.55 && a.y > m.y - 0.2 && a.y < m.y + 2 && Math.abs(m.z - a.z) < 0.55,
+            : Math.abs(m.x - a.x) < 0.55 && a.y > m.y - 0.2 && a.y < m.y + 2 && Math.abs(m.z - a.z) < 0.55),
       );
       if (hitMob) {
         if (a.kind === 'pearl') {
@@ -867,7 +888,11 @@ function tickArrows(
       } else if (a.kind === 'shulker') {
         onAttackPlayer(4);
         effects.levitation = Math.max(effects.levitation, 5); // 漂浮 5 秒（MC）
-      } else onAttackPlayer(a.kind === 'fireball' ? 4 : 3);
+      } else if (a.kind === 'fireball') {
+        // 烈焰人小火球：命中 5 伤并点燃玩家 5 秒（MC；抗火不点燃，DOT 结算在 tickMobs playerFire）
+        onAttackPlayer(5);
+        if (effects.fireRes <= 0) playerFire.left = 5;
+      } else onAttackPlayer(3);
       arrows.splice(i, 1);
       continue;
     }
@@ -1051,6 +1076,26 @@ export function tickMobs(
 
   tickArrows(world, dt, targetPos, onAttackPlayer);
 
+  // 玩家着火 DOT（烈焰人小火球点燃，MC 每秒 1 伤；入水/死亡/雨天露天熄灭；创造 hostile=false 不烧）
+  if (playerFire.left > 0 && hostile) {
+    if (
+      useGameStore.getState().dead ||
+      isWaterId(world.getBlock(Math.floor(playerPos.x), Math.floor(playerPos.y), Math.floor(playerPos.z))) ||
+      (rainingAt(world, playerPos) && exposedToSky(world, playerPos)) // MC：雨天站在露天会被浇灭（棚下照烧）
+    ) {
+      playerFire.left = 0;
+      playerFire.acc = 0;
+    } else {
+      playerFire.left -= dt;
+      playerFire.acc += dt;
+      if (playerFire.acc >= 1) {
+        playerFire.acc -= 1;
+        onAttackPlayer(1);
+      }
+      if (playerFire.left <= 0) playerFire.acc = 0;
+    }
+  }
+
   // Boss 血条状态：凋灵/末影龙存活且玩家在附近（凋灵 48 格、龙全岛 96 格；无则清空）
   const boss = mobs.find((m) => (m.type === 'wither' && Math.hypot(m.x - playerPos.x, m.z - playerPos.z) < 48) || (m.type === 'ender_dragon' && Math.hypot(m.x - playerPos.x, m.z - playerPos.z) < 96));
   if (boss) {
@@ -1065,7 +1110,17 @@ export function tickMobs(
   tickDepth++; // 遍历中 damageMob 延迟移除（pendingKill）：避免反向遍历索引错位、当前 mob 被双结算
   for (let i = mobs.length - 1; i >= 0; i--) {
     const m = mobs[i];
-    if (m.hp <= 0) continue; // 已被 damageMob 标记待移除（pendingKill）的死 mob 跳过
+    // 死亡态（hp≤0 由 damageMob 标记）：倒地渐隐计时，期间不 AI/不移动/不碰撞；归零才真正移除并出白烟（MC 死亡演出）
+    if (m.hp <= 0) {
+      if ((m.deathTimer ?? 0) > 0) {
+        m.deathTimer = (m.deathTimer ?? 0) - dt;
+        if (m.deathTimer <= 0) {
+          pushDeathSmoke(m);
+          removeMob(m);
+        }
+      }
+      continue;
+    }
     const def = MOB_DEFS[m.type];
     // 幼体成长
     if (m.baby && m.growUp !== undefined) {
@@ -1079,6 +1134,7 @@ export function tickMobs(
     if (m.loveTimer !== undefined && m.loveTimer > 0) m.loveTimer -= dt;
     if (m.breedCd !== undefined && m.breedCd > 0) m.breedCd -= dt;
     if (m.aggroTimer !== undefined && m.aggroTimer > 0) m.aggroTimer -= dt;
+    if ((m.hurtImmune ?? 0) > 0) m.hurtImmune = (m.hurtImmune ?? 0) - dt; // 受伤免疫帧按游戏刻递减（MC 0.5s）
     // 末影龙：完全自管理飞行（穿方块、无环境伤害），跳过通用管线
     if (m.type === 'ender_dragon') {
       tickDragon(world, m, dt, targetPos, onAttackPlayer);
@@ -1087,8 +1143,9 @@ export function tickMobs(
     // 白天自燃（需露天且头部不在水中；本地正在下雨则不烧——MC 只认雨，雪/干旱群系不保护）
     if (!night && def.burnsAtDay && !rainingAt(world, m) && exposedToSky(world, m)) {
       m.hp -= BURN_DAMAGE * dt;
+      // 烧死走正常普通掉落（腐肉/骨头/箭等；attackerPos 为空 = 环境击杀：无经验、无玩家击杀稀有掉落，MC）
       if (m.hp <= 0) {
-        mobs.splice(i, 1);
+        damageMob(m, 1, undefined, 0, world);
         continue;
       }
     }
@@ -1124,12 +1181,20 @@ export function tickMobs(
 
     // 末影人水触掉血（MC：不论是否激怒；掉血即激怒并瞬移逃离）
     if (m.type === 'enderman' && isWaterId(world.getBlock(Math.floor(m.x), Math.floor(m.y), Math.floor(m.z)))) {
-      damageMob(m, 2 * dt, undefined, 0, world);
+      // 入水即结算 1 点（waterAcc 从 1 起算），之后每 0.5s 1 点——逐帧 2*dt 的小伤害会被受伤免疫帧吞掉，故攒整点结算（MC 约 2/s 不变）
+      m.waterAcc = (m.waterAcc ?? 1) + 2 * dt;
+      const wd = Math.floor(m.waterAcc);
+      if (wd > 0) {
+        m.waterAcc -= wd;
+        damageMob(m, wd, undefined, 0, world);
+      }
       if (m.hp <= 0) continue;
       if ((m.teleportTimer ?? 0) <= 0) {
         teleportEnderman(world, m);
         m.teleportTimer = 1;
       }
+    } else if (m.type === 'enderman') {
+      m.waterAcc = undefined; // 离水重置：下次入水重新立即结算 1 点（MC 入水即伤）
     }
 
     // 猪灵端详金锭（以物易物）：静止 3s 不移动不攻击，到点丢出随机易物（MC）
@@ -1329,7 +1394,7 @@ export function tickMobs(
         let target: Mob | null = null;
         let best = 24;
         for (const o of mobs) {
-          if (o === m || !GOLEM_TARGETS.includes(o.type)) continue;
+          if (o === m || o.hp <= 0 || !GOLEM_TARGETS.includes(o.type)) continue; // 死亡态尸体不再是目标
           const od = Math.hypot(o.x - m.x, o.z - m.z);
           if (od < best) {
             best = od;
@@ -1475,13 +1540,13 @@ export function tickMobs(
       }
     }
 
-    // 击退冲量（击退附魔）：独立于行为移动的位移，指数衰减
+    // 击退冲量（击退附魔）：独立于行为移动的位移，指数衰减（衰减率 4：配 11/级 冲量 ≈ 每级 2.75 格位移）
     if (m.kbx || m.kbz) {
       m.x += (m.kbx ?? 0) * dt;
       collideAxis(world, m, 0, (m.kbx ?? 0) * dt, HALF_W, HEIGHT);
       m.z += (m.kbz ?? 0) * dt;
       collideAxis(world, m, 2, (m.kbz ?? 0) * dt, HALF_W, HEIGHT);
-      const decay = Math.exp(-8 * dt);
+      const decay = Math.exp(-4 * dt);
       m.kbx = (m.kbx ?? 0) * decay;
       if (Math.abs(m.kbx) < 0.1) m.kbx = 0;
       m.kbz = (m.kbz ?? 0) * decay;
@@ -1551,6 +1616,7 @@ export function mobInReach(
   let best: Mob | null = null;
   let bestT = reach;
   for (const m of mobs) {
+    if (m.hp <= 0) continue; // 死亡态尸体不可被攻击（MC）
     const cx = m.x - ox;
     const cy = m.y + 0.9 - oy; // 身体中心
     const cz = m.z - oz;
@@ -1573,7 +1639,8 @@ export function mobInReach(
 /** 玩家最近攻击的目标（驯狼护主用；attackerPos 存在即记录） */
 export const lastPlayerTarget: { mob: Mob | null; at: number } = { mob: null, at: 0 };
 
-/** 对生物造成伤害（attackerPos 用于被动生物逃跑方向；lootBonus = 抢夺附魔等级；world 用于末影人受击瞬移），返回是否击杀 */
+/** 对生物造成伤害（attackerPos 用于被动生物逃跑方向；lootBonus = 抢夺附魔等级；world 用于末影人受击瞬移），返回是否击杀。
+ *  受伤免疫帧（MC 0.5s，Java lastHurt 规则）：期内新伤害 ≤ 上次则完全免疫，更高只补差额 */
 /** 末影龙击杀回调（lib/endfight.ts 注入：龙蛋 + 返回门激活；避免 mobs ↔ endfight 循环依赖） */
 let dragonDeathHandler: ((world: World) => void) | null = null;
 export function setDragonDeathHandler(h: (world: World) => void): void {
@@ -1581,6 +1648,19 @@ export function setDragonDeathHandler(h: (world: World) => void): void {
 }
 
 export function damageMob(mob: Mob, damage: number, attackerPos?: { x: number; z: number }, lootBonus = 0, world?: World, knockback = 0): boolean {
+  // 已在死亡态（倒地动画中的尸体）：不再吃伤害，也绝不重复结算掉落/经验（同一尸体可能被横扫/铁傀儡等当帧二次命中）
+  if (mob.deathTimer !== undefined) return false;
+  // 受伤免疫帧（MC 0.5s 游戏刻，Java lastHurt）：免疫期内不超过上次承受的攻击完全免疫，更高伤害只补差额（lastHurt 记新攻击全值）；
+  // hp ≤0 的致死结算（烧死/补刀）不再经免疫，否则刚好的无敌帧会卡住环境致死
+  if (mob.hp > 0 && (mob.hurtImmune ?? 0) > 0) {
+    if (damage <= (mob.lastHurt ?? 0)) return false;
+    const last = mob.lastHurt ?? 0;
+    mob.lastHurt = damage;
+    damage -= last;
+  } else {
+    mob.lastHurt = damage;
+  }
+  mob.hurtImmune = 0.5;
   mob.hp -= damage;  if (attackerPos) {
     lastPlayerTarget.mob = mob;
     lastPlayerTarget.at = performance.now() / 1000;
@@ -1590,7 +1670,7 @@ export function damageMob(mob: Mob, damage: number, attackerPos?: { x: number; z
     const dx = mob.x - attackerPos.x;
     const dz = mob.z - attackerPos.z;
     const d = Math.hypot(dx, dz) || 1;
-    const power = knockback * 6; // MC 击退 I 约 3-4 格
+    const power = knockback * 11; // 冲量 11/级 配 exp(-4dt) 衰减 ≈ 每级 2.75 格位移（MC 击退每级约 3 格，II 约 6 格）
     mob.kbx = (dx / d) * power;
     mob.kbz = (dz / d) * power;
     if (mob.onGround) mob.velY = 4;
@@ -1642,6 +1722,9 @@ export function damageMob(mob: Mob, damage: number, attackerPos?: { x: number; z
     for (let i = 0; i < n; i++) {
       mobs.push(makeSlime(mob.x + (Math.random() - 0.5) * 1.6, mob.y + 0.1, mob.z + (Math.random() - 0.5) * 1.6, nextSize));
     }
+    // 分裂不留尸体（MC）：标记已死（防同帧二次结算），立即移除 + 白烟
+    mob.deathTimer = 0;
+    pushDeathSmoke(mob);
     const i2 = mobs.indexOf(mob);
     if (i2 >= 0) removeMob(mob);
     // MC：大 4 / 中 2，仅玩家击杀发经验（环境击杀不发）
@@ -1653,12 +1736,16 @@ export function damageMob(mob: Mob, damage: number, attackerPos?: { x: number; z
     const count = drop.count[0] + Math.floor(Math.random() * (drop.count[1] - drop.count[0] + 1)) + (lootBonus > 0 ? Math.floor(Math.random() * (lootBonus + 1)) : 0);
     if (count > 0) spawnMaterialDrop(drop.material, mob.x, mob.y + 0.3, mob.z, count);
   }
+  // 蜘蛛眼：仅玩家击杀时 1/3 概率掉 1 个（MC 稀有掉落；烧死/摔死等环境击杀不掉）
+  if (mob.type === 'spider' && attackerPos && Math.random() < 1 / 3) {
+    spawnMaterialDrop('spider_eye', mob.x, mob.y + 0.3, mob.z, 1);
+  }
   // 羊：掉同色羊毛 ×1（剪过毛的不掉，MC）
   if (mob.type === 'sheep' && !mob.sheared) {
     spawnBlockDrop(woolBlockId(mob.woolColor ?? 'white'), mob.x, mob.y + 0.3, mob.z, 1 + (lootBonus > 0 ? Math.floor(Math.random() * lootBonus) : 0));
   }
-  // 凋灵骷髅：3% 掉头骨（召唤凋灵的材料，MC 稀有掉落）
-  if (mob.type === 'wither_skeleton' && Math.random() < 0.03) {
+  // 凋灵骷髅头：仅玩家击杀的稀有掉落（召唤凋灵材料，MC：基础 2.5% + 抢夺每级 +1%，即 I 3.5% / II 4.5% / III 5.5%）
+  if (mob.type === 'wither_skeleton' && attackerPos && Math.random() < 0.025 + 0.01 * lootBonus) {
     spawnBlockDrop(BLOCK_BY_KEY.wither_skeleton_skull.id, mob.x, mob.y + 0.3, mob.z, 1);
   }
   // 末影龙：击杀结算（龙蛋 + 返回门激活，lib/endfight.ts）
@@ -1667,7 +1754,8 @@ export function damageMob(mob: Mob, damage: number, attackerPos?: { x: number; z
   if (attackerPos) {
     useGameStore.getState().addXp(mob.type === 'slime' ? 1 : (XP_MOB[mob.type] ?? 5)); // 小史莱姆 1（MC）；新物种未登记经验时按 5 兜底
   }
-  removeMob(mob);
+  // 进入死亡态：尸体保留 MOB_DEATH_DURATION 秒（倒地渐隐，渲染见 Mobs.tsx），由 tickMobs 计时归零才真正移除并出白烟
+  mob.deathTimer = MOB_DEATH_DURATION;
   return true;
 }
 

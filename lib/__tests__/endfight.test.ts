@@ -163,6 +163,8 @@ describe('击杀结算', () => {
     expect(killed).toBe(true);
     expect(dragonState.slain).toBe(true);
     expect(endCrystals).toHaveLength(0);
+    expect(mobs.some((m) => m.type === 'ender_dragon' && m.hp > 0)).toBe(false); // 龙已死（尸体处于死亡态）
+    for (let i = 0; i < 20 && mobs.includes(dragon); i++) tickMobs(w, 0.1, { x: 0.5, y: 84, z: 0.5 }, () => undefined); // 倒地动画结束才移除
     expect(mobs.some((m) => m.type === 'ender_dragon')).toBe(false);
     const ay = w.terrain.heightAt(0, 0);
     for (let dx = -1; dx <= 1; dx++) {

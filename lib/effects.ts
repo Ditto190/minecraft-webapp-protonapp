@@ -3,15 +3,15 @@
 export interface Effects {
   /** 迅捷：+20% 移动速度（II 级 +40%，见 effectLvls） */
   speed: number;
-  /** 力量：+2 攻击伤害（II 级 +4，见 effectLvls） */
+  /** 力量：+3 攻击伤害/级（II 级 +6，见 effectLvls；实现见 Player.tsx 攻击结算） */
   strength: number;
   /** 抗火：免疫岩浆灼烧 */
   fireRes: number;
-  /** 再生：每 2 秒回 1 点生命（II 级每 1 秒，见 effectLvls） */
+  /** 再生：每 2.5 秒回 1 点生命（II 级每 1.25 秒，见 effectLvls） */
   regen: number;
   /** 水肺：水下不耗氧气 */
   waterBreath: number;
-  /** 急迫：+30% 挖掘速度（信标） */
+  /** 急迫：+20% 挖掘速度/级（信标，见 lib/dig.ts effectiveDigTime） */
   haste: number;
   /** 抗性：受伤减免 20%（信标） */
   resistance: number;

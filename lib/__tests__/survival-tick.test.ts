@@ -97,7 +97,7 @@ describe('生存数值 tick', () => {
     expect(mem.air).toBeLessThan(15);
   });
 
-  it('再生 II：每 1 秒回 1 点（I 级每 2 秒，MC）', () => {
+  it('再生 II：每 1.25 秒回 1 点（I 级每 2.5 秒，MC 25/50 tick）', () => {
     const mem = makeMem();
     const hp: number[] = [];
     const actions = { damagePlayer: () => {}, setHealth: (v: number) => hp.push(v), setHunger: () => {}, setSaturation: () => {} };
@@ -105,14 +105,14 @@ describe('生存数值 tick', () => {
     const s = { worldMode: 'survival', health: 10, hunger: 10, saturation: 0 };
     effects.regen = 30;
     effectLvls.regen = 2;
-    for (let i = 0; i < 10; i++) tickSurvival({ ...ENV, dt: 0.5 }, mem, s, actions); // 5 秒
-    expect(hp.length).toBe(5); // II 级 1s/点 → 5 点
-    // 对照 I 级：2s/点 → 5 秒 2 点
+    for (let i = 0; i < 20; i++) tickSurvival({ ...ENV, dt: 0.25 }, mem, s, actions); // 5 秒
+    expect(hp.length).toBe(4); // II 级 1.25s/点 → 5 秒 4 点
+    // 对照 I 级：2.5s/点 → 5 秒 2 点
     const mem2 = makeMem();
     const hp2: number[] = [];
     clearEffects();
     effects.regen = 30;
-    for (let i = 0; i < 10; i++) tickSurvival({ ...ENV, dt: 0.5 }, mem2, s, { ...actions, setHealth: (v: number) => hp2.push(v) });
+    for (let i = 0; i < 20; i++) tickSurvival({ ...ENV, dt: 0.25 }, mem2, s, { ...actions, setHealth: (v: number) => hp2.push(v) });
     expect(hp2.length).toBe(2);
   });
 

@@ -3,7 +3,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { BLOCK_BY_KEY } from '../blocks';
 import { survivalStats } from '../game';
-import { clearMobs, MOB_DEFS, mobs, tickMobs, trySpawn } from '../mobs';
+import { arrows, clearMobs, MOB_DEFS, mobs, playerFire, tickMobs, trySpawn } from '../mobs';
 import { createNetherTerrain } from '../nether';
 import { applyNetherStructures, fortressAt, fortressNear } from '../netherstructures';
 import { hashString, VOID_TERRAIN, type Terrain } from '../noise';
@@ -28,6 +28,8 @@ beforeEach(() => {
   clearStorages();
   survivalStats.wither = 0;
   survivalStats.exhaustion = 0;
+  playerFire.left = 0;
+  playerFire.acc = 0;
 });
 
 describe('下界堡垒', () => {
@@ -132,6 +134,21 @@ describe('堡垒生物', () => {
 
   it('烈焰人掉烈焰棒（defs 校验）', () => {
     expect(MOB_DEFS.blaze.drops.some((d) => d.material === 'blaze_rod')).toBe(true);
+  });
+
+  it('烈焰人火球：命中 5 伤并点燃玩家 5 秒（MC；DOT 每秒 1 点）', () => {
+    const w = voidWorld(); // 虚空世界：无遮挡、脚下无水
+    const player = { x: 8.5, y: 60, z: 8.5 };
+    arrows.push({ id: 99, x: 8.5, y: 60.5, z: 8.5, vx: 0, vy: 0, vz: 0, age: 0, kind: 'fireball' });
+    let dmg = 0;
+    tickMobs(w, 0.1, player, (d) => (dmg += d));
+    expect(dmg).toBe(5); // 小火球命中 5 伤（MC）
+    expect(playerFire.left).toBeGreaterThan(4); // 点燃 5 秒（同 tick DOT 已递减 0.1）
+    // 着火 DOT：约每秒 1 点，烧满即停
+    dmg = 0;
+    for (let i = 0; i < 25; i++) tickMobs(w, 0.1, player, (d) => (dmg += d));
+    expect(dmg).toBeGreaterThanOrEqual(2); // 2.5s 至少跳 2 下
+    expect(playerFire.left).toBeLessThan(4);
   });
 });
 

@@ -4,7 +4,7 @@ import { STONE } from '../blocks';
 import { dayFactorAt, hurtState, worldClock } from '../game';
 import { clearDrops, itemDrops } from '../items';
 import { MATERIAL_INFO } from '../materials';
-import { clearMobs, damageMob, mobInReach, mobs, arrows, tickMobs, trySpawn, MOB_DEFS, type Mob, type MobType } from '../mobs';
+import { clearMobs, damageMob, mobInReach, mobs, arrows, playerFire, tickMobs, trySpawn, MOB_DEFS, type Mob, type MobType } from '../mobs';
 import { VOID_TERRAIN } from '../noise';
 import { MAX_HEALTH, MAX_HUNGER, MAX_SATURATION, useGameStore } from '../store';
 import { emptySlots } from '../slots';
@@ -151,12 +151,20 @@ describe('僵尸', () => {
     expect(dmg).toBe(0); // 冷却中不再攻击
   });
 
-  it('白天燃烧死亡', () => {
+  it('白天燃烧死亡：走普通掉落（腐肉），无经验（MC 环境击杀）', () => {
     const w = floorWorld();
     mobs.push(mkMob({ id: 3, type: 'zombie', x: 30, y: 10, z: 30, hp: 1 }));
     worldClock.t = 0.25; // 正午
+    clearDrops();
+    const xp0 = useGameStore.getState().xpTotal;
+    const rnd = vi.spyOn(Math, 'random').mockReturnValue(0.99); // 掉落数量取满；0.99 不触发白天被动刷怪（<0.2 才刷）
     tickMobs(w, 1, { x: 0, y: 10, z: 0 }, () => {});
+    tickMobs(w, 1, { x: 0, y: 10, z: 0 }, () => {}); // 第二拍：死亡倒地动画（0.8s）结束，尸体才真正移除
+    rnd.mockRestore();
     expect(mobs.length).toBe(0);
+    expect(itemDrops.some((d) => d.drop.kind === 'material' && d.drop.material === 'rotten_flesh')).toBe(true); // 烧死也掉腐肉（MC）
+    expect(useGameStore.getState().xpTotal).toBe(xp0); // 环境击杀不发经验
+    clearDrops();
   });
 
   it('雨天白天不燃烧，转晴恢复（MC：雨/雷暴中亡灵不烧）', () => {
@@ -186,10 +194,46 @@ describe('僵尸', () => {
     expect(mobInReach(w, 0.5, 11.6, 0, 0, 0, 1, 6)).toBeNull();
   });
 
-  it('damageMob 击杀后移除', () => {
+  it('damageMob 击杀：先进死亡态（尸体保留），倒地动画计时结束才移除（MC 死亡演出）', () => {
+    const w = floorWorld();
+    worldClock.t = 0.3; // 白天 + 石板地面：不刷怪，隔离刷怪随机性
     mobs.push(mkMob({ id: 5, type: 'zombie', x: 0, y: 10, z: 0, hp: 4 }));
     expect(damageMob(mobs[0], 4)).toBe(true);
+    expect(mobs.length).toBe(1); // 尸体保留（不再立即移除）
+    expect(mobs[0].deathTimer).toBeGreaterThan(0);
+    for (let i = 0; i < 10; i++) tickMobs(w, 0.1, { x: 0, y: 10, z: 0 }, () => {}); // 1s > 0.8s 动画时长
     expect(mobs.length).toBe(0);
+  });
+
+  it('受伤免疫帧：0.5s 内更弱伤害完全免疫、更高伤害只补差额（Java lastHurt）', () => {
+    mobs.push(mkMob({ id: 21, type: 'zombie', x: 0, y: 10, z: 0, hp: 20 }));
+    const z = mobs[0];
+    expect(damageMob(z, 6)).toBe(false);
+    expect(z.hp).toBe(14);
+    expect(damageMob(z, 4)).toBe(false); // 4 ≤ 6：免疫期内完全免疫
+    expect(z.hp).toBe(14);
+    expect(damageMob(z, 10)).toBe(false); // 10 > 6：只补差额 10-6=4
+    expect(z.hp).toBe(10);
+    z.hurtImmune = 0; // 免疫帧过期
+    expect(damageMob(z, 2)).toBe(false);
+    expect(z.hp).toBe(8);
+  });
+
+  it('击退附魔位移：每级约 2.5-3 格（MC：击退 II 约 6 格）', () => {
+    const w = floorWorld();
+    // 玩家在 50 格外：僵尸不追击（CHASE_RANGE 40）也不消失（<64），位移纯由击退冲量产生
+    const player = { x: 50, y: 10, z: 0 };
+    mobs.push(mkMob({ id: 31, type: 'zombie', x: 0, y: 10, z: -5, hp: 20 }));
+    mobs.push(mkMob({ id: 32, type: 'zombie', x: 0, y: 10, z: 5, hp: 20 }));
+    const [z1, z2] = mobs;
+    damageMob(z1, 1, { x: -2, z: -5 }, 0, w, 1); // 击退 I（攻击者在 -x 侧 → 向 +x 击退）
+    damageMob(z2, 1, { x: -2, z: 5 }, 0, w, 2); // 击退 II
+    for (let i = 0; i < 60; i++) tickMobs(w, 0.05, player, () => {}); // 3 秒，冲量早已衰减完
+    expect(z1.x).toBeGreaterThan(2.2); // 约 3 格（旧参数 <1 格是偏差）
+    expect(z1.x).toBeLessThan(3.5);
+    expect(z2.x).toBeGreaterThan(4.5); // II 级约 6 格
+    expect(z2.x).toBeLessThan(7);
+    expect(Math.abs(z1.z - -5)).toBeLessThan(0.5); // 纯水平方向，无横向漂移
   });
 });
 
@@ -244,6 +288,7 @@ describe('更多生物', () => {
   });
 
   it('苦力怕近身引爆：破坏方块并伤害玩家', { timeout: 20000 }, () => {
+    const rnd = vi.spyOn(Math, 'random').mockReturnValue(0.1); // 钉死爆炸破块判定（石块 p≈0.5>0.1 必破），消除统计抖动
     const w = floorWorld();
     const player = { x: 0, y: 10, z: 0 };
     mobs.push(mkMob({ id: 13, type: 'creeper', x: 1.5, y: 10, z: 0 }));
@@ -256,6 +301,7 @@ describe('更多生物', () => {
     let holes = 0;
     for (let x = -3; x <= 3; x++) for (let z = -3; z <= 3; z++) if (w.getBlock(x, 9, z) === 0) holes++;
     expect(holes).toBeGreaterThan(0);
+    rnd.mockRestore();
   });
 
   it('蜘蛛白天中立不追击', { timeout: 20000 }, () => {
@@ -264,5 +310,54 @@ describe('更多生物', () => {
     mobs.push(mkMob({ id: 14, type: 'spider', x: 5, y: 10, z: 0, wanderTimer: 99, wanderMoving: false }));
     tickMobs(w, 0.5, { x: 0, y: 10, z: 0 }, () => {});
     expect(Math.hypot(mobs[0].x, mobs[0].z)).toBeGreaterThan(4.5); // 基本没动
+  });
+});
+
+describe('玩家着火（playerFire，烈焰人点燃）', () => {
+  beforeEach(() => {
+    clearMobs();
+    resetStore();
+    worldClock.t = 0.75; // 午夜
+    weather.kind = 'clear';
+    playerFire.left = 0;
+    playerFire.acc = 0;
+  });
+
+  it('DOT 每秒 1 点，5 秒烧完自熄（MC 着火）', () => {
+    const w = floorWorld();
+    const player = { x: 0, y: 10, z: 0 };
+    const rnd = vi.spyOn(Math, 'random').mockReturnValue(0.99); // 不刷怪（>0.6），DOT 计数不受干扰
+    playerFire.left = 5;
+    let dmg = 0;
+    for (let i = 0; i < 8; i++) tickMobs(w, 0.25, player, (d) => (dmg += d)); // 2 秒
+    expect(dmg).toBe(2); // 每秒 1 点（MC）
+    expect(playerFire.left).toBeCloseTo(3, 6);
+    for (let i = 0; i < 16; i++) tickMobs(w, 0.25, player, (d) => (dmg += d)); // 再 4 秒（共 6 秒，超过 5 秒燃时）
+    expect(dmg).toBe(5); // 烧满 5 秒共 5 点，之后自熄
+    expect(playerFire.left).toBeLessThanOrEqual(0);
+    rnd.mockRestore();
+  });
+
+  it('雨天露天立即熄灭；头顶有遮挡照烧（MC）', () => {
+    const w = floorWorld();
+    const player = { x: 0, y: 10, z: 0 };
+    const rnd = vi.spyOn(Math, 'random').mockReturnValue(0.99);
+    weather.kind = 'rain';
+    try {
+      playerFire.left = 5;
+      tickMobs(w, 0.25, player, () => {});
+      expect(playerFire.left).toBe(0); // 露天被雨浇灭
+      expect(playerFire.acc).toBe(0);
+      // 头顶搭棚：雨天但不露天，DOT 继续（MC：雨只浇灭淋到雨的着火者）
+      w.setBlock(0, 13, 0, STONE);
+      playerFire.left = 5;
+      let dmg = 0;
+      for (let i = 0; i < 8; i++) tickMobs(w, 0.25, player, (d) => (dmg += d)); // 2 秒
+      expect(dmg).toBe(2);
+      expect(playerFire.left).toBeCloseTo(3, 6);
+    } finally {
+      weather.kind = 'clear';
+      rnd.mockRestore();
+    }
   });
 });
