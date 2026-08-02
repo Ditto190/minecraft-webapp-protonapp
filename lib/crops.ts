@@ -1,4 +1,5 @@
-// 小麦作物生长与耕地维护：随机刻推进 8 阶段；耕地水润湿加速、干旱退化、生长需光照
+// 小麦作物生长与耕地维护：随机刻推进 8 阶段；耕地水润湿加速、干旱退化、被非透明实心方块
+// 压顶退化、可被摔落踩坏；作物失去耕地或光照不足且不见天时以掉落物形式弹出（Java canSurvive）
 
 import { AIR, BLOCK_BY_KEY, BLOCKS, isWaterId, WHEAT_CROP_0, type BlockId } from './blocks';
 import { dayFactorAt, worldClock } from './game';
@@ -63,10 +64,46 @@ function lightAt(world: World, x: number, y: number, z: number, day: boolean): n
   return Math.max(c.light[i], day ? c.sky[i] : 0);
 }
 
+/** 能否见天（Java canSeeSky 的简化）：天空光满格 15 即所在列无遮挡直见天空（侧面渗透 ≤14，规则见 lib/lights.ts） */
+function canSeeSky(world: World, x: number, y: number, z: number): boolean {
+  const c = world.chunks.get(`${x >> 4},${z >> 4}`);
+  if (!c) return false;
+  const i = (y * 16 + (z & 15)) * 16 + (x & 15);
+  return c.sky[i] >= 15;
+}
+
 /** 清空作物/耕地登记（切换世界时调用） */
 export function clearCrops(): void {
   crops.clear();
   farmlands.clear();
+}
+
+/**
+ * 作物以掉落物形式弹出（Java：耕地消失/光照不足时作物掉落，而非直接吞掉）：
+ * 按当前生长阶段掉落（同收割规则）。掉落回调由 actions 注入（避免循环依赖；仅生存模式实际产生掉落）
+ */
+export function popCrop(world: World, x: number, y: number, z: number): void {
+  const id = world.getBlock(x, y, z);
+  if (!isWheatCropId(id)) return;
+  world.setBlock(x, y, z, AIR);
+  onCropPop?.(id, x, y, z);
+}
+
+/** 作物弹出掉落回调（actions 注入，避免循环依赖） */
+let onCropPop: ((id: BlockId, x: number, y: number, z: number) => void) | null = null;
+export function setCropPopHandler(fn: typeof onCropPop): void {
+  onCropPop = fn;
+}
+
+/**
+ * 踩坏耕地（MC：生物摔落砸到耕地 → 泥土，其上作物弹出）；返回是否踩中耕地。
+ * 本项目由玩家落地结算调用（Player.tsx）；Java 按摔落距离概率判定，简化为调用方按「摔落 >1 格」固定触发
+ */
+export function trampleFarmland(world: World, x: number, y: number, z: number): boolean {
+  if (!isFarmlandId(world.getBlock(x, y, z))) return false;
+  world.setBlock(x, y, z, BLOCK_BY_KEY.dirt.id);
+  popCrop(world, x, y + 1, z);
+  return true;
 }
 
 /**
@@ -93,10 +130,12 @@ export function rescanCropsChunk(world: World, cx: number, cz: number): void {
 
 /**
  * 每 ~2s 调用：
- * - 耕地：4 格内有水变湿润（作物 2 倍速），干旱且空着的缓慢退化回泥土；
+ * - 耕地：4 格内有水变湿润（作物 2 倍速），干旱且空着的缓慢退化回泥土，
+ *   被非透明实心方块压顶立即退化回泥土（MC）；
  *   每 tick 限量处理 FARMLAND_BATCH 块（大农场分摊到多个 tick，避免主线程卡顿），
  *   处理完仍有效的重新加到 Set 尾部，天然形成轮转游标
- * - 作物：光照 ≥9 才生长（白天靠天光，夜里靠火把），下方耕地没了则消失
+ * - 作物：下方耕地没了则以掉落物形式弹出（按阶段掉种子/小麦，同收割）；
+ *   所在格光照 ≤7 且不能见天同样弹出（Java canSurvive）；存活且光照 ≥9 才生长
  */
 export function tickCrops(world: World, dt: number): void {
   growAcc += dt;
@@ -120,6 +159,11 @@ export function tickCrops(world: World, dt: number): void {
     }
     const id = world.getBlock(x, y, z);
     if (!isFarmlandId(id)) continue; // 已除名（delete 后不重新加入）
+    // MC：被非透明实心方块压顶 → 变回泥土（树叶/玻璃等透明方块不触发；作物非实心，种着作物的耕地不受此规则影响）
+    if (BLOCKS[world.getBlock(x, y + 1, z)]?.opaque) {
+      world.setBlock(x, y, z, dirtId); // setBlock 钩子会把 k 从 farmlands 移除
+      continue;
+    }
     const moist = hasWaterNear(world, x, y, z);
     if (moist && id === dryId) world.setBlock(x, y, z, moistId);
     else if (!moist && id === moistId) world.setBlock(x, y, z, dryId);
@@ -141,11 +185,20 @@ export function tickCrops(world: World, dt: number): void {
     }
     const below = world.getBlock(x, y - 1, z);
     if (!isFarmlandId(below)) {
-      world.setBlock(x, y, z, AIR);
+      // Java：耕地没了（退化/被踩/被挖）→ 作物以掉落物形式弹出，不是直接吞掉
+      popCrop(world, x, y, z);
       crops.delete(k);
       continue;
     }
-    if (lightAt(world, x, y, z, day) < 9) continue;
+    // Java canSurvive：作物格光照 ≤7 且不能见天 → 弹出（与下面的生长光照规则区分：
+    // 那条是「光照 <9 停止生长」，这条是「已种作物被弹出」）
+    const light = lightAt(world, x, y, z, day);
+    if (light <= 7 && !canSeeSky(world, x, y, z)) {
+      popCrop(world, x, y, z);
+      crops.delete(k);
+      continue;
+    }
+    if (light < 9) continue;
     const chance = below === moistId ? 1 / 6 : 1 / 12;
     if (rand() < chance) world.setBlock(x, y, z, id + 1);
   }

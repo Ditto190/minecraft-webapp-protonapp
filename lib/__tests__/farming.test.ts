@@ -2,9 +2,9 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 import { breakBlock, tryPlace } from '../actions';
-import { BLOCK_BY_KEY, GRASS, WHEAT_CROP_0 } from '../blocks';
-import { notifyCropBlockSet, tickCrops } from '../crops';
-import { cameraRef, setActiveWorld } from '../game';
+import { BLOCK_BY_KEY, GRASS, STONE, WHEAT_CROP_0 } from '../blocks';
+import { notifyCropBlockSet, tickCrops, trampleFarmland } from '../crops';
+import { cameraRef, setActiveWorld, worldClock } from '../game';
 import { clearDrops, itemDrops } from '../items';
 import { breedMob, clearMobs, mobs } from '../mobs';
 import { VOID_TERRAIN } from '../noise';
@@ -87,6 +87,72 @@ describe('耕种', () => {
     breakBlock(w, 4, 30, 4);
     expect(w.getBlock(4, 31, 4)).toBe(0);
     expect(itemDrops.some((d) => d.drop.kind === 'material' && d.drop.material === 'wheat_seeds')).toBe(true);
+  });
+
+  it('挖掉耕地：成熟作物按生长阶段弹出（1 小麦 + 种子），不是直接吞掉', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, FARMLAND());
+    w.setBlock(4, 31, 4, WHEAT_CROP_0 + 7); // 成熟
+    breakBlock(w, 4, 30, 4);
+    expect(w.getBlock(4, 31, 4)).toBe(0);
+    expect(itemDrops.some((d) => d.drop.kind === 'material' && d.drop.material === 'wheat')).toBe(true);
+  });
+
+  it('耕地退化消失：未熟作物以掉落物形式弹出（tickCrops 路径）', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, FARMLAND());
+    w.setBlock(4, 31, 4, WHEAT_CROP_0 + 3);
+    w.chunks.get('0,0')!.sky.fill(15);
+    w.setBlock(4, 30, 4, BLOCK_BY_KEY.dirt.id); // 耕地没了（退化/被改，不走 breakBlock 的路径）
+    tickCrops(w, 2);
+    expect(w.getBlock(4, 31, 4)).toBe(0); // 弹出而非吞掉
+    const seeds = itemDrops.filter((d) => d.drop.kind === 'material' && d.drop.material === 'wheat_seeds');
+    expect(seeds).toHaveLength(1);
+  });
+
+  it('耕地被非透明实心方块压顶 → 变回泥土；透明方块（树叶）压顶不触发', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, FARMLAND());
+    w.setBlock(4, 31, 4, STONE); // 不透明实心压顶（MC：耕地退化）
+    // 对照组：树叶透明压顶不退化；旁边供水保持湿润，排除干旱退化的概率干扰
+    w.setBlock(6, 30, 4, FARMLAND());
+    w.setBlock(6, 31, 4, BLOCK_BY_KEY.leaves.id);
+    w.setBlock(8, 30, 4, BLOCK_BY_KEY.water.id);
+    tickCrops(w, 2);
+    expect(w.getBlock(4, 30, 4)).toBe(BLOCK_BY_KEY.dirt.id);
+    expect(w.getBlock(6, 30, 4)).toBe(BLOCK_BY_KEY.farmland_moist.id);
+  });
+
+  it('作物格光照 ≤7 且不见天 → 弹出（Java canSurvive）；夜晚露天不弹', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, FARMLAND());
+    w.setBlock(4, 31, 4, WHEAT_CROP_0 + 3);
+    // 封闭黑暗：天空光/方块光均 0，白天也救不了——不见天
+    w.chunks.get('0,0')!.sky.fill(0);
+    worldClock.t = 0.3;
+    tickCrops(w, 2);
+    expect(w.getBlock(4, 31, 4)).toBe(0);
+    expect(itemDrops.some((d) => d.drop.kind === 'material' && d.drop.material === 'wheat_seeds')).toBe(true);
+    // 夜晚露天：光照 0 但能见天 → 存活（Java canSeeSky 兜底），只是停止生长
+    clearDrops();
+    w.setBlock(4, 31, 4, WHEAT_CROP_0 + 3);
+    w.chunks.get('0,0')!.sky.fill(15);
+    worldClock.t = 0.75; // 夜晚
+    tickCrops(w, 2);
+    expect(w.getBlock(4, 31, 4)).toBe(WHEAT_CROP_0 + 3);
+    expect(itemDrops).toHaveLength(0);
+    worldClock.t = 0; // 还原默认白天，防串扰同文件其他用例
+  });
+
+  it('踩坏耕地：trampleFarmland 变泥土 + 成熟作物按阶段弹出；非耕地返回 false', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, FARMLAND());
+    w.setBlock(4, 31, 4, WHEAT_CROP_0 + 7);
+    expect(trampleFarmland(w, 4, 30, 4)).toBe(true);
+    expect(w.getBlock(4, 30, 4)).toBe(BLOCK_BY_KEY.dirt.id);
+    expect(w.getBlock(4, 31, 4)).toBe(0);
+    expect(itemDrops.some((d) => d.drop.kind === 'material' && d.drop.material === 'wheat')).toBe(true);
+    expect(trampleFarmland(w, 4, 30, 4)).toBe(false); // 已是泥土，不再触发
   });
 
   it('打草丛概率掉小麦种子（统计 25%±10%）', () => {

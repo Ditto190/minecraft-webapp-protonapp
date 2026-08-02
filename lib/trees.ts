@@ -35,7 +35,7 @@ function addVines(put: PutFn, x: number, z: number, canopyBaseY: number, rand: (
 
 /** 各树种从地表（含）算起的最大总高（生成前用它判断世界顶能否放下） */
 export const TREE_MAX_H: Record<TreeKind, number> = {
-  oak: 6,
+  oak: 7,
   birch: 8,
   spruce: 9,
   jungle: 17,
@@ -44,16 +44,29 @@ export const TREE_MAX_H: Record<TreeKind, number> = {
   cherry: 9,
 };
 
+/** 丛林巨树（2×2 四棵丛林苗长成）从地表算起的最大总高：干最高 24 + 顶冠 1 */
+export const MEGA_JUNGLE_MAX_H = 25;
+
 const woodParts = (kind: TreeKind): [log: BlockId, leaves: BlockId] => [
   BLOCK_BY_KEY[kind === 'oak' ? 'log' : `${kind}_log`].id,
   BLOCK_BY_KEY[kind === 'oak' ? 'leaves' : `${kind}_leaves`].id,
 ];
 
-/** 圆盘叶层：r=1 → 3×3，r=2 → 5×5；cutCorners 去四角（更圆） */
+/** 圆盘叶层：r=1 → 3×3，r=2 → 5×5，r=3 → 7×7；cutCorners 去四角（更圆） */
 function layer(put: PutFn, cx: number, y: number, cz: number, r: number, id: BlockId, cutCorners: boolean): void {
   for (let dx = -r; dx <= r; dx++) {
     for (let dz = -r; dz <= r; dz++) {
       if (cutCorners && Math.abs(dx) === r && Math.abs(dz) === r) continue;
+      put(cx + dx, y, cz + dz, id, true);
+    }
+  }
+}
+
+/** Java 橡树/白桦 blob 叶层：5×5，四角按 rand 随机缺角（更自然） */
+function blobLayer(put: PutFn, cx: number, y: number, cz: number, id: BlockId, rand: () => number): void {
+  for (let dx = -2; dx <= 2; dx++) {
+    for (let dz = -2; dz <= 2; dz++) {
+      if (Math.abs(dx) === 2 && Math.abs(dz) === 2 && rand() < 0.5) continue;
       put(cx + dx, y, cz + dz, id, true);
     }
   }
@@ -73,27 +86,34 @@ export function writeTree(put: PutFn, kind: TreeKind, x: number, h: number, z: n
   const [log, leaves] = woodParts(kind);
   switch (kind) {
     case 'oak': {
-      for (let y = h + 1; y <= h + 4; y++) put(x, y, z, log, false);
-      layer(put, x, h + 3, z, 1, leaves, false);
-      layer(put, x, h + 4, z, 1, leaves, false);
-      put(x, h + 5, z, leaves, true);
-      if (opts?.vines) addVines(put, x, z, h + 3, rand);
+      // Java 橡树：干 4-6 随机，冠层 blob 半径 2（下两层 5×5 随机缺角，顶层 3×3/十字）
+      const H = 4 + Math.floor(rand() * 3);
+      for (let y = h + 1; y <= h + H; y++) put(x, y, z, log, false);
+      blobLayer(put, x, h + H - 1, z, leaves, rand);
+      blobLayer(put, x, h + H, z, leaves, rand);
+      if (rand() < 0.5) layer(put, x, h + H + 1, z, 1, leaves, false);
+      else plus(put, x, h + H + 1, z, leaves);
+      if (opts?.vines) addVines(put, x, z, h + H - 1, rand);
       return;
     }
     case 'birch': {
-      for (let y = h + 1; y <= h + 6; y++) put(x, y, z, log, false);
-      layer(put, x, h + 4, z, 1, leaves, false);
-      layer(put, x, h + 5, z, 1, leaves, false);
-      put(x, h + 6, z, leaves, true);
+      // Java 白桦：干 5-7 随机，冠层同橡树 blob 半径 2
+      const H = 5 + Math.floor(rand() * 3);
+      for (let y = h + 1; y <= h + H; y++) put(x, y, z, log, false);
+      blobLayer(put, x, h + H - 1, z, leaves, rand);
+      blobLayer(put, x, h + H, z, leaves, rand);
+      if (rand() < 0.5) layer(put, x, h + H + 1, z, 1, leaves, false);
+      else plus(put, x, h + H + 1, z, leaves);
       return;
     }
     case 'spruce': {
-      // 锥形塔：3×3 与十字交替收分，MC 云杉观感
+      // 锥形塔：中下层半径 2-3（7×7/5×5 切角）向上收分到 3×3，MC 云杉观感
       const H = 7 + Math.floor(rand() * 3); // 7-9
       for (let y = h + 1; y <= h + H; y++) put(x, y, z, log, false);
       for (let dy = 2; dy < H; dy++) {
-        if (dy % 2 === 0) layer(put, x, h + dy, z, 1, leaves, true);
-        else plus(put, x, h + dy, z, leaves);
+        if (dy <= H - 4) layer(put, x, h + dy, z, 3, leaves, true);
+        else if (dy <= H - 2) layer(put, x, h + dy, z, 2, leaves, true);
+        else layer(put, x, h + dy, z, 1, leaves, true);
       }
       plus(put, x, h + H, z, leaves);
       put(x, h + H + 1, z, leaves, true);
@@ -110,14 +130,16 @@ export function writeTree(put: PutFn, kind: TreeKind, x: number, h: number, z: n
       return;
     }
     case 'acacia': {
-      // 折干平顶：先直 2 格，斜走一步再直 3 格，冠层平顶盖在斜干顶
+      // 斜干平顶：整段连续 45° 对角（每升 1 格横移 1 格，不再恢复竖直），冠层平顶盖在斜干顶
       const step: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
       const [sx, sz] = step[Math.floor(rand() * 4)];
-      put(x, h + 1, z, log, false);
-      put(x, h + 2, z, log, false);
-      const tx = x + sx;
-      const tz = z + sz;
-      for (let y = h + 3; y <= h + 5; y++) put(tx, y, tz, log, false);
+      let tx = x;
+      let tz = z;
+      for (let i = 0; i < 5; i++) {
+        tx = x + i * sx;
+        tz = z + i * sz;
+        put(tx, h + 1 + i, tz, log, false);
+      }
       layer(put, tx, h + 6, tz, 2, leaves, true);
       layer(put, tx, h + 7, tz, 1, leaves, true);
       return;
@@ -143,6 +165,45 @@ export function writeTree(put: PutFn, kind: TreeKind, x: number, h: number, z: n
       return;
     }
   }
+}
+
+/**
+ * 丛林巨树（Java：丛林苗 2×2 四棵长成，单苗只长普通丛林树）：2×2 粗干 18-24 高
+ * （Java 干 20-30，按本作世界高 128 压缩，仍为普通丛林树 10-14 的 ~1.7 倍），
+ * 顶部大冠 + 上段干外伸侧枝、枝端叶团；四列干面垂藤。
+ * 所有树叶沿 6 邻树叶通路距原木 ≤6（distance 凋零模型下不自枯）。
+ */
+export function writeMegaJungle(put: PutFn, x: number, h: number, z: number, rand: () => number): void {
+  const [log, leaves] = woodParts('jungle');
+  const H = 18 + Math.floor(rand() * 7); // 18-24
+  for (let y = h + 1; y <= h + H; y++) {
+    for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [1, 1]] as const) put(x + dx, y, z + dz, log, false);
+  }
+  // 顶部大冠：底两层 r=3/r=2 切角 + 顶层 3×3 盖干（叶沿冠层距干均 ≤5）
+  layer(put, x, h + H - 1, z, 3, leaves, true);
+  layer(put, x, h + H, z, 2, leaves, true);
+  layer(put, x, h + H + 1, z, 1, leaves, false);
+  // 上段侧枝：3-5 条，自 2×2 干面水平外伸 2-3 格原木，枝端叶团（r=2 切角 + r=1，叶距枝端原木 ≤3）
+  const sides: [number, number][] = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  const branches = 3 + Math.floor(rand() * 3);
+  for (let b = 0; b < branches; b++) {
+    const [sx, sz] = sides[Math.floor(rand() * 4)];
+    const by = h + H - 2 - Math.floor(rand() * 6); // 干顶往下 2-7 格处起枝
+    const len = 2 + Math.floor(rand() * 2); // 外伸 2-3 格
+    const bx = sx !== 0 ? (sx > 0 ? x + 1 : x) : x + (rand() < 0.5 ? 0 : 1);
+    const bz = sz !== 0 ? (sz > 0 ? z + 1 : z) : z + (rand() < 0.5 ? 0 : 1);
+    let tx = bx;
+    let tz = bz;
+    for (let i = 1; i <= len; i++) {
+      tx = bx + sx * i;
+      tz = bz + sz * i;
+      put(tx, by, tz, log, false);
+    }
+    layer(put, tx, by, tz, 2, leaves, true);
+    layer(put, tx, by + 1, tz, 1, leaves, false);
+  }
+  // 丛林标志垂藤：2×2 干每列四面垂下（onlyAir，干内格自动跳过）
+  for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [1, 1]] as const) addVines(put, x + dx, z + dz, h + H - 1, rand);
 }
 
 /** 巨蘑菇最大高（蘑菇岛/黑森林） */

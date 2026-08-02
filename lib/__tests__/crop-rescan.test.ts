@@ -64,6 +64,7 @@ describe('树苗重扫登记（读档恢复生长）', () => {
   it('直写 data 的树苗 rescan 后能长成树', () => {
     const w = new World('sapling-rescan', undefined, VOID_TERRAIN);
     writeRaw(w, 8, 30, 8, BLOCK_BY_KEY.oak_sapling.id);
+    w.chunks.get('0,0')!.sky.fill(15); // MC：光照 ≥9 才生长
     // 未重扫：不生长
     for (let i = 0; i < 50; i++) tickSaplings(w, 2);
     expect(w.getBlock(8, 30, 8)).toBe(BLOCK_BY_KEY.oak_sapling.id);

@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it } from 'vitest';
 import { breakBlock, tryPlace } from '../actions';
 import { AIR, BLOCK_BY_KEY, STONE } from '../blocks';
 import { cameraRef, setActiveWorld } from '../game';
-import { tickGrowth } from '../growth';
+import { clearGrowthAges, columnGrowthAge, tickGrowth } from '../growth';
 import { clearDrops, itemDrops } from '../items';
 import { buildFromGrid } from '../mesher';
 import { BIOME_LIST, VOID_TERRAIN, type Biome, type Terrain } from '../noise';
@@ -19,6 +19,7 @@ const K = (k: string) => BLOCK_BY_KEY[k].id;
 function setup(): World {
   clearDrops();
   clearStorages();
+  clearGrowthAges(); // 柱作物 age 是模块级状态，用例间隔离
   const w = new World('flora-test', undefined, VOID_TERRAIN);
   setActiveWorld(w);
   useGameStore.getState().loadSurvival({ health: 20, hunger: 20, slots: emptySlots() });
@@ -123,16 +124,66 @@ describe('柱状植物（仙人掌/甘蔗/竹子）', () => {
     expect(cactusDrops[0].count).toBe(2);
   });
 
-  it('随机刻下仙人掌会拔节', () => {
+  it('甘蔗 age 逐次递增：每满 16 次随机刻拔一节（age 0→15 计数重置，非命中即长）', () => {
     const w = setup();
-    // 间隔 2 格摆放（仙人掌四邻不能有实心，否则按 MC 规则应破），提高命中同时保证合法
-    for (const x of [2, 5, 8]) for (const z of [2, 5, 8]) w.setBlock(x, 31, z, K('cactus'));
-    let grown = false;
-    for (let i = 0; i < 6000 && !grown; i++) {
+    w.setBlock(4, 31, 4, K('sugar_cane'));
+    const height = (): number => {
+      let h = 0;
+      while (w.getBlock(4, 31 + h, 4) === K('sugar_cane')) h++;
+      return h;
+    };
+    let prevHits = 0;
+    // 单格每轮被抽中概率 p = 960/32768 ≈ 0.029，攒满 32 次（拔 2 节到上限）期望 ~1100 轮，6000 轮足够
+    for (let i = 0; i < 6000 && height() < 3; i++) {
       tickGrowth(w, 2);
-      for (const x of [2, 5, 8]) for (const z of [2, 5, 8]) if (w.getBlock(x, 32, z) === K('cactus')) grown = true;
+      const hits = columnGrowthAge(4, 4) + 16 * (height() - 1); // 累计命中 = 当前 age + 16×已拔节数
+      // 单轮可能多次抽中同格（概率极低但有），age 只增不减、按命中数累计
+      expect(hits).toBeGreaterThanOrEqual(prevHits);
+      expect(hits - prevHits).toBeLessThanOrEqual(4);
+      // Java 模型不变式：恰好每 16 次命中拔一节（排除旧模型「命中即长」）
+      expect(height() - 1).toBe(Math.floor(hits / 16));
+      prevHits = hits;
     }
-    expect(grown).toBe(true);
+    expect(height()).toBe(3); // 长到 Java 自然上限
+    expect(prevHits).toBeGreaterThanOrEqual(32); // 确实计满了 2×16 次随机刻
+  });
+
+  it('仙人掌同样按 age 模型拔节（与甘蔗共用计数路径）', () => {
+    const w = setup();
+    w.setBlock(4, 31, 4, K('cactus'));
+    for (let i = 0; i < 4000 && w.getBlock(4, 32, 4) !== K('cactus'); i++) tickGrowth(w, 2);
+    expect(w.getBlock(4, 32, 4)).toBe(K('cactus'));
+  });
+
+  it('竹子：每次随机刻 1/3 概率拔节（统计：约 1 次命中期望后 ~28% 已拔节）', () => {
+    const w = setup();
+    // 8×8 竹阵（格距 2，便于逐列判定；竹子无邻贴限制）
+    const cols: Array<[number, number]> = [];
+    for (let x = 0; x < 16; x += 2) for (let z = 0; z < 16; z += 2) {
+      w.setBlock(x, 31, z, K('bamboo'));
+      cols.push([x, z]);
+    }
+    // 单格每轮被抽中概率 ≈ 0.029，34 轮 ≈ 1 次命中期望；命中数 K~Poisson(1) 时
+    // 拔节率 = E[1-(2/3)^K] ≈ 28%（64 列期望 ~18 列，±3.5σ 取 6..32）
+    for (let i = 0; i < 34; i++) tickGrowth(w, 2);
+    const grown = cols.filter(([x, z]) => w.getBlock(x, 32, z) !== AIR).length;
+    expect(grown).toBeGreaterThanOrEqual(6);
+    expect(grown).toBeLessThanOrEqual(32);
+  });
+
+  it('竹子封顶 16（Java 硬顶；Java 靠 stage 机制自然停在 12-16）', () => {
+    const w = setup();
+    w.setBlock(4, 31, 4, K('bamboo'));
+    const height = (): number => {
+      let h = 0;
+      while (w.getBlock(4, 31 + h, 4) === K('bamboo') || w.getBlock(4, 31 + h, 4) === K('bamboo_top')) h++;
+      return h;
+    };
+    // 15 节 × 期望 3 次命中/节 ≈ 45 次命中 ≈ 1500 轮，20000 轮足够
+    for (let i = 0; i < 20000 && height() < 16; i++) tickGrowth(w, 2);
+    expect(height()).toBe(16);
+    for (let i = 0; i < 500; i++) tickGrowth(w, 2);
+    expect(height()).toBe(16); // 到顶后不再长
   });
 
   it('仙人掌邻贴实心会破并掉落', () => {
