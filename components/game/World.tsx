@@ -143,6 +143,12 @@ export function WorldRenderer() {
   /** 初始加载中（出生点周围尚未铺满）：updateAround 用大预算全速生成；铺满后转游玩小预算 */
   const initialLoadRef = useRef(true);
   const lastGeneration = useRef(-1);
+  /** 上次重建渲染列表时的玩家 chunk 坐标（跨边界即重建：雾环裁剪窗口必须跟随玩家，否则边缘缺块） */
+  const lastPcx = useRef(Number.NaN);
+  const lastPcz = useRef(Number.NaN);
+  /** 渲染用 chunk 数组缓存：key = `${generation}:${本帧是否有脏chunk}:${玩家chunk坐标}`，
+   * 未变化时复用数组引用，省掉每帧新建数百元素数组 + React reconcile 的成本 */
+  const chunkArrRef = useRef<{ key: string; arr: Chunk[] } | null>(null);
   /** 已做作物/树苗重扫的 chunk key（generation 变化时按差集补扫，避免每帧重复扫已扫 chunk） */
   const scannedChunksRef = useRef(new Set<string>());
 
@@ -236,6 +242,9 @@ export function WorldRenderer() {
         initialLoadRef.current = true; // 新维度/新世界：先全速铺满出生点周围
         scannedChunksRef.current.clear(); // 重扫记录按世界实例归零（chunk 首次出现时补扫）
         lastGeneration.current = -1;
+        lastPcx.current = Number.NaN; // NaN !== NaN：下帧必触发渲染列表重建
+        lastPcz.current = Number.NaN;
+        chunkArrRef.current = null; // 渲染数组缓存同属旧世界实例，一并失效（防 generation 键串世界复用）
         setWorld(w);
         setMaterials(mats);
         useGameStore.getState().setLoadError(null);
@@ -324,9 +333,26 @@ export function WorldRenderer() {
         if (!w.chunks.has(k)) scanned.delete(k);
       }
     }
-    if (drained > 0 || w.generation !== lastGeneration.current) {
+    // 渲染列表重建条件：有脏 chunk 重建 / chunk 集合变化 / 玩家跨 chunk 边界（裁剪窗口跟随玩家）。
+    // 数组本身按 key 缓存，未变化时复用引用（省每帧数百元素数组分配 + reconcile）
+    const pcx = Math.floor(playerPosition.x / 16);
+    const pcz = Math.floor(playerPosition.z / 16);
+    if (drained > 0 || w.generation !== lastGeneration.current || pcx !== lastPcx.current || pcz !== lastPcz.current) {
       lastGeneration.current = w.generation;
-      setChunkList(Array.from(w.chunks.values()));
+      lastPcx.current = pcx;
+      lastPcz.current = pcz;
+      const ck = `${w.generation}:${drained > 0 ? 1 : 0}:${pcx},${pcz}`;
+      if (chunkArrRef.current?.key !== ck) {
+        // 雾环裁剪：驻留半径比渲染半径大 2 环（抗边界抖动），但 fog far = rd×16+16，
+        // rd+1 环以外（rd+2 环最近点恰为 fog far）已没入纯雾，挂上 ChunkMesh 是白渲染的 draw call。
+        // 只影响渲染列表，驻留/卸载逻辑不变
+        const rd = useGameStore.getState().settings.renderDistance;
+        chunkArrRef.current = {
+          key: ck,
+          arr: [...w.chunks.values()].filter((c) => Math.max(Math.abs(c.cx - pcx), Math.abs(c.cz - pcz)) <= rd),
+        };
+      }
+      setChunkList(chunkArrRef.current.arr);
     }
   });
 

@@ -295,10 +295,14 @@ export function buildFromGrid(cx: number, cz: number, datas: (Uint16Array | null
   const solid = new GeometryBuilder();
   const water = new GeometryBuilder();
 
-  // 把 3×3 chunk 数据摊平进邻居网格：热路径全部变成无闭包的直接数组读
+  // 把 3×3 chunk 数据摊平进邻居网格：热路径全部变成无闭包的直接数组读。
+  // 行拷贝用小 for 循环直写（消除 subarray 视图分配，~55k 次/建网）；opGrid 融合进拷贝循环，
+  // 省掉旧版第二遍 299,520 次全网格扫描。未写入区域（null 邻居 + 上下缓冲行）idGrid 为 0，
+  // 其 opGrid 预填 OPAQUE[AIR]，与旧第二遍扫描结果逐格一致
   idGrid.fill(0);
   ltGrid.fill(0);
   skGrid.fill(0);
+  opGrid.fill(OPAQUE[AIR]);
   for (let gz = -1; gz <= 1; gz++) {
     for (let gx = -1; gx <= 1; gx++) {
       const k = (gz + 1) * 3 + (gx + 1);
@@ -307,15 +311,25 @@ export function buildFromGrid(cx: number, cz: number, datas: (Uint16Array | null
       const cs = skys[k];
       for (let y = 0; y < WORLD_HEIGHT; y++) {
         for (let lz = 0; lz < CHUNK_SIZE; lz++) {
-          const off = ((y + 1) * GW + (gz + 1) * CHUNK_SIZE + lz) * GW + (gx + 1) * CHUNK_SIZE;
-          if (c) idGrid.set(c.subarray((y * CHUNK_SIZE + lz) * CHUNK_SIZE, (y * CHUNK_SIZE + lz + 1) * CHUNK_SIZE), off);
-          if (cl) ltGrid.set(cl.subarray((y * CHUNK_SIZE + lz) * CHUNK_SIZE, (y * CHUNK_SIZE + lz + 1) * CHUNK_SIZE), off);
-          if (cs) skGrid.set(cs.subarray((y * CHUNK_SIZE + lz) * CHUNK_SIZE, (y * CHUNK_SIZE + lz + 1) * CHUNK_SIZE), off);
+          const dst = ((y + 1) * GW + (gz + 1) * CHUNK_SIZE + lz) * GW + (gx + 1) * CHUNK_SIZE;
+          const src = (y * CHUNK_SIZE + lz) * CHUNK_SIZE;
+          if (c) {
+            for (let lx = 0; lx < CHUNK_SIZE; lx++) {
+              const id = c[src + lx];
+              idGrid[dst + lx] = id;
+              opGrid[dst + lx] = OPAQUE[id];
+            }
+          }
+          if (cl) {
+            for (let lx = 0; lx < CHUNK_SIZE; lx++) ltGrid[dst + lx] = cl[src + lx];
+          }
+          if (cs) {
+            for (let lx = 0; lx < CHUNK_SIZE; lx++) skGrid[dst + lx] = cs[src + lx];
+          }
         }
       }
     }
   }
-  for (let i = 0; i < idGrid.length; i++) opGrid[i] = OPAQUE[idGrid[i]];
   const isOpaque = (x: number, y: number, z: number): boolean => opGrid[gidx(x, y, z)] === 1;
   const idAt = (x: number, y: number, z: number): number => idGrid[gidx(x, y, z)];
   const baseX = cx * CHUNK_SIZE;

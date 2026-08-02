@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { AIR, BLOCK_BY_KEY, GRASS, STONE } from '../blocks';
+import { flushLight } from '../lights';
 import { SEA_LEVEL, VOID_TERRAIN, type Terrain } from '../noise';
 import { generateChunk, World, CHUNK_SIZE, CHUNK_VOLUME, localIndex } from '../world';
 
@@ -147,6 +148,24 @@ describe('地形生成', () => {
     w3.applySavedChunk('0,0', saved);
     expect(w3.getBlock(0, 0, 0)).toBe(AIR);
     expect(w3.getBlock(1, 1, 1)).toBe(STONE);
+  });
+
+  it('applySavedChunk 已存在 chunk：标 lightDirty 限流，冲刷后光照与同步级联一致', () => {
+    // 存档里插一根火把：已存在的 chunk 被整体替换后应经 flushLight 点亮（不再同步 cascadeLight）
+    const wSrc = voidWorld();
+    wSrc.setBlock(8, 10, 8, BLOCK_BY_KEY.torch.id);
+    const saved = new Uint16Array(wSrc.getChunk(0, 0).data);
+
+    const w = voidWorld();
+    w.getChunk(0, 0); // 已存在（全空，光照已算过：方块光全 0）
+    w.applySavedChunk('0,0', saved);
+    const c = w.getChunk(0, 0);
+    expect(c.lightDirty).toBe(true); // 改走 flushLight 每帧限流（读档风暴优化）
+    expect(c.light[localIndex(8, 10, 8)]).toBe(0); // 冲刷前不重算
+    flushLight(w);
+    expect(c.lightDirty).toBe(false);
+    expect(c.light[localIndex(8, 10, 8)]).toBe(14); // 冲刷后与同步级联结果一致
+    expect(c.light[localIndex(9, 10, 8)]).toBe(13);
   });
 
   it('默认地形生成非空且幂等', () => {

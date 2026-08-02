@@ -590,7 +590,10 @@ export class World {
     }
     if (existing.modified) return;
     existing.data.set(data);
-    cascadeLight(this, existing);
+    // 与 getChunk 读档路径（上方 chunk.lightDirty = true）语义一致：标脏交给 flushLight
+    // 每帧限流重算，避免继续游戏时数百个后台存档 chunk 挤在同一个 promise 回调里
+    // 同步级联（每个 1-4ms）造成 50-200ms 长任务
+    existing.lightDirty = true;
     this.dirtyChunks.add(key);
     // 边界面可能变化，相邻 chunk 也要重建，避免接缝
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {

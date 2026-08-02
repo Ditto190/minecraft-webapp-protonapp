@@ -133,22 +133,43 @@ export function recomputeLight(world: World, chunk: Chunk): void {
   }
 }
 
+// 列首不透明格高度表（recomputeSky 列式快路用）：模块级复用 + 惰性初始化，理由同上方 BFS 队列
+let colTop: Int16Array | null = null;
+
 /** 重算天空光：直降全亮到首个不透明方块，再向侧面衰减渗透（MC 天空光规则） */
 export function recomputeSky(world: World, chunk: Chunk): void {
   const sky = chunk.sky;
   sky.fill(0);
 
   qreset();
+  colTop ??= new Int16Array(CHUNK_SIZE * CHUNK_SIZE);
+  const top = colTop;
 
-  // 1) 垂直直降：每列自天顶 15，直到碰到第一个不透明方块（同时入队供侧面渗透）
+  // 1) 垂直直降：每列自天顶连续写 15 直到首个不透明方块，但不再逐格入队（列式快路）。
+  // 露天格值全为 15 已达上限，「四邻皆露天」的内部格出队写不出任何新值：任何通往遮光格的
+  // 最短路径必先经过一个侧邻非露天的露天格。故只需把 frontier 格（本列露天段中高度 ≤ 某
+  // 侧邻列遮光顶的部分，即侧面贴着遮光/不透明格的露天格）入队供侧渗，与旧逐格入队逐格等价
   for (let x = 0; x < CHUNK_SIZE; x++) {
     for (let z = 0; z < CHUNK_SIZE; z++) {
-      for (let y = WORLD_HEIGHT - 1; y >= 0; y--) {
-        const i = localIndex(x, y, z);
+      let i = ((WORLD_HEIGHT - 1) * CHUNK_SIZE + z) * CHUNK_SIZE + x;
+      let y = WORLD_HEIGHT - 1;
+      for (; y >= 0; y--) {
         if (BLOCKS[chunk.data[i]]?.opaque) break;
         sky[i] = 15;
-        qpush(x, y, z);
+        i -= CHUNK_SIZE * CHUNK_SIZE;
       }
+      top[x * CHUNK_SIZE + z] = y; // 该列首个不透明格高度（全空列为 -1）
+    }
+  }
+  for (let x = 0; x < CHUNK_SIZE; x++) {
+    for (let z = 0; z < CHUNK_SIZE; z++) {
+      const own = top[x * CHUNK_SIZE + z];
+      let hi = own; // 只需关心遮光顶比本列更高的侧邻（本列露天段在那一高度贴的是遮光格）
+      if (x > 0 && top[(x - 1) * CHUNK_SIZE + z] > hi) hi = top[(x - 1) * CHUNK_SIZE + z];
+      if (x < CHUNK_SIZE - 1 && top[(x + 1) * CHUNK_SIZE + z] > hi) hi = top[(x + 1) * CHUNK_SIZE + z];
+      if (z > 0 && top[x * CHUNK_SIZE + z - 1] > hi) hi = top[x * CHUNK_SIZE + z - 1];
+      if (z < CHUNK_SIZE - 1 && top[x * CHUNK_SIZE + z + 1] > hi) hi = top[x * CHUNK_SIZE + z + 1];
+      for (let y = own + 1; y <= hi; y++) qpush(x, y, z);
     }
   }
 
