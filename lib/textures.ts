@@ -275,6 +275,40 @@ const TEXTURE_OVERLAYS: Record<number, (ctx: CanvasRenderingContext2D, dx: numbe
     ctx.fillStyle = '#f8e878'; // 高光
     ctx.fillRect(dx + 6, dy + 7, 2, 1);
   },
+  // 金苹果：金黄苹果 + 棕色果柄 + 高光（materials.ts golden_apple 图标）
+  [ICON_TILE_START + 23]: (ctx, dx, dy) => {
+    ctx.fillStyle = '#7a5a2a'; // 果柄
+    ctx.fillRect(dx + 8, dy + 2, 1, 3);
+    ctx.fillStyle = '#e8c83a';
+    ctx.fillRect(dx + 5, dy + 5, 7, 1);
+    ctx.fillRect(dx + 4, dy + 6, 9, 5);
+    ctx.fillRect(dx + 5, dy + 11, 7, 1);
+    ctx.fillRect(dx + 6, dy + 12, 5, 1);
+    ctx.fillStyle = '#b0901f'; // 右下阴影
+    ctx.fillRect(dx + 11, dy + 6, 2, 5);
+    ctx.fillRect(dx + 9, dy + 12, 2, 1);
+    ctx.fillStyle = '#f8e878'; // 高光
+    ctx.fillRect(dx + 5, dy + 6, 2, 2);
+  },
+  // 藏宝图：羊皮纸 + 折痕地形线 + 红色 X 标记（materials.ts treasure_map 图标）
+  [ICON_TILE_START + 24]: (ctx, dx, dy) => {
+    ctx.fillStyle = '#d8c493'; // 纸面
+    ctx.fillRect(dx + 3, dy + 4, 10, 9);
+    ctx.fillStyle = '#b09c6b'; // 上下卷边
+    ctx.fillRect(dx + 3, dy + 4, 10, 1);
+    ctx.fillRect(dx + 3, dy + 12, 10, 1);
+    ctx.fillStyle = '#c4ad7c'; // 竖折痕
+    ctx.fillRect(dx + 6, dy + 5, 1, 7);
+    ctx.fillStyle = '#9a8858'; // 地形等高线
+    ctx.fillRect(dx + 4, dy + 6, 2, 1);
+    ctx.fillRect(dx + 7, dy + 8, 3, 1);
+    ctx.fillRect(dx + 4, dy + 10, 3, 1);
+    ctx.fillStyle = '#c02818'; // 红 X（宝藏标记）
+    ctx.fillRect(dx + 9, dy + 9, 3, 1);
+    ctx.fillRect(dx + 10, dy + 8, 1, 3);
+    ctx.fillRect(dx + 9, dy + 8, 1, 1);
+    ctx.fillRect(dx + 11, dy + 8, 1, 1);
+  },
 };
 
 /** atlas 画布的 dataURL（HUD 图标裁剪用），build 完成后可用。
@@ -450,7 +484,7 @@ async function build(kind: RendererKind): Promise<AtlasMaterials> {
     drawTile(i, (i % ATLAS_COLS) * cellPx, Math.floor(i / ATLAS_COLS) * cellPx);
   }
 
-  // 图标格（ICON_TILE_START..+22）：工作台/熔炉先铺木板/圆石底座，再叠加绘制
+  // 图标格（ICON_TILE_START..+24）：工作台/熔炉先铺木板/圆石底座，再叠加绘制
   ctx.imageSmoothingEnabled = false;
   for (let k = 0; k < ICON_TILE_COUNT; k++) {
     const cell = ICON_TILE_START + k;

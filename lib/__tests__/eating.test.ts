@@ -3,7 +3,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { Vector3, type Camera } from 'three';
 import { cancelEating, EAT_DURATION, eatState, tickEating, tryPlace, useButton } from '../actions';
-import { effects, tickEffects } from '../effects';
+import { effects, effectLvls, tickEffects } from '../effects';
 import { cameraRef, playerPosition, setActiveWorld, survivalStats } from '../game';
 import { VOID_TERRAIN } from '../noise';
 import { emptySlots } from '../slots';
@@ -47,6 +47,8 @@ afterEach(() => {
   cancelEating();
   useButton.held = false;
   effects.hunger = 0;
+  effects.regen = 0;
+  effectLvls.regen = 1;
   survivalStats.exhaustion = 0;
   vi.restoreAllMocks();
 });
@@ -124,6 +126,15 @@ describe('进食读条', () => {
     expect(eatState.active).toBe(false);
     expect(useGameStore.getState().notice).toBe('还不饿');
   });
+
+  it('紫颂果满饥饿也可食用（MC：传送食物豁免「还不饿」拦截）', async () => {
+    setupFood('chorus_fruit', 3, MAX_HUNGER);
+    await wait(160);
+    tryPlace();
+    expect(eatState.active).toBe(true);
+    expect(eatState.material).toBe('chorus_fruit');
+    expect(useGameStore.getState().notice).toBeNull();
+  });
 });
 
 describe('腐肉/生鸡肉饥饿效果（MC Hunger）', () => {
@@ -174,6 +185,17 @@ describe('腐肉/生鸡肉饥饿效果（MC Hunger）', () => {
     useButton.held = true;
     tickEating(EAT_DURATION);
     expect(effects.hunger).toBe(0);
+  });
+
+  it('金苹果：吃完获得再生 II 5s（MC；伤害吸收本项目无）', async () => {
+    setupFood('golden_apple', 3, 10);
+    await wait(160);
+    tryPlace();
+    useButton.held = true;
+    tickEating(EAT_DURATION);
+    expect(useGameStore.getState().hunger).toBe(14); // 10+4
+    expect(effects.regen).toBe(5);
+    expect(effectLvls.regen).toBe(2);
   });
 
   it('饥饿效果期间 exhaustion 每秒额外 +0.1；效果随时间递减消失', () => {

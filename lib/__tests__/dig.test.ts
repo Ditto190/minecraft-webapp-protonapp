@@ -1,6 +1,7 @@
-// 挖掘时间：digTime 表为 MC 徒手时间（需镐方块 = 硬度×5，徒手可采 = 硬度×1.5），
-// 工具匹配且采掘层级达标切 ×1.5 基值（×0.3）再除工具速度；效率附魔（速度+等级²+1）仅匹配生效；
-// 层级不足退回 ×5 慢速档；急迫 +20%/级；水中/悬空各 ×5 慢
+// 挖掘时间：digTime 表为 MC 徒手时间（需镐方块 = 硬度×5，徒手可采 = 硬度×1.5）。
+// Java：destroySpeed 只看工具类别匹配（与采掘层级无关），层级不足只影响掉落——需镐方块层级不足
+// 保持 ×5 基值但仍除工具速度（木镐钻石矿 15/2=7.5s）；达标切 ×1.5 基值（×0.3）；
+// 效率附魔速度>1 时 +等级²+1；剪刀特判树叶/藤蔓 15x、羊毛 5x；急迫 +20%/级；水中/悬空各 ×5 慢
 
 import { describe, expect, it } from 'vitest';
 import { BLOCK_BY_KEY } from '../blocks';
@@ -33,14 +34,15 @@ describe('有效挖掘时间（MC 基值）', () => {
     expect(effectiveDigTime(BLOCK_BY_KEY.dirt.id, tool('diamond_sword'), false)).toBe(0.75);
   });
 
-  it('采掘层级不足：退回 ×5 慢速档（木镐挖钻石矿慢速；不掉落由 actions.ts 门禁）', () => {
-    // 钻石矿 pickTier 2（需铁镐）：木镐（tier 0）不匹配 → 保持 digTime 15（硬度×5）
-    expect(effectiveDigTime(K('diamond_ore'), tool('wooden_pickaxe'), false)).toBe(15);
-    expect(effectiveDigTime(K('diamond_ore'), tool('golden_pickaxe'), false)).toBe(15); // 金镐层级同木
+  it('采掘层级不足：保持 ×5 慢速基值但仍除工具速度（Java：层级只影响掉落，门禁在 actions.ts）', () => {
+    // 钻石矿 pickTier 2（需铁镐）：木镐（tier 0）15/2 = 7.5s——挖得动但挖完不掉落（旧版 15s 是偏差）
+    expect(effectiveDigTime(K('diamond_ore'), tool('wooden_pickaxe'), false)).toBe(7.5);
+    // 金镐（层级同木、速度 12）：15/12 = 1.25s——快但同样不掉落
+    expect(effectiveDigTime(K('diamond_ore'), tool('golden_pickaxe'), false)).toBe(1.25);
     // 铁镐（tier 2）达标：15×0.3/6 = 0.75s
     expect(effectiveDigTime(K('diamond_ore'), tool('iron_pickaxe'), false)).toBeCloseTo(0.75, 3);
-    // 黑曜石 pickTier 3（需钻镐）：铁镐不匹配 → 250 慢速
-    expect(effectiveDigTime(K('obsidian'), tool('iron_pickaxe'), false)).toBe(250);
+    // 黑曜石 pickTier 3（需钻镐）：铁镐 250/6 ≈ 41.7s（旧版 250s 是偏差）
+    expect(effectiveDigTime(K('obsidian'), tool('iron_pickaxe'), false)).toBeCloseTo(250 / 6, 3);
     // 铁矿 pickTier 1（需石镐）：石镐达标 15×0.3/4 = 1.125s
     expect(effectiveDigTime(K('iron_ore'), tool('stone_pickaxe'), false)).toBeCloseTo(1.125, 3);
     // needsPick 无 pickTier（石头 = 任意镐）：木镐仍匹配（上面用例 1.125s 已覆盖）
@@ -53,11 +55,29 @@ describe('有效挖掘时间（MC 基值）', () => {
     expect(effectiveDigTime(K('log'), tool('diamond_axe'), false)).toBeCloseTo(0.375, 3);
   });
 
-  it('效率附魔仅工具匹配时生效（MC Java：工具速度 + 等级²+1，效率 V 钻镐 8→34）', () => {
+  it('效率附魔仅工具类别匹配时生效（MC Java：速度>1 时 + 等级²+1，效率 V 钻镐 8→34）', () => {
     // 钻镐效率 V 挖石头：7.5×0.3/(8+(5²+1)) = 2.25/34
     expect(effectiveDigTime(BLOCK_BY_KEY.stone.id, tool('diamond_pickaxe', { efficiency: 5 }), false)).toBeCloseTo(2.25 / 34, 4);
     // 错工具带效率：不加速（MC 不允许）
     expect(effectiveDigTime(BLOCK_BY_KEY.stone.id, tool('diamond_axe', { efficiency: 5 }), false)).toBe(7.5);
+    // 层级不足但类别匹配：效率同样生效（Java 速度>1 即加）——木镐效率 V 挖钻石矿 15/(2+26)
+    expect(effectiveDigTime(K('diamond_ore'), tool('wooden_pickaxe', { efficiency: 5 }), false)).toBeCloseTo(15 / 28, 4);
+  });
+
+  it('剪刀/锄特判（Java：ShearsItem 硬编码倍率与层级无关；HoeItem 按层级加速树叶/干草捆/海绵/苔藓）', () => {
+    // 剪刀：树叶/藤蔓 15x
+    expect(effectiveDigTime(K('leaves'), tool('shears'), false)).toBeCloseTo(0.35 / 15, 4);
+    expect(effectiveDigTime(K('vine_n'), tool('shears'), false)).toBeCloseTo(0.05 / 15, 4);
+    // 剪刀：羊毛类 5x
+    expect(effectiveDigTime(K('white_wool'), tool('shears'), false)).toBeCloseTo(1.2 / 5, 3);
+    // 剪刀对泥土无加成
+    expect(effectiveDigTime(BLOCK_BY_KEY.dirt.id, tool('shears'), false)).toBe(0.75);
+    // 锄按层级 2/4/6/8 加速：树叶木锄 0.35/2、钻锄 0.35/8；干草捆/海绵/苔藓同规则
+    expect(effectiveDigTime(K('leaves'), tool('wooden_hoe'), false)).toBeCloseTo(0.35 / 2, 4);
+    expect(effectiveDigTime(K('leaves'), tool('diamond_hoe'), false)).toBeCloseTo(0.35 / 8, 4);
+    expect(effectiveDigTime(K('hay_block'), tool('iron_hoe'), false)).toBeCloseTo(0.75 / 6, 4);
+    expect(effectiveDigTime(K('sponge'), tool('stone_hoe'), false)).toBeCloseTo(0.9 / 4, 4);
+    expect(effectiveDigTime(K('moss_block'), tool('wooden_hoe'), false)).toBeCloseTo(0.2 / 2, 4);
   });
 
   it('急迫：匹配与不匹配都 +20%/级（MC Java）', () => {

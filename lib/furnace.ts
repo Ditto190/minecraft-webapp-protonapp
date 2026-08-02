@@ -5,7 +5,7 @@ import { spawnBlockDrop, spawnMaterialDrop } from './items';
 import { addStackToSlots, type Slot } from './slots';
 import { registerWorldScope } from './worldScope';
 
-// ——— 食物（MC 回复量，饱和度按本游戏 /5 缩放） ———
+// ——— 食物（MC 回复量，饱和度按本游戏 /4 缩放） ———
 export interface FoodDef {
   name: string;
   hunger: number;
@@ -13,20 +13,21 @@ export interface FoodDef {
 }
 
 export const FOODS: Record<string, FoodDef> = {
-  raw_pork: { name: '生猪排', hunger: 3, saturation: 1 },
-  cooked_pork: { name: '熟猪排', hunger: 8, saturation: 3 },
-  raw_beef: { name: '生牛肉', hunger: 3, saturation: 1 },
-  cooked_beef: { name: '熟牛排', hunger: 8, saturation: 3 },
-  raw_chicken: { name: '生鸡肉', hunger: 2, saturation: 1 },
-  cooked_chicken: { name: '熟鸡肉', hunger: 6, saturation: 2 },
-  bread: { name: '面包', hunger: 5, saturation: 1 },
-  raw_cod: { name: '生鳕鱼', hunger: 2, saturation: 1 },
-  raw_salmon: { name: '生鲑鱼', hunger: 2, saturation: 1 },
-  tropical_fish: { name: '热带鱼', hunger: 1, saturation: 0 },
-  cooked_cod: { name: '熟鳕鱼', hunger: 5, saturation: 2 },
-  cooked_salmon: { name: '熟鲑鱼', hunger: 6, saturation: 3 },
-  chorus_fruit: { name: '紫颂果', hunger: 4, saturation: 2 }, // MC：食用后随机传送 ±8 格
+  raw_pork: { name: '生猪排', hunger: 3, saturation: 0.45 }, // MC：饱和 1.8（÷4 缩放）
+  cooked_pork: { name: '熟猪排', hunger: 8, saturation: 3.2 }, // MC：饱和 12.8
+  raw_beef: { name: '生牛肉', hunger: 3, saturation: 0.45 }, // MC：饱和 1.8
+  cooked_beef: { name: '熟牛排', hunger: 8, saturation: 3.2 }, // MC：饱和 12.8
+  raw_chicken: { name: '生鸡肉', hunger: 2, saturation: 0.3 }, // MC：饱和 1.2
+  cooked_chicken: { name: '熟鸡肉', hunger: 6, saturation: 1.8 }, // MC：饱和 7.2
+  bread: { name: '面包', hunger: 5, saturation: 1.5 }, // MC：饱和 6.0
+  raw_cod: { name: '生鳕鱼', hunger: 2, saturation: 0.1 }, // MC：饱和 0.4
+  raw_salmon: { name: '生鲑鱼', hunger: 2, saturation: 0.1 }, // MC：饱和 0.4
+  tropical_fish: { name: '热带鱼', hunger: 1, saturation: 0.05 }, // MC：饱和 0.2
+  cooked_cod: { name: '熟鳕鱼', hunger: 5, saturation: 1.5 }, // MC：饱和 6.0
+  cooked_salmon: { name: '熟鲑鱼', hunger: 6, saturation: 2.4 }, // MC：饱和 9.6
+  chorus_fruit: { name: '紫颂果', hunger: 4, saturation: 0.6 }, // MC：饱和 2.4；食用后随机传送 ±8 格
   rotten_flesh: { name: '腐肉', hunger: 4, saturation: 0.2 }, // MC：饥饿 4、饱和 0.8（÷4 缩放 0.2；80% 概率饥饿效果在 actions.ts 进食完成处 roll）
+  golden_apple: { name: '金苹果', hunger: 4, saturation: 2.4 }, // MC：饥饿 4、饱和 9.6（÷4）；附再生 II 5s（actions.ts 进食完成处施加；MC 另有伤害吸收，本项目无该效果）
 };
 
 // ——— 烧炼配方与燃料 ———

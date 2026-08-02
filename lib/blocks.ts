@@ -24,8 +24,8 @@ export const ATLAS_COLS = 8;
 export const TILE_PX = 32;
 /** canvas 绘制图标（工作台/熔炉/装备/食物）的 atlas 起始格号；pack 贴图格数须小于它 */
 export const ICON_TILE_START = 512;
-/** canvas 图标格数量（0-1 工作台、2 熔炉、3-15 装备/食物、16 箱子侧、17 凋灵骷髅头、18 末地星空、19 鸡蛋、20 河豚、21 蜘蛛眼、22 金粒） */
-export const ICON_TILE_COUNT = 23;
+/** canvas 图标格数量（0-1 工作台、2 熔炉、3-15 装备/食物、16 箱子侧、17 凋灵骷髅头、18 末地星空、19 鸡蛋、20 河豚、21 蜘蛛眼、22 金粒、23 金苹果、24 藏宝图） */
+export const ICON_TILE_COUNT = 25;
 /** atlas 总行数（pack 格 + 图标格） */
 export const ATLAS_ROWS = Math.ceil((ICON_TILE_START + ICON_TILE_COUNT) / ATLAS_COLS);
 
@@ -105,8 +105,8 @@ export interface BlockDef {
   opaque: boolean;
   /** 参与碰撞 / 可被射线选中 */
   solid: boolean;
-  /** 挖掘加速工具（木 2x / 石 4x / 铁 6x / 钻 8x） */
-  tool?: 'pickaxe' | 'axe' | 'shovel';
+  /** 挖掘加速工具（木 2x / 石 4x / 铁 6x / 钻 8x；锄按层级 2/4/6/8 加速树叶/干草捆/海绵/苔藓，Java HoeItem） */
+  tool?: 'pickaxe' | 'axe' | 'shovel' | 'hoe';
   /** MC：不用镐挖掘没有任何掉落（石头系/矿石/金属块） */
   needsPick?: boolean;
   /** 镐的最低层级（0 木 / 1 石 / 2 铁 / 3 钻），低于该层无掉落 */
@@ -115,6 +115,9 @@ export interface BlockDef {
   drop?: { material: string; count: [number, number] };
   /** 生存模式不可破坏（基岩/强化深板岩） */
   unbreakable?: boolean;
+  /** 爆炸抗性显式覆盖（MC 1.20+：少数方块远高于硬度——铁砧/附魔台/重生锚 1200、末影箱 600）；
+   *  缺省按 digTime 换算硬度当抗性，见 blastResistanceOf */
+  blastResistance?: number;
   /** 挖掘音效 */
   digSound: SoundGroup | null;
   /** 放置音效 */
@@ -220,7 +223,7 @@ add('planks', '橡木木板', 'oak_planks', { cat: 'wood', tool: 'axe', digTime:
 defs[LEAVES] = {
   id: LEAVES, key: 'leaves', name: '橡树树叶',
   top: t('oak_leaves'), bottom: t('oak_leaves'), side: t('oak_leaves'),
-  opaque: false, solid: true, digTime: 0.35, cat: 'wood', ...LEAVES_SND,
+  opaque: false, solid: true, tool: 'hoe', digTime: 0.35, cat: 'wood', ...LEAVES_SND, // MC：树叶用锄加速（剪刀见 dig.ts 特判）
 };
 defs[GLASS] = {
   id: GLASS, key: 'glass', name: '玻璃',
@@ -299,7 +302,7 @@ add('rooted_dirt', '缠根泥土', 'rooted_dirt', { cat: 'earth', tool: 'shovel'
 add('mud', '泥巴', 'mud', { cat: 'earth', tool: 'shovel', digTime: 0.75, ...DIRT_SND });
 add('packed_mud', '夯泥', 'packed_mud', { cat: 'earth', tool: 'pickaxe', needsPick: true, digTime: 5 });
 add('mud_bricks', '泥砖', 'mud_bricks', { cat: 'earth', tool: 'pickaxe', needsPick: true });
-add('moss_block', '苔藓块', 'moss_block', { cat: 'earth', digTime: 0.2, ...GRASS_SND });
+add('moss_block', '苔藓块', 'moss_block', { cat: 'earth', tool: 'hoe', digTime: 0.2, ...GRASS_SND }); // MC：苔藓块用锄加速
 add('red_sand', '红沙', 'red_sand', { cat: 'earth', tool: 'shovel', digTime: 0.75, ...SAND_SND });
 add('sandstone', '砂岩', 'sandstone', { cat: 'stone', tool: 'pickaxe', needsPick: true, digTime: 4 });
 add('chiseled_sandstone', '雕纹砂岩', 'chiseled_sandstone', { cat: 'stone', tool: 'pickaxe', needsPick: true, digTime: 4 });
@@ -374,7 +377,7 @@ for (const [w, cn] of WOODS) {
   add(`${w}_wood`, `${cn}木头`, `${w}_log`, { cat: 'wood', tool: 'axe', digTime: 3, ...WOOD_SND });
   add(`stripped_${w}_wood`, `去皮${cn}木头`, `stripped_${w}_log`, { cat: 'wood', tool: 'axe', digTime: 3, ...WOOD_SND });
   add(`${w}_planks`, `${cn}木板`, `${w}_planks`, { cat: 'wood', tool: 'axe', digTime: 3, ...WOOD_SND });
-  add(`${w}_leaves`, `${cn}树叶`, `${w}_leaves`, { cat: 'wood', opaque: false, digTime: 0.35, ...LEAVES_SND });
+  add(`${w}_leaves`, `${cn}树叶`, `${w}_leaves`, { cat: 'wood', opaque: false, tool: 'hoe', digTime: 0.35, ...LEAVES_SND });
 }
 
 // ——— 海洋/冰雪 ———
@@ -382,8 +385,8 @@ add('prismarine', '海晶石', 'prismarine', { cat: 'ocean', tool: 'pickaxe', ne
 add('prismarine_bricks', '海晶石砖', 'prismarine_bricks', { cat: 'ocean', tool: 'pickaxe', needsPick: true });
 add('dark_prismarine', '暗海晶石', 'dark_prismarine', { cat: 'ocean', tool: 'pickaxe', needsPick: true });
 add('sea_lantern', '海晶灯', 'sea_lantern', { cat: 'ocean', digTime: 0.45, light: 15, nonSilkDrop: { material: 'prismarine_crystals', count: [2, 3] }, ...GLASS_SND }); // MC：非精准掉 2-3 海晶砂粒
-add('sponge', '海绵', 'sponge', { cat: 'ocean', digTime: 0.9, ...GRASS_SND });
-add('wet_sponge', '湿海绵', 'wet_sponge', { cat: 'ocean', digTime: 0.9, ...GRASS_SND });
+add('sponge', '海绵', 'sponge', { cat: 'ocean', tool: 'hoe', digTime: 0.9, ...GRASS_SND }); // MC：海绵用锄加速
+add('wet_sponge', '湿海绵', 'wet_sponge', { cat: 'ocean', tool: 'hoe', digTime: 0.9, ...GRASS_SND });
 add('tube_coral_block', '管珊瑚块', 'tube_coral_block', { cat: 'ocean', tool: 'pickaxe', needsPick: true });
 add('brain_coral_block', '脑纹珊瑚块', 'brain_coral_block', { cat: 'ocean', tool: 'pickaxe', needsPick: true });
 add('bubble_coral_block', '气泡珊瑚块', 'bubble_coral_block', { cat: 'ocean', tool: 'pickaxe', needsPick: true });
@@ -402,7 +405,7 @@ add('note_block', '音符盒', 'note_block', { cat: 'utility', tool: 'axe', digT
 add('jukebox', '唱片机', { side: 'jukebox_side', top: 'jukebox_top' }, { cat: 'utility', tool: 'axe', digTime: 3, ...WOOD_SND });
 add('pumpkin', '南瓜', { side: 'pumpkin_side', top: 'pumpkin_top' }, { cat: 'utility', tool: 'axe', digTime: 1.5, ...WOOD_SND });
 add('melon', '西瓜', { side: 'melon_side', top: 'melon_top' }, { cat: 'utility', tool: 'axe', digTime: 1.5, nonSilkDrop: { material: 'melon_slice', count: [3, 7] }, ...WOOD_SND }); // MC：非精准掉 3-7 西瓜片
-add('hay_block', '干草捆', { side: 'hay_block_side', top: 'hay_block_top' }, { cat: 'utility', digTime: 0.75, ...GRASS_SND });
+add('hay_block', '干草捆', { side: 'hay_block_side', top: 'hay_block_top' }, { cat: 'utility', tool: 'hoe', digTime: 0.75, ...GRASS_SND }); // MC：干草捆用锄加速
 add('dried_kelp_block', '干海带块', { side: 'dried_kelp_side', top: 'dried_kelp_top' }, { cat: 'utility', digTime: 0.75, ...GRASS_SND });
 add('honeycomb_block', '蜜脾块', 'honeycomb_block', { cat: 'utility', digTime: 0.9, ...GRASS_SND });
 add('slime_block', '黏液块', 'slime_block', { cat: 'utility', opaque: false, digTime: 0.15, ...GRASS_SND });
@@ -410,12 +413,12 @@ add('honey_block', '蜂蜜块', { side: 'honey_block_side', top: 'honey_block_to
 add('bone_block', '骨块', { side: 'bone_block_side', top: 'bone_block_top' }, { cat: 'utility', tool: 'pickaxe', needsPick: true, digTime: 10 });
 add('barrel', '木桶', { side: 'barrel_side', top: 'barrel_top', bottom: 'barrel_bottom' }, { cat: 'utility', tool: 'axe', digTime: 3, ...WOOD_SND });
 add('lodestone', '磁石', { side: 'lodestone_side', top: 'lodestone_top' }, { cat: 'utility', tool: 'pickaxe', needsPick: true, digTime: 17.5 });
-add('respawn_anchor', '重生锚', { side: 'respawn_anchor_side0', top: 'respawn_anchor_top_off', bottom: 'respawn_anchor_bottom' }, { cat: 'utility', tool: 'pickaxe', needsPick: true, digTime: 25 });
+add('respawn_anchor', '重生锚', { side: 'respawn_anchor_side0', top: 'respawn_anchor_top_off', bottom: 'respawn_anchor_bottom' }, { cat: 'utility', tool: 'pickaxe', needsPick: true, digTime: 25, blastResistance: 1200 }); // MC 爆炸抗性 1200：免疫 TNT
 add('beacon', '信标', 'beacon', { cat: 'utility', opaque: false, digTime: 15, light: 15, ...GLASS_SND });
 add('target', '标靶', { side: 'target_side', top: 'target_top' }, { cat: 'utility', tool: 'shovel', digTime: 0.75, ...GRASS_SND });
 add('smithing_table', '锻造台', { side: 'smithing_table_side', top: 'smithing_table_top' }, { cat: 'utility', tool: 'axe', digTime: 3, ...WOOD_SND });
 // 铁砧：修复工具/装备（材料补 25% 耐久）与附魔合并（MC 核心站点）
-add('anvil', '铁砧', { side: 'anvil', top: 'anvil_top', bottom: 'anvil' }, { cat: 'utility', tool: 'pickaxe', needsPick: true, digTime: 35 });
+add('anvil', '铁砧', { side: 'anvil', top: 'anvil_top', bottom: 'anvil' }, { cat: 'utility', tool: 'pickaxe', needsPick: true, digTime: 35, blastResistance: 1200 }); // MC 爆炸抗性 1200：免疫 TNT
 add('fletching_table', '制箭台', { side: 'fletching_table_side', top: 'fletching_table_top' }, { cat: 'utility', tool: 'axe', digTime: 3, ...WOOD_SND });
 add('cartography_table', '制图台', { side: 'cartography_table_side1', top: 'cartography_table_top' }, { cat: 'utility', tool: 'axe', digTime: 3, ...WOOD_SND });
 add('ochre_froglight', '赭黄蛙明灯', { side: 'ochre_froglight_side', top: 'ochre_froglight_top' }, { cat: 'utility', digTime: 0.45, light: 15, ...GLASS_SND });
@@ -709,7 +712,7 @@ const torchDef = add('torch', '火把', 'torch', { cat: 'utility', shape: 'cross
 add('brewing_stand', '酿造台', { side: 'brewing_stand', top: 'brewing_stand_base' }, { cat: 'utility', tool: 'pickaxe', digTime: 1 });
 // 附魔台：右键打开附魔界面（lib/xp.ts；3/4 高，MC 造型）
 add('enchanting_table', '附魔台', { side: 'enchanting_table_side', top: 'enchanting_table_top', bottom: 'enchanting_table_bottom' }, {
-  cat: 'utility', shape: 'slab', box3: [0, 0, 0, 1, 0.75, 1], opaque: false, tool: 'pickaxe', needsPick: true, digTime: 12.5,
+  cat: 'utility', shape: 'slab', box3: [0, 0, 0, 1, 0.75, 1], opaque: false, tool: 'pickaxe', needsPick: true, digTime: 12.5, blastResistance: 1200, // MC 爆炸抗性 1200：免疫 TNT
 });
 // 墙上火把（4 朝向，贴墙小十字，统一掉落地火把）
 add('torch_wall_n', '火把', 'torch', { cat: 'utility', shape: 'cross', facing: 0, opaque: false, solid: false, digTime: 0.05, light: 14, ...GRASS_SND, dropBlock: torchDef.id });
@@ -844,6 +847,21 @@ export function isWaterId(id: BlockId): boolean {
 /** 是否岩浆（发光液体，接触掉血） */
 export function isLavaId(id: BlockId): boolean {
   return BLOCKS[id]?.lava === true;
+}
+
+/**
+ * 爆炸抗性（MC 1.20+，lib/explosion.ts 用）：
+ * - Infinity = 免疫（unbreakable 基岩/强化深板岩；pickTier 3 黑曜石/哭泣黑曜石/远古残骸，MC 抗性 1200）；
+ * - blastResistance 显式覆盖特例（铁砧/附魔台/重生锚 1200 这类远高于硬度的方块）；
+ * - 缺省按 digTime 换算硬度当抗性（需镐方块 = 硬度×5，徒手可采 = 硬度×1.5，见 digTime 注释），
+ *   圆石 10/5=2、泥土 0.75/1.5=0.5，趋势与 MC 一致（MC 圆石 6 也高于石头系硬度，此处取硬度近似）。
+ */
+export function blastResistanceOf(id: BlockId): number {
+  const def = BLOCKS[id];
+  if (!def) return 0;
+  if (def.unbreakable === true || def.pickTier === 3) return Infinity;
+  if (def.blastResistance !== undefined) return def.blastResistance;
+  return def.digTime / (def.needsPick || def.pickTier !== undefined ? 5 : 1.5);
 }
 
 /** 是否柱状植物（仙人掌/甘蔗/竹子/紫颂植株）：破坏任一节，上方各节一并掉落 */
