@@ -26,7 +26,7 @@ import { bobber, castBobber, reelIn } from './fishing';
 import { MATERIAL_INFO, materialTile } from './materials';
 import { blockIntersectsPlayer } from './physics';
 import { anchorCharges, anchorKey, getAnchorCharge, MAX_ANCHOR_CHARGE, setAnchorCharge } from './respawnanchor';
-import { eatSound, playSound } from './sound';
+import { eatSound, glugSound, playSound } from './sound';
 import { dropStorageContents } from './storage';
 import { useGameStore, MAX_HEALTH, MAX_HUNGER } from './store';
 import { igniteTnt } from './tnt';
@@ -87,22 +87,26 @@ function compassDir(dx: number, dz: number): string {
   return names[Math.round(Math.atan2(dx, dz) / (Math.PI / 4)) & 7];
 }
 
-// ——— 进食读条（MC Java：手持食物按住右键 1.61s = 32 tick 吃完；松手/换槽/手持切换取消，受伤不打断） ———
+// ——— 进食/饮用读条（MC Java：手持食物/药水按住右键 1.61s/1.6s = 32 tick 用完；松手/换槽/手持切换取消，受伤不打断） ———
 
 /** 进食读条时长（秒），MC Java 32 tick */
 export const EAT_DURATION = 1.61;
+/** 饮用读条时长（秒），MC Java 32 tick */
+export const DRINK_DURATION = 1.6;
 
-/** 进食读条状态（Player 每帧 tickEating 推进，Hud 准星进度条读取） */
+/** 进食/饮用读条状态（Player 每帧 tickEating 推进，Hud 准星进度条读取；kind 区分进食/饮用，读条音效与结算按此分支） */
 export const eatState = {
   active: false,
-  /** 0..1，达到 1 结算进食 */
+  /** 读条种类：eat 进食 / drink 饮用（共用读条骨架） */
+  kind: 'eat' as 'eat' | 'drink',
+  /** 0..1，达到 1 结算进食/饮用 */
   progress: 0,
-  /** 开始时的热键栏槽位与食物：换槽/换物即取消 */
+  /** 开始时的热键栏槽位与食物/药水：换槽/换物即取消 */
   slot: -1,
   material: '',
   /** 触屏按住「放」的连发 tryPlace 最近一次续期时间戳（桌面无连发，靠 useButton.held） */
   nudgedAt: 0,
-  /** 嚼音计时（读条中每 ~0.5s 一声低音量嚼音） */
+  /** 嘴部音效计时（读条中每 ~0.5s 一声低音量嚼音/咕咚声） */
   chewAcc: 0,
 };
 
@@ -127,6 +131,27 @@ export function startEating(s: ReturnType<typeof useGameStore.getState>, quiet =
     return false;
   }
   eatState.active = true;
+  eatState.kind = 'eat';
+  eatState.progress = 0;
+  eatState.slot = s.selectedSlot;
+  eatState.material = held.material;
+  eatState.nudgedAt = performance.now();
+  eatState.chewAcc = 0;
+  return true;
+}
+
+/** 开始饮用读条（MC Java 按住右键 1.6s）。水瓶/粗制药水无效果不可饮（MC Java 本就不可饮用）；拒绝要给反馈，不静默吞掉操作 */
+export function startDrinking(s: ReturnType<typeof useGameStore.getState>): boolean {
+  const held = s.hotbarSlots[s.selectedSlot];
+  if (held?.kind !== 'material') return false;
+  const pot = POTIONS[held.material];
+  if (!pot) return false;
+  if (!pot.effect) {
+    s.setNotice('没什么味道…');
+    return false;
+  }
+  eatState.active = true;
+  eatState.kind = 'drink';
   eatState.progress = 0;
   eatState.slot = s.selectedSlot;
   eatState.material = held.material;
@@ -167,27 +192,47 @@ function finishEating(s: ReturnType<typeof useGameStore.getState>, world: World 
   }
 }
 
-/** 每帧推进进食读条（Player useFrame 调用）：松手/换槽/换物取消；读满结算，仍按住且还饿则自动续吃下一份（MC） */
+/** 饮用读满结算：施加效果（治疗瞬回/效果计时）并消耗药水；写 eatFeedback.lastAteAt（Java 喝完也打嗝）。
+ *  食物专属逻辑（紫颂果传送/饥饿效果/金苹果再生）只走 finishEating，不进此路径 */
+function finishDrinking(s: ReturnType<typeof useGameStore.getState>): void {
+  const pot = POTIONS[eatState.material];
+  if (!pot?.effect) return;
+  // 先扣后生效（同 eatSelectedFood 模式）；tick 已按换物取消，此处消耗理论必成，防御性检查
+  if (!s.consumeMaterial(eatState.material, 1)) return;
+  eatFeedback.lastAteAt = performance.now(); // 打嗝钩子：Hud 订阅此时间戳播打嗝声
+  // II 级治疗瞬回 4 心（MC）；其余效果按时长施加（迅捷/力量/再生带等级）
+  if (pot.effect === 'healing') s.setHealth(Math.min(MAX_HEALTH, s.health + (pot.lvl === 2 ? 8 : 4)));
+  else {
+    effects[pot.effect] = pot.duration;
+    if (pot.effect === 'speed' || pot.effect === 'strength' || pot.effect === 'regen') effectLvls[pot.effect] = pot.lvl ?? 1;
+  }
+}
+
+/** 每帧推进进食/饮用读条（Player useFrame 调用）：松手/换槽/换物取消；读满结算，仍按住且还能继续（食物仍饿/同槽还有药水）则自动续下一份（MC） */
 export function tickEating(dt: number): void {
   if (!eatState.active) return;
   const s = useGameStore.getState();
   const held = s.hotbarSlots[s.selectedSlot];
-  // MC Java 进食被松手/换槽/手持切换打断；受伤不打断（Java 如此）
+  // MC Java 进食/饮用被松手/换槽/手持切换打断；受伤不打断（Java 如此）
   if (!isUseHeld() || s.selectedSlot !== eatState.slot || held?.kind !== 'material' || held.material !== eatState.material) {
     cancelEating();
     return;
   }
-  eatState.progress += dt / EAT_DURATION;
-  // 读条中的嚼音反馈：每 0.5s 一声，低音量避免吵（完整 eatSound 三连嚼由 eatSelectedFood 在完成时播）
+  const drink = eatState.kind === 'drink';
+  eatState.progress += dt / (drink ? DRINK_DURATION : EAT_DURATION);
+  // 读条中的嘴部音效反馈：每 0.5s 一声，低音量避免吵（进食嚼音/饮用咕咚；完整 eatSound 三连嚼由 eatSelectedFood 在进食完成时播）
   eatState.chewAcc += dt;
   if (eatState.chewAcc >= 0.5 && eatState.progress < 1) {
     eatState.chewAcc = 0;
-    eatSound(0.12);
+    if (drink) glugSound(0.12);
+    else eatSound(0.12);
   }
   if (eatState.progress < 1) return;
-  finishEating(s, getActiveWorld());
-  // MC：按住不放接着吃下一份（还有食物且仍饿时；吃不下/没食物则停）。重新取 state：进食已更新饥饿
-  if (!startEating(useGameStore.getState(), true)) cancelEating();
+  if (drink) finishDrinking(s);
+  else finishEating(s, getActiveWorld());
+  // MC：按住不放接着用下一份（食物需仍饿；药水需同槽还有）。重新取 state：结算已更新饥饿/物品
+  const restarted = drink ? startDrinking(useGameStore.getState()) : startEating(useGameStore.getState(), true);
+  if (!restarted) cancelEating();
 }
 
 /**
@@ -568,21 +613,14 @@ export function tryPlace(): boolean {
         return false;
       }
     }
-    // 手持药水右键：饮用（水瓶/粗制药水无效果；II 级治疗瞬回 4 心，MC）
+    // 手持药水右键：饮用读条（MC Java 按住右键 1.6s；水瓶/粗制药水无效果不可饮）。读满才生效
+    // （effect 施加/生命回复/消耗瓶子，结算在 tickEating → finishDrinking）；触屏连发只续期不重启（同进食）
     if (held?.kind === 'material' && POTIONS[held.material]) {
-      const pot = POTIONS[held.material];
-      if (!pot.effect) {
-        s.setNotice('没什么味道…');
-      } else {
-        if (pot.effect === 'healing') s.setHealth(Math.min(MAX_HEALTH, s.health + (pot.lvl === 2 ? 8 : 4)));
-        else {
-          effects[pot.effect] = pot.duration;
-          if (pot.effect === 'speed' || pot.effect === 'strength' || pot.effect === 'regen') effectLvls[pot.effect] = pot.lvl ?? 1;
-        }
-        s.consumeMaterial(held.material, 1);
-        playSound('place');
+      if (eatState.active && eatState.slot === s.selectedSlot && eatState.material === held.material) {
+        eatState.nudgedAt = performance.now();
+        return false;
       }
-      lastPlace = now;
+      if (startDrinking(s)) lastPlace = now;
       return false;
     }
     // 手持功能性物品：弓/珍珠/蛋/末影眼/藏宝图/钓竿（共用 tryUseHeldItem；生存消耗并扣耐久，藏宝图不消耗）
@@ -729,10 +767,9 @@ export function tryPlace(): boolean {
       lastPlace = now;
       return false;
     }
-    // 铁砧：手持工具/装备右击——修复（耗材料 +25%）或附魔合并（MC）
+    // 铁砧：手持工具/装备右击——修复（耗材料 +25%）或附魔合并（MC）；成功音效由 store.anvilUse 播铿锵声
     if (hitId === BLOCK_BY_KEY.anvil.id) {
       const r = s.anvilUse();
-      if (r.ok) playSound('place');
       s.setNotice(r.notice);
       lastPlace = now;
       return false;

@@ -1,9 +1,10 @@
 'use client';
 
+import { useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
-import type { Color, Fog } from 'three';
-import { isLavaId, isWaterId } from '@/lib/blocks';
-import { atmosphere, getActiveWorld } from '@/lib/game';
+import { Vector3, type Color, type Fog } from 'three';
+import { isLavaId, isWaterId, tileOf } from '@/lib/blocks';
+import { atmosphere, breakParticles, getActiveWorld, survivalStats } from '@/lib/game';
 import { useGameStore } from '@/lib/store';
 
 const WATER_COLOR = '#16486e';
@@ -21,9 +22,15 @@ export function skyFog(renderDistance: number): { near: number; far: number } {
   };
 }
 
-/** 头没入水中时切换为水下雾效，离开后恢复天空（雾距随设置） */
+/** 帧循环复用的相机朝向向量（气泡定位用，零分配） */
+const bubbleDir = new Vector3();
+
+/** 头没入水中时切换为水下雾效，离开后恢复天空（雾距随设置）；水下间歇推呼出气泡粒子事件（breakParticles，BreakParticles 消费） */
 export function UnderwaterFX() {
-  useFrame(({ scene, camera }) => {
+  /** 距下一朵呼出气泡的秒数（仅头入水时倒计时，出水重置） */
+  const bubbleIn = useRef(0.5);
+
+  useFrame(({ scene, camera }, delta) => {
     const world = getActiveWorld();
     if (!world) return;
     const fog = scene.fog as Fog | null;
@@ -39,22 +46,39 @@ export function UnderwaterFX() {
       fog.color.set(WATER_COLOR);
       fog.near = WATER_FOG_NEAR;
       fog.far = WATER_FOG_FAR;
-    } else if (isLavaId(head)) {
-      // 头没入岩浆：橙红短雾
-      bg.set(LAVA_COLOR);
-      fog.color.set(LAVA_COLOR);
-      fog.near = LAVA_FOG_NEAR;
-      fog.far = LAVA_FOG_FAR;
+      // 呼出气泡：每 0.3-0.8s 随机在相机前方下方推一朵（氧气 <5s 快耗尽时频率加倍）；暂停时游戏逻辑冻结不推
+      if (!useGameStore.getState().paused) {
+        bubbleIn.current -= Math.min(delta, 0.05);
+        if (bubbleIn.current <= 0) {
+          camera.getWorldDirection(bubbleDir);
+          const bx = camera.position.x + bubbleDir.x * 0.6;
+          const by = camera.position.y + bubbleDir.y * 0.6 - 0.35;
+          const bz = camera.position.z + bubbleDir.z * 0.6;
+          // 粒子在事件坐标 +0.25~0.75 内散布（BreakParticles.spawn）：-0.5 使散布中心对准气泡点；贴图取水 tile（浅色水色）
+          breakParticles.push({ x: bx - 0.5, y: by - 0.5, z: bz - 0.5, tile: tileOf('water_still') });
+          bubbleIn.current = (0.3 + Math.random() * 0.5) * (survivalStats.air < 5 ? 0.5 : 1);
+        }
+      }
     } else {
-      const { near, far } = skyFog(useGameStore.getState().settings.renderDistance);
-      // 下界雾浓（MC 下界能见度低、红雾弥漫）；末地/主世界正常雾距
-      const target = useGameStore.getState().dimension === 'nether' ? { near: near * 0.3, far: far * 0.5 } : { near, far };
-      if (fog.near !== target.near || fog.far !== target.far) {
-        // 恢复天空：颜色取 DayNight 当前计算的大气色
-        bg.setRGB(atmosphere.r, atmosphere.g, atmosphere.b);
-        fog.color.setRGB(atmosphere.r, atmosphere.g, atmosphere.b);
-        fog.near = target.near;
-        fog.far = target.far;
+      // 出水（含岩浆）即停：计时器重置，再入水按完整随机间隔起算
+      bubbleIn.current = 0.3 + Math.random() * 0.5;
+      if (isLavaId(head)) {
+        // 头没入岩浆：橙红短雾
+        bg.set(LAVA_COLOR);
+        fog.color.set(LAVA_COLOR);
+        fog.near = LAVA_FOG_NEAR;
+        fog.far = LAVA_FOG_FAR;
+      } else {
+        const { near, far } = skyFog(useGameStore.getState().settings.renderDistance);
+        // 下界雾浓（MC 下界能见度低、红雾弥漫）；末地/主世界正常雾距
+        const target = useGameStore.getState().dimension === 'nether' ? { near: near * 0.3, far: far * 0.5 } : { near, far };
+        if (fog.near !== target.near || fog.far !== target.far) {
+          // 恢复天空：颜色取 DayNight 当前计算的大气色
+          bg.setRGB(atmosphere.r, atmosphere.g, atmosphere.b);
+          fog.color.setRGB(atmosphere.r, atmosphere.g, atmosphere.b);
+          fog.near = target.near;
+          fog.far = target.far;
+        }
       }
     }
   });

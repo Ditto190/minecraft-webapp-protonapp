@@ -163,7 +163,7 @@ function AttackIndicator() {
   );
 }
 
-/** 进食读条（MC Java 按住右键进食：准星上方小进度条，读满/取消即隐藏）；50ms 轮询运行时单例，不进 React 状态 */
+/** 进食/饮用读条（MC Java 按住右键使用：准星上方小进度条，读满/取消即隐藏；进食琥珀色、饮用天蓝色区分）；50ms 轮询运行时单例，不进 React 状态 */
 function EatIndicator() {
   const [, setTick] = useState(0);
   useEffect(() => {
@@ -174,7 +174,10 @@ function EatIndicator() {
   return (
     <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-8 mix-blend-difference">
       <div className="h-[3px] w-10 bg-black/60">
-        <div className="h-full bg-amber-300" style={{ width: `${Math.min(1, eatState.progress) * 100}%` }} />
+        <div
+          className={`h-full ${eatState.kind === 'drink' ? 'bg-sky-300' : 'bg-amber-300'}`}
+          style={{ width: `${Math.min(1, eatState.progress) * 100}%` }}
+        />
       </div>
     </div>
   );
@@ -471,7 +474,7 @@ export function Hud() {
       {/* 攻击冷却蓄力条（MC 1.9，准星下方） */}
       {!dead && <AttackIndicator />}
 
-      {/* 进食读条（MC Java，准星上方） */}
+      {/* 进食/饮用读条（MC Java，准星上方） */}
       {!dead && <EatIndicator />}
 
       {/* 吃完打嗝（监听 lastAteAt） */}

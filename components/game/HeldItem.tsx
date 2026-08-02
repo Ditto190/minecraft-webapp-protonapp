@@ -3,16 +3,17 @@
 // 第一人称手持物渲染与挥动动画（Java 观感）：
 // 容器 group 每帧对齐相机（position+quaternion），手持物在相机空间视野右下；
 // 方块槽渲染小立方体（顶/侧贴图，几何同 ItemDrops），材料/工具/装备槽渲染贴图面片。
-// 动画四套：攻击/放置单击挥下（读 handSwing 时间戳）、挖掘长按往复挥动（随 digState 启停）、
-// 进食举到嘴边咀嚼（随 eatState）、切槽/换物再装备（降下再升起）。帧循环零分配。
+// 动画五套：攻击/放置单击挥下（读 handSwing 时间戳）、挖掘长按往复挥动（随 digState 启停）、
+// 进食举到嘴边咀嚼（随 eatState）、切槽/换物再装备（降下再升起）、弓拉弦移向准星（读 bowState.draw，优先于挥动/挖掘/进食）。
+// 附魔工具/装备叠紫色 additive 呼吸光泽罩层（模式同 ItemDrops，材质关深度测试跟随手部 pass）。帧循环零分配。
 
 import { useEffect, useRef } from 'react';
 import { useFrame } from '@react-three/fiber';
-import { BufferAttribute, BufferGeometry, Group, Mesh, PerspectiveCamera, type Material } from 'three';
+import { AdditiveBlending, BufferAttribute, BufferGeometry, Group, Mesh, MeshBasicMaterial, PerspectiveCamera, type Material } from 'three';
 import { EAT_DURATION, eatState } from '@/lib/actions';
 import { armorDefOf } from '@/lib/armor';
 import { atlasUV } from '@/lib/blocks';
-import { digState, handSwing, touchInput } from '@/lib/game';
+import { bowState, digState, handSwing, touchInput } from '@/lib/game';
 import { materialTile } from '@/lib/materials';
 import { buildBlockGeometry } from '@/lib/mesher';
 import type { Slot } from '@/lib/slots';
@@ -21,6 +22,7 @@ import { getAtlasMaterials } from '@/lib/textures';
 import { TOOLS } from '@/lib/tools';
 import { toGeometry } from './ChunkMesh';
 import { useRendererKind } from './renderer-kind';
+import { slotEnchanted } from './slotDisplay';
 
 /** 手部基准偏移（相机空间，视野右下）：Java 第一人称手部位置的手调近似 */
 const HAND_X = 0.56;
@@ -34,6 +36,11 @@ const EQUIP_MS = 150;
 const DIG_PERIOD = 0.3;
 /** 手持物最后绘制（配合材质关深度测试：不穿模，等效 Java 第一人称手部独立深度 pass） */
 const HAND_RENDER_ORDER = 999;
+
+/** 弓拉弦进度 0→1（lib/game.ts 的 bowState，拉弦逻辑写入；钳制到 [0,1] 防越界） */
+function bowDrawAmount(): number {
+  return Math.min(Math.max(bowState.draw, 0), 1);
+}
 
 /**
  * 材料/工具/装备的手持面片几何：1×1 平面（中心原点）。
@@ -75,11 +82,14 @@ export function HeldItem() {
   const meshRef = useRef<Mesh | null>(null);
   const geoCache = useRef(new Map<string, BufferGeometry>());
   const heldMatRef = useRef<Material | null>(null);
-  /** 上一帧手持物标识（逐字段比较，帧循环零分配；变化 = 切槽/换物 → 重建 mesh + 再装备动画） */
-  const prevRef = useRef({ sel: -1, kind: '', key: '' as string | number, sub: '' });
+  /** 附魔光泽材质（additive 紫，全部附魔手持物共享一份，useFrame 里整体脉动；同 ItemDrops） */
+  const glintMatRef = useRef<MeshBasicMaterial | null>(null);
+  /** 上一帧手持物标识（逐字段比较，帧循环零分配；变化 = 切槽/换物/附魔增减 → 重建 mesh + 再装备动画） */
+  const prevRef = useRef({ sel: -1, kind: '', key: '' as string | number, sub: '', ench: false });
   const equipAt = useRef(-1000);
   const digPhase = useRef(0);
   const eatBlend = useRef(0);
+  const drawBlend = useRef(0); // 弓拉弦权重平滑跟随 draw（起弦快、松手指数回弹）
   const sneakBlend = useRef(0);
   /** 潜行输入（桌面 Shift；Player 的 keys 不导出，自持一份——纯视觉小偏移，从简） */
   const sneakKey = useRef(false);
@@ -91,6 +101,17 @@ export function HeldItem() {
     let disposed = false;
     const geos = geoCache.current;
     const prev = prevRef.current;
+    // 附魔光泽材质：同 ItemDrops 的 additive 紫，但关深度测试——跟随手部 pass 画在世界之上，否则被世界挡住
+    const glint = new MeshBasicMaterial({
+      color: '#b26bff',
+      transparent: true,
+      opacity: 0.3,
+      blending: AdditiveBlending,
+      depthTest: false,
+      depthWrite: false,
+      fog: false,
+    });
+    glintMatRef.current = glint;
     void getAtlasMaterials(kind).then((mats) => {
       if (disposed) return;
       const mat = mats.lambert({ map: mats.texture, alphaTest: 0.5, vertexColors: true });
@@ -101,6 +122,8 @@ export function HeldItem() {
     });
     return () => {
       disposed = true;
+      glint.dispose();
+      glintMatRef.current = null;
       heldMatRef.current?.dispose();
       heldMatRef.current = null;
       for (const g of geos.values()) g.dispose(); // 几何缓存卸载时释放 GPU 资源
@@ -174,6 +197,15 @@ export function HeldItem() {
     const mesh = new Mesh(geo, mat);
     mesh.renderOrder = HAND_RENDER_ORDER;
     mesh.frustumCulled = false; // 跟随相机的小物件：包围球剔除无意义且可能误剔
+    // 附魔工具/装备：略大的紫色 additive 罩层（复用同一几何，子节点随手持动画；模式同 ItemDrops）
+    const glintMat = glintMatRef.current;
+    if (glintMat && slotEnchanted(slot)) {
+      const glow = new Mesh(geo, glintMat);
+      glow.scale.setScalar(1.12);
+      glow.renderOrder = HAND_RENDER_ORDER + 1; // 紧跟手持物之后叠加
+      glow.frustumCulled = false;
+      mesh.add(glow);
+    }
     itemGroup.add(mesh);
     meshRef.current = mesh;
   }
@@ -190,6 +222,14 @@ export function HeldItem() {
     const dt = Math.min(delta, 0.05);
     const now = performance.now();
 
+    // 附魔光泽整体呼吸：透明度 + 色相缓慢摆动（共享材质一次更新，同 ItemDrops）
+    const glintMat = glintMatRef.current;
+    if (glintMat) {
+      const t = state.clock.elapsedTime;
+      glintMat.opacity = 0.24 + Math.sin(t * 2.2) * 0.1;
+      glintMat.color.setHSL(0.76 + Math.sin(t * 0.8) * 0.03, 0.85, 0.62);
+    }
+
     // —— 切槽/换物检测（逐字段比较，不含数量：进食/放置消耗不触发再装备） ——
     const slot = s.hotbarSlots[s.selectedSlot];
     const prev = prevRef.current;
@@ -204,16 +244,18 @@ export function HeldItem() {
             : slot.piece
       : '';
     const sSub = slot?.kind === 'armor' ? (slot.material ?? '') : '';
-    if (s.selectedSlot !== prev.sel || sKind !== prev.kind || sKey !== prev.key || sSub !== prev.sub) {
+    const sEnch = slotEnchanted(slot); // 附魔获得/洗去也触发重建（光泽罩层增减）
+    if (s.selectedSlot !== prev.sel || sKind !== prev.kind || sKey !== prev.key || sSub !== prev.sub || sEnch !== prev.ench) {
       prev.sel = s.selectedSlot;
       prev.kind = sKind;
       prev.key = sKey;
       prev.sub = sSub;
+      prev.ench = sEnch;
       equipAt.current = now; // 再装备动画：物品快速降下再升起（Java re-equip 观感）
       syncMesh(slot);
     }
 
-    // —— 位姿合成：基准 → 潜行 → 再装备 → 挥动/挖掘（进食时淡出）→ 进食 ——
+    // —— 位姿合成：基准 → 潜行 → 再装备 → 挥动/挖掘（进食/拉弓时淡出）→ 进食（拉弓时淡出）→ 拉弓 ——
     // 窄屏（竖屏）按可视半宽内收 x，保证手持物在画面内；用设置基准 FOV（非冲刺放大后的实时 FOV），冲刺时位置稳定
     const cam = state.camera as PerspectiveCamera;
     const halfW = Math.tan((s.settings.fov * Math.PI) / 360) * cam.aspect * -HAND_Z;
@@ -236,9 +278,13 @@ export function HeldItem() {
       rx -= 0.85 * k;
     }
 
+    // 弓拉弦权重：draw 平滑跟随（起弦快、松手指数回弹）；拉弓优先——挥动/挖掘/进食随之淡出
+    drawBlend.current += (bowDrawAmount() - drawBlend.current) * Math.min(1, dt * 12);
+    const nd = 1 - drawBlend.current;
+
     // 进食权重：eatState.active 期间趋近 1（举到嘴边），挥动/挖掘随之淡出（Java：进食中手臂动作被吃姿取代）
     eatBlend.current += ((eatState.active ? 1 : 0) - eatBlend.current) * Math.min(1, dt * 14);
-    const ne = 1 - eatBlend.current;
+    const ne = (1 - eatBlend.current) * nd;
 
     // 攻击/放置挥动：handSwing.at 时间戳触发，快速挥下再回（包络峰值 ~40%：前冲快、回落缓）
     const st = (now - handSwing.at) / SWING_MS;
@@ -261,8 +307,8 @@ export function HeldItem() {
       digPhase.current = 0;
     }
 
-    // 进食：举到嘴边 + 小幅咀嚼抖动（与 Player 的进食碎屑同频：0.2s 一口）
-    const e = eatBlend.current;
+    // 进食：举到嘴边 + 小幅咀嚼抖动（与 Player 的进食碎屑同频：0.2s 一口；拉弓时淡出）
+    const e = eatBlend.current * nd;
     if (e > 0.001) {
       px += (0.15 - px) * e;
       py += (-0.3 - py) * e;
@@ -275,8 +321,18 @@ export function HeldItem() {
       }
     }
 
+    // 拉弓：弓移向准星附近并随 draw 加深、略放大（Java 第一人称拉弓观感）；位姿在最后合成，压过前面的偏移
+    const dw = drawBlend.current;
+    if (dw > 0.001) {
+      px += (0.12 - px) * dw;
+      py += (-0.33 - py) * dw;
+      pz += (-0.72 - pz) * dw;
+      rx += 0.12 * dw; // 上端略抬平，对准准星
+    }
+
     hand.position.set(px, py, pz);
     hand.rotation.set(rx, ry, 0);
+    hand.scale.setScalar(1 + 0.18 * dw); // 拉弓略放大；未拉时恒 1（每帧写，零分配）
   });
 
   return (

@@ -28,7 +28,7 @@ import { grindResult } from './grindstone';
 import { netheriteUpgradeOf } from './smithing';
 import { setPersistenceNoticeHandler } from './persistence';
 import { addArmorToSlots, addStackToSlots, addToolToSlots, emptyBackpack, emptySlots, type Slot } from './slots';
-import { eatSound, hurtSound, levelupSound } from './sound';
+import { anvilSound, eatSound, hurtSound, levelupSound } from './sound';
 import { getStorage, putIntoStorage, storages, takeFromStorage } from './storage';
 import { TOOLS } from './tools';
 import { executeTrade, MAX_TRADE_USES, professionOf, TRADES, tradePeriod, tradeStockLeft, deductTradeStock } from './trading';
@@ -934,6 +934,7 @@ export const useGameStore = create<GameStore>()((set, get) => ({
       if (bIdx < hotbarSlots.length) hotbarSlots[bIdx] = null;
       else mainSlots[bIdx - hotbarSlots.length] = null;
       set({ hotbarSlots, mainSlots, ...(free ? {} : { xpTotal: subtractLevels(s.xpTotal, cost) }) });
+      anvilSound(); // 铁砧铿锵声：附魔合并完成（MC 铁砧使用音）
       return { ok: true, notice: `附魔已合并（同级 +1，取高级）${free ? '' : `，消耗 ${cost} 级`}` };
     }
     // —— 修复：耐久未满 + 物品栏有对应材料 1 个 → 补 25%（MC 材料修复） ——
@@ -967,6 +968,7 @@ export const useGameStore = create<GameStore>()((set, get) => ({
     }
     hotbarSlots[s.selectedSlot] = { ...held, durability: Math.min(maxDura, held.durability + Math.ceil(maxDura * 0.25)), works: works + 1 };
     set({ hotbarSlots, mainSlots, ...(free ? {} : { xpTotal: subtractLevels(s.xpTotal, cost) }) });
+    anvilSound(); // 铁砧铿锵声：修复完成（MC 铁砧使用音）
     return { ok: true, notice: `已修复（+25% 耐久）${free ? '' : `，消耗 ${cost} 级`}` };
   },
   consumeSelectedBlock: () => {

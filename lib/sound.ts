@@ -172,6 +172,13 @@ export function eatSound(volume = 0.4): void {
   for (let i = 0; i < 3; i++) blip('square', 160 + i * 30, ac.currentTime + i * 0.09, 0.06, volume);
 }
 
+/** 喝药「咕咚」：三连低频正弦下滑短音（程序合成，饮用读条反馈；public/sounds 无 drink 素材）。音量克制 */
+export function glugSound(volume = 0.3): void {
+  const ac = audioCtx();
+  if (!ac) return;
+  for (let i = 0; i < 3; i++) blip('sine', 150 - i * 25, ac.currentTime + i * 0.11, 0.08, volume, 70);
+}
+
 /** 升级「叮-叮-叮-叮」：C5 起上行琶音（程序合成，MC 升级钟声观感；public/sounds 无 levelup 素材） */
 export function levelupSound(volume = 0.5): void {
   const ac = audioCtx();
@@ -254,6 +261,52 @@ export function splashSound(volume = 0.35): void {
   lp.connect(gain);
   gain.connect(ac.destination);
   src.start();
+}
+
+/** 箱盖开启「哒-沙」：低频木质哒声（三角波快速下滑）+ 轻摩擦噪声 burst（低通收紧，同 splash 的噪声件思路）。
+ *  箱子/木桶面板打开时由 setStorageOpen 触发（Java 只有这两类容器有声，熔炉/酿造等无声）。音量克制 */
+export function chestOpenSound(volume = 0.4): void {
+  const ac = audioCtx();
+  if (!ac) return;
+  const now = ac.currentTime;
+  blip('triangle', 150, now, 0.12, volume, 80); // 木质哒声
+  // 箱盖掀起的轻摩擦感：短噪声 burst，低通随时间收紧
+  const dur = 0.14;
+  const buf = ac.createBuffer(1, Math.floor(ac.sampleRate * dur), ac.sampleRate);
+  const data = buf.getChannelData(0);
+  for (let i = 0; i < data.length; i++) {
+    const t = i / data.length;
+    data[i] = (Math.random() * 2 - 1) * Math.pow(1 - t, 1.8);
+  }
+  const src = ac.createBufferSource();
+  src.buffer = buf;
+  const lp = ac.createBiquadFilter();
+  lp.type = 'lowpass';
+  lp.frequency.setValueAtTime(900, now);
+  lp.frequency.exponentialRampToValueAtTime(250, now + dur);
+  const gain = ac.createGain();
+  gain.gain.value = useGameStore.getState().settings.volume * volume * 0.5; // 摩擦声低于哒声
+  src.connect(lp);
+  lp.connect(gain);
+  gain.connect(ac.destination);
+  src.start();
+}
+
+/** 箱盖合上：更轻更短的木质哒声（无摩擦；Java 关盖声明显轻于开盖） */
+export function chestCloseSound(volume = 0.28): void {
+  const ac = audioCtx();
+  if (!ac) return;
+  blip('triangle', 130, ac.currentTime, 0.09, volume, 70);
+}
+
+/** 铁砧「铿」：高频金属击声 + 非整数比泛音（金属感来源）+ 短余振（程序合成；铁砧修复/附魔合并完成时播）。音量克制 */
+export function anvilSound(volume = 0.35): void {
+  const ac = audioCtx();
+  if (!ac) return;
+  const now = ac.currentTime;
+  blip('square', 1250, now, 0.14, volume * 0.6); // 金属「铿」主体
+  blip('square', 1250 * 2.76, now, 0.08, volume * 0.3); // 泛音：非整数倍频 → 金属声
+  blip('sine', 1250, now + 0.02, 0.3, volume * 0.25); // 短余振
 }
 
 // ——— 雨声环境音（程序合成：滤白噪声循环 buffer，start/stop 带音量渐变；Rain.tsx 按天气驱动） ———

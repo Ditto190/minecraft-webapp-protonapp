@@ -57,6 +57,9 @@ export const digState = {
 /** 攻击冷却蓄力进度（MC 1.9 战斗）：Player 每帧写入（1 = 冷却走满可满额出手），Hud 准星下方蓄力条读取 */
 export const attackState = { progress: 1 };
 
+/** 弓拉弦状态桥：Player 拉弓蓄力每帧写入 0-1 进度（松手/未拉弓归 0），HeldItem 弓拉弦动画消费（同 portalState 模式） */
+export const bowState = { draw: 0 };
+
 export interface BreakParticleEvent {
   x: number;
   y: number;

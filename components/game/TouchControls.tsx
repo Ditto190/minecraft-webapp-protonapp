@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type TouchEvent } from 'react';
 import { tryPlace } from '@/lib/actions';
-import { touchInput } from '@/lib/game';
+import { handSwing, touchInput } from '@/lib/game';
 import { useGameStore } from '@/lib/store';
 import { Button } from '@/components/ui/button';
 
@@ -130,6 +130,11 @@ export function TouchControls() {
   };
 
   // —— 按住连放：按下立即放一次，随后按放置冷却间隔连放，松开/取消停止 ——
+  // tryPlace 为 true（放置成功或右键使用成功，含 mob 交互/投掷/扳拉杆等）时写 handSwing 时间戳，
+  // 触发第一人称手持物挥动——与桌面右键同一判定（Player.tsx 的 `if (tryPlace()) handSwing.at = ...`）
+  const tryPlaceSwing = () => {
+    if (tryPlace()) handSwing.at = performance.now();
+  };
   const stopPlace = () => {
     if (placeTimer.current !== null) {
       clearInterval(placeTimer.current);
@@ -138,8 +143,8 @@ export function TouchControls() {
   };
   const startPlace = () => {
     if (placeTimer.current !== null) return;
-    tryPlace();
-    placeTimer.current = setInterval(tryPlace, PLACE_INTERVAL);
+    tryPlaceSwing();
+    placeTimer.current = setInterval(tryPlaceSwing, PLACE_INTERVAL);
   };
 
   // 卸载时清空输入与定时器，避免状态带进下一局

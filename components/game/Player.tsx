@@ -7,7 +7,7 @@ import { BLOCK_BY_KEY, BLOCKS, isLavaId, isWaterId, tileOf } from '@/lib/blocks'
 import { breakBlock, cancelEating, eatState, sweepAround, tickEating, tryPlace, useButton } from '@/lib/actions';
 import { trampleFarmland } from '@/lib/crops';
 import { effectiveDigTime } from '@/lib/dig';
-import { attackState, breakParticles, burningState, cameraRef, cameraShake, debugInfo, digState, getActiveWorld, handSwing, hurtState, panelUnlock, pearlTeleport, playerPosition, portalState, SHAKE_DECAY_MS, survivalStats, targetBlock, teleportState, touchInput, worldClock } from '@/lib/game';
+import { attackState, bowState, breakParticles, burningState, cameraRef, cameraShake, debugInfo, digState, getActiveWorld, handSwing, hurtState, panelUnlock, pearlTeleport, playerPosition, portalState, SHAKE_DECAY_MS, survivalStats, targetBlock, teleportState, touchInput, worldClock } from '@/lib/game';
 import { itemDrops } from '@/lib/items';
 import { materialTile } from '@/lib/materials';
 import { otherDimension } from '@/lib/dimension';
@@ -22,7 +22,7 @@ import { crystalInReach, hitCrystal, tickCrystals } from '@/lib/endfight';
 import { tickFishing } from '@/lib/fishing';
 import { SEA_LEVEL, type Biome } from '@/lib/noise';
 import { aabbFree, collideAxis, PLAYER_HALF_W, PLAYER_HEIGHT, type Aabb } from '@/lib/physics';
-import { playSound } from '@/lib/sound';
+import { playSound, splashSound } from '@/lib/sound';
 import { useGameStore } from '@/lib/store';
 import { anyPanelOpen } from '@/lib/store-types';
 import { resetSurvivalMem, tickSurvival, type SurvivalMem } from '@/lib/survival';
@@ -142,6 +142,9 @@ export function Player() {
   const digTapAcc = useRef(0);
   /** 进食碎屑计时（读条中每 0.2s 从相机下方推食物粒子） */
   const eatCrumbAcc = useRef(0);
+  /** 入水/出水水花：上一帧水中状态（边沿检测）与触发冷却（水面小幅波动不反复响） */
+  const wasInWater = useRef(false);
+  const splashCd = useRef(0);
   /** 台阶辅助上台动画（150ms 平滑升起，避免瞬移突兀/起跳弹循环） */
   const stepAnim = useRef<{ from: number; to: number; t: number } | null>(null);
   const prevStep = useRef({ x: 0, z: 0 });
@@ -442,12 +445,14 @@ export function Player() {
       resetSurvivalMem(survivalMem.current);
       survivalStats.exhaustion = 0;
       prevStep.current = { x: p.x, z: p.z };
+      wasInWater.current = false; // 重生后水中状态重新计边沿（避免在重生点播一声虚假出水水花）
     }
     wasDead.current = gs.dead;
     // 死亡：冻结等待重生界面操作
     if (gs.dead) {
       useButton.held = false;
-      if (eatState.active) cancelEating(); // 死亡打断进食读条（MC：死亡取消使用动作）
+      if (eatState.active) cancelEating(); // 死亡打断进食/饮用读条（MC：死亡取消使用动作）
+      bowState.draw = 0; // 死亡松弦（HeldItem 拉弦动画消费）
       portalState.charge = 0; // 死亡后传送门读秒归零（不再推进，死亡界面下不该残留紫色 overlay）
       return;
     }
@@ -463,6 +468,15 @@ export function Player() {
       isLavaId(world.getBlock(Math.floor(p.x), Math.floor(p.y + 0.1), Math.floor(p.z))) ||
       isLavaId(world.getBlock(Math.floor(p.x), Math.floor(p.y + EYE), Math.floor(p.z)));
     const inFluid = inWater || inLava;
+    // 入水/出水水花：水中状态边沿触发（入水重、出水轻）；0.5s 冷却，水面小幅波动/上下浮动不反复响
+    splashCd.current = Math.max(0, splashCd.current - dt);
+    if (inWater !== wasInWater.current) {
+      wasInWater.current = inWater;
+      if (splashCd.current <= 0) {
+        splashCd.current = 0.5;
+        splashSound(inWater ? 0.6 : 0.25);
+      }
+    }
 
     // 按相机实际朝向（投影到水平面）计算移动方向。
     // 注意不能读 camera.rotation.y：rotation 是 XYZ 欧拉角分解，俯仰时 .y 不是真实偏航角
@@ -496,7 +510,7 @@ export function Player() {
       (flying ? FLY_SPEED : inFluid ? WALK_SPEED * (inLava ? 0.4 : 0.6) : WALK_SPEED) *
       (effects.speed > 0 ? 1 + 0.2 * Math.max(effectLvls.speed, beaconTiers.get('speed') ?? 1) : 1) * // 迅捷药水 +20%/级（II 级 +40%）
       (sneaking ? 0.3 : sprinting ? 1.3 : 1) * // MC 潜行 ~30%、冲刺 ~130% 走速
-      (eatState.active ? 0.3 : 1); // MC Java：进食中移动速度大减（≈潜行速度）
+      (eatState.active ? 0.3 : 1); // MC Java：进食/饮用中移动速度大减（≈潜行速度）
     // 摇杆为模拟量：mLen ≤ 1 时保留力度，超过 1（键盘对角线）才归一化
     const scale = mLen > 1 ? speed / mLen : speed;
     mx *= scale;
@@ -693,10 +707,16 @@ export function Player() {
     }
     // 药水效果计时（创造模式也递减，MC 一致）
     tickEffects(dt);
-    // 进食读条推进（MC Java 按住右键 1.61s；取消/结算逻辑在 lib/actions.ts）
+    // 进食/饮用读条推进（MC Java 按住右键 1.61s/1.6s；取消/结算逻辑在 lib/actions.ts）
     tickEating(dt);
-    // 进食碎屑：读条中每 ~0.2s 从相机下方推出食物图标粒子（breakParticles 共享池；每帧位置由 fx/fz 前探）
-    if (eatState.active) {
+    // 弓拉弦状态桥：手持弓且按住使用键时每帧蓄力 0→1（MC Java 满弦 20 tick ≈ 1s），松手/换手持归 0；
+    // 仅供 HeldItem 拉弦动画消费（射箭仍是右键即发的现有机制，本桥不影响伤害）
+    {
+      const heldBow = gs.hotbarSlots[gs.selectedSlot];
+      bowState.draw = useButton.held && heldBow?.kind === 'tool' && heldBow.tool === 'bow' ? Math.min(1, bowState.draw + dt) : 0;
+    }
+    // 进食碎屑：读条中每 ~0.2s 从相机下方推出食物图标粒子（breakParticles 共享池；每帧位置由 fx/fz 前探；仅进食，饮用无碎屑——MC 喝水无粒子）
+    if (eatState.active && eatState.kind === 'eat') {
       eatCrumbAcc.current += dt;
       if (eatCrumbAcc.current >= 0.2) {
         eatCrumbAcc.current = 0;

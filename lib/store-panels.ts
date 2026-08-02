@@ -3,6 +3,7 @@
 
 import type { StateCreator } from 'zustand';
 import { panelUnlock } from './game';
+import { chestCloseSound, chestOpenSound } from './sound';
 import { ALL_PANELS_CLOSED, type GameStore } from './store-types';
 
 /** 打开界面先解锁指针（否则无法操作）；标记退锁原因=面板——面板全关后 Player 据此自动回锁（用户 Esc 主动暂停无此标记，仍出暂停遮罩） */
@@ -92,6 +93,11 @@ export const createPanelsSlice: StateCreator<GameStore, [], [], PanelsSlice> = (
   setStorageOpen: (storageOpen) => {
     stowAll();
     if (storageOpen) exitLockForPanel();
+    // 箱盖开合声（Java 只有箱子/木桶有声——此 setter 正是这两类的唯一开关路径，见 actions.ts 右键分支；
+    // 熔炉/酿造/附魔等走各自 setter 保持无声）。关闭含 GUI 关闭与爆炸损毁被动关（explosion.ts）；
+    // 已关再关不出声（空转守卫）。回主菜单等直置 state 不经此 setter，本就不出声
+    if (storageOpen) chestOpenSound();
+    else if (get().storageOpen) chestCloseSound();
     set(storageOpen ? { ...ALL_PANELS_CLOSED, storageOpen } : { storageOpen });
   },
   };
