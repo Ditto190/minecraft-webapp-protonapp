@@ -5,11 +5,11 @@ import { AIR, BLOCKS, BLOCK_BY_KEY, CRAFTING_TABLE, DIRT, FURNACE, GRASS, isColu
 import { dropFurnaceContents, FOODS } from './furnace';
 import { dropBrewingContents, POTIONS } from './brewing';
 import { effects, effectLvls } from './effects';
-import { isFarmlandId, isWheatCropId } from './crops';
-import { cameraRef, breakParticles, dayFactorAt, getActiveWorld, pearlTeleport, playerPosition, touchInput, worldClock } from './game';
+import { isFarmlandId, isWheatCropId, popCrop, setCropPopHandler } from './crops';
+import { cameraRef, breakParticles, dayFactorAt, eatFeedback, getActiveWorld, pearlTeleport, playerPosition, touchInput, worldClock } from './game';
 import { setGrowthDropHandler } from './growth';
 import { spawnBlockDrop, spawnMaterialDrop } from './items';
-import { setSaplingDropHandler, isLeavesId, LEAF_TO_SAPLING } from './saplings';
+import { setSaplingDropHandler, isLeavesId, LEAF_TO_SAPLING, growTree, markPlacedLeaves } from './saplings';
 import { raycastBlock } from './raycast';
 import { explodeAt } from './explosion';
 import { checkGravityAt } from './gravity';
@@ -21,6 +21,7 @@ import { cycleRepeaterDelay, isComparatorId, isRepeaterId, observerIdFor, pressB
 import { XP_ORE } from './xp';
 import { BREED_FOOD, barterWith, damageMob, feedMob, fireEnderPearl, fireEyeOfEnder, firePlayerArrow, MOB_DEFS, mobInReach, mobs, onSlept, woolBlockId, type Mob } from './mobs';
 import { fillPortalFrame, nearestStronghold } from './stronghold';
+import { markTreasureOpened, nearestBuriedTreasure } from './structures';
 import { bobber, castBobber, reelIn } from './fishing';
 import { MATERIAL_INFO, materialTile } from './materials';
 import { blockIntersectsPlayer } from './physics';
@@ -38,6 +39,22 @@ import { WORLD_HEIGHT } from './grid';
 setSaplingDropHandler((id, x, y, z) => spawnBlockDrop(id, x, y, z));
 // 仙人掌邻贴实心破坏的掉落同理
 setGrowthDropHandler((id, x, y, z) => spawnBlockDrop(id, x, y, z));
+// 作物弹出（耕地消失/光照不足且不见天，见 lib/crops.ts popCrop）的掉落走材料管线；
+// Java 中这是方块物理事件创造模式也掉，本项目沿用现有惯例（挖耕地/踩耕地）仅生存模式产生掉落
+setCropPopHandler((id, x, y, z) => {
+  if (useGameStore.getState().worldMode === 'survival') dropWheatLoot(id, x, y, z);
+});
+
+/** 小麦掉落（MC 收割规则）：成熟（第 7 阶段）掉 1 小麦 + 0-2 种子；未熟只掉 1 种子。收割与作物弹出共用 */
+function dropWheatLoot(id: BlockId, x: number, y: number, z: number): void {
+  if (id >= WHEAT_CROP_0 + 7) {
+    spawnMaterialDrop('wheat', x + 0.5, y + 0.4, z + 0.5, 1);
+    const seeds = Math.floor(Math.random() * 3);
+    if (seeds > 0) spawnMaterialDrop('wheat_seeds', x + 0.5, y + 0.4, z + 0.5, seeds);
+  } else {
+    spawnMaterialDrop('wheat_seeds', x + 0.5, y + 0.4, z + 0.5, 1);
+  }
+}
 
 const REACH = 6; // 挖掘/放置距离
 const PLACE_COOLDOWN = 150; // ms
@@ -62,6 +79,12 @@ if (typeof window !== 'undefined') {
 /** 潜行判定：桌面 Shift 或触屏潜行开关（与 Player.tsx 移动逻辑的合并方式一致） */
 export function isSneaking(): boolean {
   return shiftHeld || touchInput.sneak;
+}
+
+/** 水平八方位名称（MC 惯例 -Z 北、+X 东；藏宝图指引用） */
+function compassDir(dx: number, dz: number): string {
+  const names = ['南', '东南', '东', '东北', '北', '西北', '西', '西南'];
+  return names[Math.round(Math.atan2(dx, dz) / (Math.PI / 4)) & 7];
 }
 
 // ——— 进食读条（MC Java：手持食物按住右键 1.61s = 32 tick 吃完；松手/换槽/手持切换取消，受伤不打断） ———
@@ -98,8 +121,9 @@ function isUseHeld(): boolean {
 export function startEating(s: ReturnType<typeof useGameStore.getState>, quiet = false): boolean {
   const held = s.hotbarSlots[s.selectedSlot];
   if (held?.kind !== 'material' || !FOODS[held.material]) return false;
-  if (s.hunger >= MAX_HUNGER) {
-    if (!quiet) s.setNotice('还不饿'); // MC：满饥饿不能进食；拒绝要给反馈，不静默吞掉操作
+  if (s.hunger >= MAX_HUNGER && held.material !== 'chorus_fruit') {
+    // MC：满饥饿不能进食（紫颂果例外——满饥饿也可食用，传送用）；拒绝要给反馈，不静默吞掉操作
+    if (!quiet) s.setNotice('还不饿');
     return false;
   }
   eatState.active = true;
@@ -120,6 +144,7 @@ export function cancelEating(): void {
 function finishEating(s: ReturnType<typeof useGameStore.getState>, world: World | null): void {
   const material = eatState.material;
   if (!s.eatSelectedFood()) return;
+  eatFeedback.lastAteAt = performance.now(); // 打嗝钩子：Hud 订阅此时间戳播打嗝声
   // 紫颂果：食用后随机传送 ±8 格（MC 特色）——试 8 次找上方两格空的实心面
   if (material === 'chorus_fruit' && world) {
     for (let t = 0; t < 8; t++) {
@@ -135,6 +160,11 @@ function finishEating(s: ReturnType<typeof useGameStore.getState>, world: World 
   // MC：腐肉 80%、生鸡肉 30% 概率获得 30s 饥饿效果（效果期内 exhaustion 额外消耗，见 lib/survival.ts）
   const hungerChance = material === 'rotten_flesh' ? 0.8 : material === 'raw_chicken' ? 0.3 : 0;
   if (hungerChance > 0 && Math.random() < hungerChance) effects.hunger = 30;
+  // MC：金苹果附再生 II 5s（另有 2min 伤害吸收，本项目无该效果，从简）
+  if (material === 'golden_apple') {
+    effects.regen = 5;
+    effectLvls.regen = 2;
+  }
 }
 
 /** 每帧推进进食读条（Player useFrame 调用）：松手/换槽/换物取消；读满结算，仍按住且还饿则自动续吃下一份（MC） */
@@ -222,13 +252,8 @@ export function breakBlock(world: World, x: number, y: number, z: number): void 
   clearBrokenPortals(world, x, y, z);
   // 重力方块：破坏后本格上方与四邻上方的沙/沙砾等可能失撑坠落（MC 方块更新）
   for (const [gx, gz] of [[x, z], [x + 1, z], [x - 1, z], [x, z + 1], [x, z - 1]] as const) checkGravityAt(world, gx, y, gz);
-  // 耕地被破坏：上面的作物一律清掉（创造模式也清，否则留浮空作物）；种子掉落物只在生存模式产生
-  if (isFarmlandId(oldId) && isWheatCropId(world.getBlock(x, y + 1, z))) {
-    world.setBlock(x, y + 1, z, AIR);
-    if (useGameStore.getState().worldMode === 'survival') {
-      spawnMaterialDrop('wheat_seeds', x + 0.5, y + 1.4, z + 0.5, 1);
-    }
-  }
+  // 耕地被破坏：上面的作物以掉落物形式弹出（创造模式也清，否则留浮空作物；掉落只在生存模式产生，见 setCropPopHandler）
+  if (isFarmlandId(oldId)) popCrop(world, x, y + 1, z);
   if (def && useGameStore.getState().worldMode === 'survival') {
     const s = useGameStore.getState();
     // MC：石头系/矿石/金属块挖掘需要镐（needsPick 任意镐；pickTier 限定最低层级）
@@ -255,14 +280,8 @@ export function breakBlock(world: World, x: number, y: number, z: number): void 
         }
       }
     } else if (isWheatCropId(oldId)) {
-      // 小麦收割：成熟（第 7 阶段）掉 1 小麦 + 0-2 种子；未熟只掉 1 种子
-      if (oldId >= WHEAT_CROP_0 + 7) {
-        spawnMaterialDrop('wheat', x + 0.5, y + 0.4, z + 0.5, 1);
-        const seeds = Math.floor(Math.random() * 3);
-        if (seeds > 0) spawnMaterialDrop('wheat_seeds', x + 0.5, y + 0.4, z + 0.5, seeds);
-      } else {
-        spawnMaterialDrop('wheat_seeds', x + 0.5, y + 0.4, z + 0.5, 1);
-      }
+      // 小麦收割（MC 规则，与作物弹出共用掉落逻辑）
+      dropWheatLoot(oldId, x, y, z);
     } else if (oldId === BLOCK_BY_KEY.short_grass.id || oldId === BLOCK_BY_KEY.fern.id || oldId === BLOCK_BY_KEY.tall_grass.id || oldId === BLOCK_BY_KEY.large_fern.id) {
       // 草丛/蕨/高草丛/大型蕨：25% 掉小麦种子（MC 种草得种子的途径）
       if (Math.random() < 0.25) spawnMaterialDrop('wheat_seeds', x + 0.5, y + 0.4, z + 0.5, 1);
@@ -421,8 +440,8 @@ function tryMobInteract(world: World, s: ReturnType<typeof useGameStore.getState
 }
 
 /**
- * 手持功能性物品右键（MC）：弓射箭 / 末影珍珠传送 / 鸡蛋孵鸡 / 末影之眼定位要塞 / 钓竿抛收。
- * 生存模式消耗物品并扣耐久；创造模式视同材料无限、不消耗不扣耐久（MC）。命中处理返回 true。
+ * 手持功能性物品右键（MC）：弓射箭 / 末影珍珠传送 / 鸡蛋孵鸡 / 末影之眼定位要塞 / 藏宝图指向宝藏 / 钓竿抛收。
+ * 生存模式消耗物品并扣耐久（藏宝图不消耗，MC）；创造模式视同材料无限、不消耗不扣耐久（MC）。命中处理返回 true。
  */
 function tryUseHeldItem(world: World, s: ReturnType<typeof useGameStore.getState>, now: number): boolean {
   const camera = cameraRef.current;
@@ -474,6 +493,22 @@ function tryUseHeldItem(world: World, s: ReturnType<typeof useGameStore.getState
       playSound('place');
       lastPlace = now;
     }
+    return true;
+  }
+  // 藏宝图：右键指向最近未开启的埋藏宝藏（Java 藏宝图是静态地图物品，本项目简化为 HUD 方位文案——
+  // 复用飞眼的"最近结构定位"模式但不投掷实体，是对 Java 地图物品的最小侵入替代；
+  // 地图不消耗可重复使用（Java 地图不消耗）；宝藏箱被开启后不再指向它，见 structures.ts openedTreasures）
+  if (held?.kind === 'material' && held.material === 'treasure_map') {
+    const t = nearestBuriedTreasure(world.seedHash, world.terrain, playerPosition.x, playerPosition.z);
+    if (t) {
+      const dx = t.x - playerPosition.x;
+      const dz = t.z - playerPosition.z;
+      s.setNotice(`藏宝图指向${compassDir(dx, dz)}约 ${Math.round(Math.hypot(dx, dz))} 格（X ${t.x}，Z ${t.z}）`);
+    } else {
+      s.setNotice('附近没有未开启的宝藏');
+    }
+    playSound('place');
+    lastPlace = now;
     return true;
   }
   // 钓竿：无浮标抛竿 / 有浮标收竿（生存收竿扣 1 耐久，MC；咬钩窗口收竿得渔获 + 1-6 经验）
@@ -550,12 +585,12 @@ export function tryPlace(): boolean {
       lastPlace = now;
       return false;
     }
-    // 手持功能性物品：弓/珍珠/蛋/末影眼/钓竿（共用 tryUseHeldItem；生存消耗并扣耐久）
+    // 手持功能性物品：弓/珍珠/蛋/末影眼/藏宝图/钓竿（共用 tryUseHeldItem；生存消耗并扣耐久，藏宝图不消耗）
     if (tryUseHeldItem(world, s, now)) return false;
   }
-  // 创造模式同样可用：射箭/末影珍珠/末影之眼/钓鱼（MC 创造不消耗弹药与材料；不扣耐久）
+  // 创造模式同样可用：射箭/末影珍珠/末影之眼/藏宝图/钓鱼（MC 创造不消耗弹药与材料；不扣耐久）
   if (s.worldMode === 'creative') {
-    // 手持功能性物品：弓/珍珠/蛋/末影眼/钓竿（共用 tryUseHeldItem；创造视同材料无限，不扣耐久）
+    // 手持功能性物品：弓/珍珠/蛋/末影眼/藏宝图/钓竿（共用 tryUseHeldItem；创造视同材料无限，不扣耐久）
     if (tryUseHeldItem(world, s, now)) return false;
   }
   camera.getWorldDirection(dir);
@@ -613,12 +648,22 @@ export function tryPlace(): boolean {
     lastPlace = now;
     return true;
   }
-  // 骨粉：催熟小麦（+2~5 阶段，Java）；点草方块催出花草（湿润耕地也可播种）
+  // 骨粉：催熟小麦（+2~5 阶段，Java）；催树苗（45% 成树）；点草方块催出花草（湿润耕地也可播种）
   if (heldSlot?.kind === 'material' && heldSlot.material === 'bonemeal') {
     if (isWheatCropId(hitId) && hitId < WHEAT_CROP_0 + 7) {
       world.setBlock(bx, by, bz, Math.min(hitId + 2 + Math.floor(Math.random() * 4), WHEAT_CROP_0 + 7));
       s.consumeMaterial('bonemeal', 1);
       breakParticles.push({ x: bx, y: by, z: bz, tile: BLOCKS[hitId].side });
+      playSound('place');
+      lastPlace = now;
+      return true;
+    }
+    // 树苗：45% 直接长成树（Java 是两阶段各 45%——先催到 stage 1 再 45% 成树；本项目无 stage 概念，简化为单次 45%）
+    const saplingDef = BLOCKS[hitId];
+    if (saplingDef?.treeWood) {
+      s.consumeMaterial('bonemeal', 1); // Java：无论是否触发生长都消耗骨粉并出粒子
+      if (Math.random() < 0.45) growTree(world, bx, by, bz, saplingDef.treeWood);
+      breakParticles.push({ x: bx, y: by, z: bz, tile: saplingDef.side });
       playSound('place');
       lastPlace = now;
       return true;
@@ -711,9 +756,10 @@ export function tryPlace(): boolean {
       }
       return false;
     }
-    // 箱子/木桶：右键打开容器界面
+    // 箱子/木桶：右键打开容器界面（埋藏的宝藏箱被打开后藏宝图不再指向它——内存集合不持久化，见 structures.ts）
     if (hitId === BLOCK_BY_KEY.chest.id || hitId === BLOCK_BY_KEY.barrel.id) {
       s.setStorageOpen(`${bx},${by},${bz}`);
+      markTreasureOpened(world.seedHash, world.terrain, bx, by, bz);
       return false;
     }
     // 重生锚（MC）：荧石粉右键充能（最多 4 档）；下界已充能时右键（空手/非荧石）设重生点；
@@ -976,6 +1022,8 @@ export function tryPlace(): boolean {
   // 校验全部通过：扣减并放置
   if (s.worldMode === 'survival' && s.consumeSelectedBlock() === null) return false;
   world.setBlock(px, py, pz, id);
+  // 玩家放置的树叶：登记 persistent（Java），凋零扫描跳过；被破坏时由 setBlock 钩子自动除名
+  if (isLeavesId(id)) markPlacedLeaves(px, py, pz);
   // 重力方块：放下即检查自身与上方是否悬空（MC：沙子无支撑即落）
   checkGravityAt(world, px, py, pz);
   // 凋灵骷髅头放下：检测 T 形召唤（MC 凋灵仪式）
