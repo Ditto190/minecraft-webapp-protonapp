@@ -3,6 +3,7 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { AIR, BLOCKS, BLOCK_BY_KEY, COBBLE, isLavaId, isWaterId, LAVA, LAVA_FLOW_1, STONE, WATER, WATER_FLOW_1 } from '../blocks';
 import { clearFluids, lavaLevel, tickFluids, waterLevel } from '../fluids';
+import { clearDrops, itemDrops } from '../items';
 import { VOID_TERRAIN } from '../noise';
 import { CHUNK_VOLUME, World } from '../world';
 
@@ -70,8 +71,11 @@ describe('深层岩浆湖生成', () => {
 });
 
 describe('流动岩浆（MC Java：维度距离/节奏/水火反应）', () => {
-  // 流体队列与岩浆节奏累加器是模块全局的：测试间必须清空
-  beforeEach(() => clearFluids());
+  // 流体队列、岩浆节奏累加器与掉落物列表是模块全局的：测试间必须清空
+  beforeEach(() => {
+    clearFluids();
+    clearDrops();
+  });
 
   const NETHER_TERRAIN = { ...VOID_TERRAIN, kind: 'nether' as const };
 
@@ -130,7 +134,39 @@ describe('流动岩浆（MC Java：维度距离/节奏/水火反应）', () => {
     w.setBlock(8, 30, 8, LAVA);
     for (let i = 0; i < 30; i++) tickFluids(w, 128);
     expect(w.getBlock(8, 29, 8)).toBe(LAVA_FLOW_1);
-    expect(w.getBlock(8, 25, 8)).toBe(LAVA_FLOW_1);
+    expect(w.getBlock(8, 25, 8)).toBe(LAVA_FLOW_1); // 下落柱保持 1 级流 id（falling 强度记在流体模块内，不改存档 id）
+  });
+
+  it('主世界岩浆瀑布落地扩满 3 格（MC falling：下落保持源强度，修复前 1 级柱落地只扩 2 格）', () => {
+    const w = new World('lava-waterfall-ow', undefined, VOID_TERRAIN);
+    floor(w, 0, 12, 6);
+    w.setBlock(6, 20, 6, LAVA); // 悬空岩浆源，落点 (6,11,6)
+    for (let i = 0; i < 80; i++) tickFluids(w, 512);
+    expect(lavaLevel(w.getBlock(7, 11, 6))).toBe(1); // 落地从 1 级起扩
+    expect(lavaLevel(w.getBlock(9, 11, 6))).toBe(3); // 扩满 3 格（主世界上限）
+    expect(w.getBlock(10, 11, 6)).toBe(AIR); // 第 4 格不外溢
+    expect(w.getBlock(6, 20, 6)).toBe(LAVA); // 源保留
+  });
+
+  it('下界岩浆瀑布落地扩满 7 格（falling + 下界 7 级上限）', () => {
+    // 同上方的下界测试：空 saved chunk 跳过下界生成，kind 驱动下界节奏/上限
+    const saved = new Map([['0,0', new Uint16Array(CHUNK_VOLUME)]]);
+    const w = new World('lava-waterfall-nether', saved, NETHER_TERRAIN);
+    floor(w, 0, 15, 6);
+    w.setBlock(6, 20, 6, LAVA);
+    for (let i = 0; i < 60; i++) tickFluids(w, 512);
+    expect(lavaLevel(w.getBlock(13, 11, 6))).toBe(7); // 扩满 7 格
+    expect(w.getBlock(14, 11, 6)).toBe(AIR); // 第 8 格不外溢
+  });
+
+  it('岩浆冲毁花草：烧毁且不掉落（MC：只有水冲毁才弹掉落物）', () => {
+    const w = new World('lava-wash', undefined, VOID_TERRAIN);
+    floor(w, 0, 12, 6);
+    w.setBlock(8, 11, 6, BLOCK_BY_KEY.poppy.id);
+    w.setBlock(6, 11, 6, LAVA);
+    for (let i = 0; i < 40; i++) tickFluids(w, 256);
+    expect(isLavaId(w.getBlock(8, 11, 6))).toBe(true); // 花被流动岩浆占据
+    expect(itemDrops.length).toBe(0); // 岩浆烧毁不掉落
   });
 
   it('侧向流入水的岩浆 → 圆石', () => {
@@ -144,13 +180,14 @@ describe('流动岩浆（MC Java：维度距离/节奏/水火反应）', () => {
     expect(w.getBlock(7, 11, 6)).toBe(COBBLE); // 岩浆西流进水 → 圆石（MC）
   });
 
-  it('岩浆源上方是水（水从上方浇下）→ 石头', () => {
+  it('岩浆源上方是水（水从上方浇下）→ 黑曜石', () => {
     const w = new World('lava-stone', undefined, VOID_TERRAIN);
     floor(w, 4, 8, 6);
     w.setBlock(6, 11, 6, LAVA);
     w.setBlock(6, 12, 6, WATER); // 源正上方放水
     for (let i = 0; i < 4; i++) tickFluids(w, 128);
-    expect(w.getBlock(6, 11, 6)).toBe(STONE); // MC：水浇在岩浆源上成石头
+    // MC Java：岩浆源遇水（任意方向接触，含水从上方浇下）一律黑曜石；只有流动岩浆向下流入水才变石头
+    expect(w.getBlock(6, 11, 6)).toBe(BLOCK_BY_KEY.obsidian.id);
   });
 
   it('岩浆源遇侧向水 → 黑曜石', () => {
