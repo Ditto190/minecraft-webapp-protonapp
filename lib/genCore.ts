@@ -277,17 +277,17 @@ export function generateChunk(terrain: Terrain, cx: number, cz: number, data: Ui
       if (h < SEA_LEVEL || h + 1 >= WORLD_HEIGHT) continue;
       const aboveI = localIndex(x, h + 1, z);
       if (data[aboveI] !== AIR) continue;
+      // 邻格同高处是否有水（甘蔗/萤火虫灌木共用）：chunk 内直接读数据；跨界邻格不能读
+      // （生成期触发邻 chunk 隐式生成会链式扩散），按地形推断——邻列低于海平面且水面未封冻，同高格即是水（消除 chunk 边界的规则空缺线）
+      const waterBeside = (dx: number, dz: number): boolean => {
+        const lx = x + dx;
+        const lz = z + dz;
+        if (lx >= 0 && lx < CHUNK_SIZE && lz >= 0 && lz < CHUNK_SIZE) return data[localIndex(lx, h, lz)] === WATER;
+        const nh = cachedHeightAt(wx + dx, wz + dz);
+        return nh >= 0 && nh < SEA_LEVEL && !BIOME_SURFACE[cachedBiomeAt(wx + dx, wz + dz)].waterTop;
+      };
       // 甘蔗：岸线（脚下即海平面）四邻同高有水，宿主为草/土/沙/灰化土/菌丝（MC 一致）
       if (h === SEA_LEVEL && (surf === GRASS || surf === DIRT || surf === SAND || surf === PODZOL || surf === MYCELIUM)) {
-        // 邻格是否有水：chunk 内直接读数据；跨界邻格不能读（生成期触发邻 chunk 隐式生成会链式扩散），
-        // 按地形推断——邻列低于海平面且水面未封冻，同高格即是水（消除 chunk 边界的规则空缺线）
-        const waterBeside = (dx: number, dz: number): boolean => {
-          const lx = x + dx;
-          const lz = z + dz;
-          if (lx >= 0 && lx < CHUNK_SIZE && lz >= 0 && lz < CHUNK_SIZE) return data[localIndex(lx, h, lz)] === WATER;
-          const nh = cachedHeightAt(wx + dx, wz + dz);
-          return nh >= 0 && nh < SEA_LEVEL && !BIOME_SURFACE[cachedBiomeAt(wx + dx, wz + dz)].waterTop;
-        };
         const nearWater = waterBeside(1, 0) || waterBeside(-1, 0) || waterBeside(0, 1) || waterBeside(0, -1);
         if (nearWater && hash2(seedHash ^ 0xca3e11, wx, wz) < 0.3) {
           const ch = 1 + Math.floor(hash2(seedHash ^ 0xca3f22, wx, wz) * 3);
@@ -318,7 +318,19 @@ export function generateChunk(terrain: Terrain, cx: number, cz: number, data: Ui
         }
         case 'forest':
         case 'birch_forest': {
-          if (surf !== GRASS || r >= 0.02) break;
+          if (surf !== GRASS) break;
+          // 1.21.5 地表覆盖（独立盐哈希，不扰动下方既有花草分布）：
+          // 落叶层=森林/黑森林（MC），野花簇=白桦林（MC 白桦林/草甸黄色小花）
+          const r2 = hash2(seedHash ^ 0x1ea5c7, wx, wz);
+          if (biome === 'forest' && r2 < 0.05) {
+            data[aboveI] = K('leaf_litter');
+            break;
+          }
+          if (biome === 'birch_forest' && r2 < 0.04) {
+            data[aboveI] = K('wildflowers');
+            break;
+          }
+          if (r >= 0.02) break;
           // Java 蓝兰花仅沼泽生成，森林不出；末位用滨菊（Java 森林常见花）
           data[aboveI] =
             pick < 0.5 ? K('fern') : pick < 0.65 ? K('short_grass') : pick < 0.8 ? K('poppy') : pick < 0.9 ? K('dandelion') : K('oxeye_daisy');
@@ -348,7 +360,13 @@ export function generateChunk(terrain: Terrain, cx: number, cz: number, data: Ui
           break;
         }
         case 'dark_forest': {
-          if (surf !== GRASS || r >= 0.03) break;
+          if (surf !== GRASS) break;
+          // 落叶层（1.21.5；MC 黑森林地表覆盖，密度高于普通森林）
+          if (hash2(seedHash ^ 0x1ea5c7, wx, wz) < 0.08) {
+            data[aboveI] = K('leaf_litter');
+            break;
+          }
+          if (r >= 0.03) break;
           data[aboveI] = pick < 0.3 ? K('fern') : pick < 0.65 ? K('red_mushroom') : K('brown_mushroom');
           break;
         }
@@ -367,8 +385,22 @@ export function generateChunk(terrain: Terrain, cx: number, cz: number, data: Ui
             if (!clear) break;
             const ch = 1 + Math.floor(pick * 3);
             for (let i = 0; i < ch && h + 1 + i < WORLD_HEIGHT; i++) data[localIndex(x, h + 1 + i, z)] = K('cactus');
+            // 仙人掌花（1.21.5）：柱顶概率出花——1-2 节 10%、3 节 25%（MC 生长概率），花位四邻须为空
+            const fy = h + 1 + ch;
+            if (fy < WORLD_HEIGHT && hash2(seedHash ^ 0xcacf10, wx, wz) < (ch >= 3 ? 0.25 : 0.1)) {
+              const flowerAirBeside = (dx: number, dz: number): boolean => {
+                const lx = x + dx;
+                const lz = z + dz;
+                if (lx >= 0 && lx < CHUNK_SIZE && lz >= 0 && lz < CHUNK_SIZE) return data[localIndex(lx, fy, lz)] === AIR;
+                return cachedHeightAt(wx + dx, wz + dz) < fy;
+              };
+              if (flowerAirBeside(1, 0) && flowerAirBeside(-1, 0) && flowerAirBeside(0, 1) && flowerAirBeside(0, -1)) {
+                data[localIndex(x, fy, z)] = K('cactus_flower');
+              }
+            }
           } else if (r < 0.05) {
-            data[aboveI] = K('dead_bush');
+            // 1.21.5：枯灌木部分让位给干草丛（MC 沙漠/恶地地表，1 格高）
+            data[aboveI] = pick < 0.4 ? K('dead_bush') : pick < 0.75 ? K('short_dry_grass') : K('tall_dry_grass');
           }
           break;
         }
@@ -401,13 +433,22 @@ export function generateChunk(terrain: Terrain, cx: number, cz: number, data: Ui
           break;
         }
         case 'swamp': {
+          // 萤火虫灌木（1.21.5）：沼泽滨水地表（MC 沼泽近水生成；岸线为泥/草，同海平面且四邻有水）
+          if (h === SEA_LEVEL && (surf === GRASS || surf === K('mud')) && hash2(seedHash ^ 0xf1bef1, wx, wz) < 0.1) {
+            const nearWater = waterBeside(1, 0) || waterBeside(-1, 0) || waterBeside(0, 1) || waterBeside(0, -1);
+            if (nearWater) {
+              data[aboveI] = K('firefly_bush');
+              break;
+            }
+          }
           if (surf !== GRASS || r >= 0.05) break;
           data[aboveI] = pick < 0.3 ? K('blue_orchid') : pick < 0.6 ? K('short_grass') : pick < 0.85 ? K('fern') : K('brown_mushroom');
           break;
         }
         case 'badlands': {
           if (surf !== RED_SAND && !BLOCKS[surf]?.key.endsWith('terracotta')) break;
-          if (r < 0.025) data[aboveI] = K('dead_bush');
+          // 1.21.5：枯灌木部分让位给干草丛（MC 恶地也出干草丛）
+          if (r < 0.025) data[aboveI] = pick < 0.4 ? K('dead_bush') : pick < 0.75 ? K('short_dry_grass') : K('tall_dry_grass');
           break;
         }
         case 'mushroom_fields': {

@@ -24,8 +24,8 @@ export const ATLAS_COLS = 8;
 export const TILE_PX = 32;
 /** canvas 绘制图标（工作台/熔炉/装备/食物）的 atlas 起始格号；pack 贴图格数须小于它 */
 export const ICON_TILE_START = 512;
-/** canvas 图标格数量（0-1 工作台、2 熔炉、3-15 装备/食物、16 箱子侧、17 凋灵骷髅头、18 末地星空、19 鸡蛋、20 河豚、21 蜘蛛眼、22 金粒、23 金苹果、24 藏宝图） */
-export const ICON_TILE_COUNT = 25;
+/** canvas 图标格数量（0-1 工作台、2 熔炉、3-15 装备/食物、16 箱子侧、17 凋灵骷髅头、18 末地星空、19 鸡蛋、20 河豚、21 蜘蛛眼、22 金粒、23 金苹果、24 藏宝图、25 落叶层、26 野花簇、27 萤火虫灌木、28 仙人掌花、29 矮干草丛、30 高干草丛） */
+export const ICON_TILE_COUNT = 32;
 /** atlas 总行数（pack 格 + 图标格） */
 export const ATLAS_ROWS = Math.ceil((ICON_TILE_START + ICON_TILE_COUNT) / ATLAS_COLS);
 
@@ -832,6 +832,44 @@ for (let lv = 1; lv <= 7; lv++) {
 // 只能追加在注册表末尾（id 写入存档）。MC 硬度 2、镐挖（digTime 与 bone_block 同档 ×5）。
 // 贴图回退：atlas 无 grindstone 专用 tile（Faithful 包未收录），用石质近似——顶面 smooth_stone 拟磨轮、侧面 stone
 add('grindstone', '砂轮', { side: 'stone', top: 'smooth_stone', bottom: 'stone' }, { cat: 'utility', tool: 'pickaxe', needsPick: true, digTime: 10, ...STONE_SND });
+
+// ——— 1.21.5（Spring to Life）新植物：贴图包未收录，全部用 canvas 图标格（ICON_TILE_START+25..30）———
+// 落叶层：森林/黑森林地表薄层覆盖（MC 森林/黑森林/繁茂恶地；渲染/碰撞参照雪层，纯装饰非燃料）
+defs.push({
+  id: defs.length, key: 'leaf_litter', name: '落叶层',
+  top: ICON_TILE_START + 25, side: ICON_TILE_START + 25, bottom: ICON_TILE_START + 25,
+  opaque: false, solid: false, digTime: 0.2, cat: 'earth',
+  shape: 'slab', box3: [0, 0, 0, 1, 0.125, 1], ...GRASS_SND,
+});
+// 野花簇：白桦林地表黄色小花簇（MC 白桦林/原始白桦林/草甸；十字面片同花草）
+defs.push({
+  id: defs.length, key: 'wildflowers', name: '野花簇',
+  top: ICON_TILE_START + 26, side: ICON_TILE_START + 26, bottom: ICON_TILE_START + 26,
+  opaque: false, solid: false, digTime: 0.05, cat: 'earth', shape: 'cross', ...GRASS_SND,
+});
+// 萤火虫灌木：沼泽滨水地表发光小灌木（MC 发光值 2）
+defs.push({
+  id: defs.length, key: 'firefly_bush', name: '萤火虫灌木',
+  top: ICON_TILE_START + 27, side: ICON_TILE_START + 27, bottom: ICON_TILE_START + 27,
+  opaque: false, solid: false, digTime: 0.05, cat: 'earth', shape: 'cross', light: 2, ...GRASS_SND,
+});
+// 仙人掌花：沙漠仙人掌柱顶概率开出的粉色小花（MC：可采集、可再种回仙人掌上）
+defs.push({
+  id: defs.length, key: 'cactus_flower', name: '仙人掌花',
+  top: ICON_TILE_START + 28, side: ICON_TILE_START + 28, bottom: ICON_TILE_START + 28,
+  opaque: false, solid: false, digTime: 0.05, cat: 'earth', shape: 'cross', ...GRASS_SND,
+});
+// 矮/高干草丛：沙漠/恶地地表，部分替代枯灌木（MC：均为 1 格高——"高"仅贴图更高，非双格植物）
+defs.push({
+  id: defs.length, key: 'short_dry_grass', name: '矮干草丛',
+  top: ICON_TILE_START + 29, side: ICON_TILE_START + 29, bottom: ICON_TILE_START + 29,
+  opaque: false, solid: false, digTime: 0.05, cat: 'earth', shape: 'cross', ...GRASS_SND,
+});
+defs.push({
+  id: defs.length, key: 'tall_dry_grass', name: '高干草丛',
+  top: ICON_TILE_START + 30, side: ICON_TILE_START + 30, bottom: ICON_TILE_START + 30,
+  opaque: false, solid: false, digTime: 0.05, cat: 'earth', shape: 'cross', ...GRASS_SND,
+});
 
 /** 以方块 id 为下标 */
 export const BLOCKS: BlockDef[] = defs;

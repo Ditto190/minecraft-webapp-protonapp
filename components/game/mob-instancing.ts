@@ -117,6 +117,7 @@ function pt(geoKey: string, mat: string, x: number, y: number, z: number, rz?: n
 /**
  * 静态变体的部件表（与原 makeMobMesh 逐行对应；羊/狼/村民为动态变体，见 partsForVariant）。
  * 部件顺序与原 switch 一致（同层内顺序不影响渲染，仅便于对照）。
+ * 牛/猪/鸡即温带（temperate）型；寒带/热带变种同形换料，见 partsForVariant（1.21.5）。
  */
 const BASE_PARTS: Record<string, PartDef[]> = {
   zombie: [
@@ -323,6 +324,7 @@ const BASE_PARTS: Record<string, PartDef[]> = {
 /**
  * 变体键：同键共享一组实例池。
  * 羊按毛色×剪毛、狼按驯服（项圈有无）、村民按职业（袍色）分变体；
+ * 牛/猪/鸡按群系变种（1.21.5：cold/temperate/warm，部件同色不同料）；
  * 史莱姆体型/幼体/苦力怕引爆膨胀是逐生物根矩阵缩放，不占变体。
  */
 export function variantKeyOf(m: Mob): string {
@@ -333,6 +335,10 @@ export function variantKeyOf(m: Mob): string {
       return `wolf:${m.tamed ? 1 : 0}`;
     case 'villager':
       return `villager:${professionOf(m.id)}`;
+    case 'cow':
+    case 'pig':
+    case 'chicken':
+      return `${m.type}:${m.variant ?? 'temperate'}`;
     default:
       return m.type;
   }
@@ -383,6 +389,18 @@ export function partsForVariant(vkey: string): PartDef[] {
         // 抱臂横袖（MC 村民双手交叠于袍前）
         pt('villagerArms', robe, 0, 1.12, 0.2),
       ];
+    }
+    case 'cow':
+    case 'pig':
+    case 'chicken': {
+      // 群系变种（1.21.5）：温带沿用 BASE_PARTS 原配色；寒带/热带同形换料（材质键 <原料>_<变种>，
+      // 寒带更深、热带更浅）；鸡另加鸡冠部件做外观区分（温带沿用原 3 部件简模，MC 鸡冠差异）
+      const v = a === 'cold' || a === 'warm' ? a : 'temperate';
+      const base = BASE_PARTS[type];
+      if (v === 'temperate') return base;
+      const parts = base.map((p) => ({ ...p, mat: p.mat === 'beak' ? p.mat : `${p.mat}_${v}` }));
+      if (type === 'chicken') parts.push(pt('horn', `comb_${v}`, 0, 0.78, 0.2));
+      return parts;
     }
     default: {
       const parts = BASE_PARTS[type];

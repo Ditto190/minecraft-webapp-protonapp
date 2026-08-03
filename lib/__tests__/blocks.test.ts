@@ -50,6 +50,30 @@ describe('方块注册表', () => {
       expect(BLOCK_BY_KEY[leaves], leaves).toBeDefined();
     }
   });
+
+  it('1.21.5 新植物方块：落叶层/野花簇/萤火虫灌木/仙人掌花/矮高干草丛（追加在注册表末尾）', () => {
+    const keys = ['leaf_litter', 'wildflowers', 'firefly_bush', 'cactus_flower', 'short_dry_grass', 'tall_dry_grass'] as const;
+    for (const k of keys) {
+      const d = BLOCK_BY_KEY[k];
+      expect(d, k).toBeDefined();
+      expect(d.name.length, k).toBeGreaterThan(0);
+      expect(d.opaque, k).toBe(false); // 植被不挡光不剔邻面
+      expect(d.solid, k).toBe(false); // 无碰撞（雪层/花草同例）
+      expect(d.id, k).toBeGreaterThanOrEqual(BLOCK_BY_KEY.grindstone.id); // 存档兼容：只能末尾追加
+      // 贴图包未收录：全部走 canvas 图标格
+      for (const tile of [d.top, d.side, d.bottom]) expect(tile, k).toBeGreaterThanOrEqual(ICON_TILE_START);
+    }
+    // 落叶层：贴地薄层（snow_layer 的渲染/碰撞模式）
+    expect(BLOCK_BY_KEY.leaf_litter.shape).toBe('slab');
+    expect(BLOCK_BY_KEY.leaf_litter.box3).toEqual([0, 0, 0, 1, 0.125, 1]);
+    // 其余为花草十字面片（高干草丛 MC 也是 1 格高，不是双格植物）
+    for (const k of ['wildflowers', 'firefly_bush', 'cactus_flower', 'short_dry_grass', 'tall_dry_grass'] as const) {
+      expect(BLOCK_BY_KEY[k].shape, k).toBe('cross');
+      expect(BLOCK_BY_KEY[k].twoHigh, k).toBeUndefined();
+    }
+    // 萤火虫灌木发光值 2（MC）
+    expect(BLOCK_BY_KEY.firefly_bush.light).toBe(2);
+  });
 });
 
 describe('矿石生成器', () => {

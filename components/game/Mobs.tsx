@@ -89,6 +89,19 @@ function buildMobMats(mats: AtlasMaterials): MobMats {
     golemVine: l('#5d7a3a'), // 藤蔓斑（MC 铁傀儡青苔纹）
     chicken: l('#e8e8e8'),
     beak: l('#e8a030'),
+    // ——— 1.21.5 群系变种配色（牛/猪/鸡 × 寒带深/热带浅，MC 纯色近似；温带沿用上方原色）———
+    cow_cold: l('#4a3524'), // 寒带牛：深褐近黑（MC 寒带牛深色毛）
+    cowLight_cold: l('#c8b8a4'),
+    cow_warm: l('#8f5a32'), // 热带牛：暖红褐、偏浅（MC 热带牛）
+    cowLight_warm: l('#e0c8a8'),
+    pig_cold: l('#6e5138'), // 寒带猪：深棕厚毛（MC 寒带猪）
+    pigDark_cold: l('#553e2a'),
+    pig_warm: l('#d9b285'), // 热带猪：浅沙棕（MC 热带猪）
+    pigDark_warm: l('#b8925f'),
+    chicken_cold: l('#3d4149'), // 寒带鸡：深灰近黑羽（MC 寒带鸡）
+    comb_cold: l('#8a2020'), // 寒带鸡冠：暗红
+    chicken_warm: l('#b5854e'), // 热带鸡：暖棕羽（MC 热带鸡）
+    comb_warm: l('#c03828'), // 热带鸡冠：亮红
     robe: l('#7a5230'),
     villagerSkin: l('#b58a6a'),
     arrow: l('#a8a8a8'),

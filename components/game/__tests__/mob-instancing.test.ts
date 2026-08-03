@@ -137,6 +137,48 @@ describe('variantKeyOf', () => {
     const v = fakeMob({ type: 'villager' });
     expect(variantKeyOf(v)).toBe(`villager:${professionOf(v.id)}`);
   });
+
+  it('牛/猪/鸡按群系变种（1.21.5），缺省温带', () => {
+    expect(variantKeyOf(fakeMob({ type: 'cow' }))).toBe('cow:temperate');
+    expect(variantKeyOf(fakeMob({ type: 'cow', variant: 'cold' }))).toBe('cow:cold');
+    expect(variantKeyOf(fakeMob({ type: 'pig', variant: 'warm' }))).toBe('pig:warm');
+    expect(variantKeyOf(fakeMob({ type: 'chicken', variant: 'cold' }))).toBe('chicken:cold');
+    expect(variantKeyOf(fakeMob({ type: 'chicken', variant: 'temperate' }))).toBe('chicken:temperate');
+  });
+});
+
+describe('群系变种部件表（1.21.5）', () => {
+  it('牛/猪寒带热带：同形换料（材质带变种后缀），温带沿用原配色', () => {
+    const cold = partsForVariant('cow:cold');
+    expect(cold).toHaveLength(8); // 与温带同形
+    expect(cold.every((p) => p.mat.endsWith('_cold'))).toBe(true);
+    expect(partsForVariant('cow:warm').every((p) => p.mat.endsWith('_warm'))).toBe(true);
+    expect(partsForVariant('cow:temperate')).toEqual(partsForVariant('cow')); // 温带即原配色
+    expect(partsForVariant('pig:cold')).toHaveLength(7);
+    expect(partsForVariant('pig:cold').every((p) => p.mat.endsWith('_cold'))).toBe(true);
+    expect(partsForVariant('pig:warm')).toHaveLength(7);
+  });
+
+  it('鸡寒带/热带：换料 + 鸡冠部件（温带沿用原 3 部件简模）', () => {
+    expect(partsForVariant('chicken')).toHaveLength(3);
+    const cold = partsForVariant('chicken:cold');
+    expect(cold).toHaveLength(4);
+    expect(cold[3]).toMatchObject({ geo: 'horn', mat: 'comb_cold' });
+    const warm = partsForVariant('chicken:warm');
+    expect(warm).toHaveLength(4);
+    expect(warm.filter((p) => p.mat === 'chicken_warm')).toHaveLength(2); // 身 + 头
+    expect(warm.some((p) => p.mat === 'beak')).toBe(true); // 喙保持原色
+    expect(warm[3]).toMatchObject({ geo: 'horn', mat: 'comb_warm' });
+  });
+
+  it('变种分池：寒带牛与热带牛各成一组实例层', () => {
+    const pools = new MobInstancePools(fakeMats());
+    pools.sync([fakeMob({ type: 'cow', variant: 'cold' }), fakeMob({ type: 'cow', variant: 'warm' })], 0, 0, 0);
+    // 牛 4 层（腿合层/身/头/角）× 2 变种 + 共享红闪 1 层
+    expect(pools.root.children).toHaveLength(4 + 4 + 1);
+    expect(flashMeshOf(pools).count).toBe(2);
+    pools.dispose();
+  });
 });
 
 describe('computeMobRenderState', () => {

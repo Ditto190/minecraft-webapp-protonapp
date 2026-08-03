@@ -23,6 +23,20 @@ import { chunkKey, localIndex, WORLD_HEIGHT } from './grid';
 
 export type MobType = 'zombie' | 'skeleton' | 'spider' | 'creeper' | 'pig' | 'cow' | 'chicken' | 'villager' | 'mooshroom' | 'zombified_piglin' | 'piglin' | 'piglin_brute' | 'blaze' | 'wither_skeleton' | 'ghast' | 'sheep' | 'wolf' | 'enderman' | 'wither' | 'ender_dragon' | 'shulker' | 'slime' | 'phantom' | 'iron_golem';
 
+/** 农场动物群系变种（1.21.5 Spring to Life：牛/猪/鸡按出生地群系温度分寒带/温带/热带） */
+export type AnimalVariant = 'cold' | 'temperate' | 'warm';
+/** 有群系变种的物种（MC 1.21.5 仅牛/猪/鸡） */
+const VARIANT_SPECIES: readonly MobType[] = ['cow', 'pig', 'chicken'];
+/**
+ * 群系 → 动物变种（出生群系温度；MC 规则的项目群系表映射）：
+ * 雪原/冰刺/针叶林（寒带）→ cold；沙漠/热带草原/丛林（热带）→ warm；其余 → temperate（原样）
+ */
+export function variantForBiome(biome: Biome): AnimalVariant {
+  if (biome === 'snowy' || biome === 'ice_spikes' || biome === 'taiga') return 'cold';
+  if (biome === 'desert' || biome === 'savanna' || biome === 'jungle') return 'warm';
+  return 'temperate';
+}
+
 export interface MobDef {
   name: string;
   hp: number;
@@ -124,6 +138,8 @@ export interface Mob {
   woolColor?: string;
   sheared?: boolean;
   grazeTimer?: number;
+  /** 牛/猪/鸡：群系变种（1.21.5；生成时按出生地群系定，繁殖随机继承亲代之一；渲染见 mob-instancing 变体键） */
+  variant?: AnimalVariant;
   /** 狼：已驯服（跟随玩家并护主） */
   tamed?: boolean;
   /** 末影人：传送计时（被追/受伤触发瞬移） */
@@ -308,11 +324,17 @@ function pickSpawnType(night: boolean, biome?: Biome): MobType {
   return foresty ? 'wolf' : 'sheep';
 }
 
-/** 喂食繁殖：在亲代身旁生成同种幼体（90s 长成；产仔掉 1-7 经验，MC） */
-export function breedMob(parent: Mob): Mob {
+/** 喂食繁殖：在亲代身旁生成同种幼体（90s 长成；产仔掉 1-7 经验，MC）。
+ *  群系变种遗传（1.21.5，MC）：双亲变种不同时随机取一方；无变种信息的双亲（旧存档/鸡蛋孵化）按温带 */
+export function breedMob(parent: Mob, otherParent?: Mob): Mob {
   const baby = makeMob(parent.type, parent.x + 0.6, parent.y, parent.z + 0.6);
   baby.baby = true;
   baby.growUp = 90;
+  if (VARIANT_SPECIES.includes(parent.type)) {
+    const pv = parent.variant ?? 'temperate';
+    const ov = otherParent?.variant ?? pv;
+    baby.variant = Math.random() < 0.5 ? pv : ov;
+  }
   useGameStore.getState().addXp(XP_BREED[0] + Math.floor(Math.random() * (XP_BREED[1] - XP_BREED[0] + 1)));
   mobs.push(baby);
   return baby;
@@ -503,17 +525,19 @@ export function trySpawn(world: World, px: number, pz: number): boolean {
     const wantType = biome === 'mushroom_fields' ? 'mooshroom' : villageRoll ? 'villager' : pickSpawnType(night, biome);
     const wantDef = MOB_DEFS[wantType];
     if (isWaterId(world.getBlock(bx, y, bz))) continue; // 不在水面生成
-    // 被动只在草地上（蘑菇牛在菌丝上；村民可站村庄土径，MC）
+    // 被动只在草地上（蘑菇牛在菌丝上；村民可站村庄土径，MC；覆雪草方块也是草方块——MC 雪原同样刷农场动物）
     if (!wantDef.hostile) {
       const ground = world.getBlock(bx, y, bz);
       const gk = BLOCKS[ground]?.key;
-      if (wantType === 'mooshroom' ? gk !== 'mycelium' : wantType === 'villager' ? ground !== GRASS && gk !== 'dirt' : ground !== GRASS) continue;
+      if (wantType === 'mooshroom' ? gk !== 'mycelium' : wantType === 'villager' ? ground !== GRASS && gk !== 'dirt' : ground !== GRASS && gk !== 'snowy_grass') continue;
     }
     const sy = y + 1;
     // 亮度门控（MC：敌对在亮度 ≤7 生成；地表白天天空光 15 不刷，深夜露天 ≈0 可刷）
     if (wantDef.hostile && spawnLightAt(world, bx, sy, bz) > 7) continue;
     if (!aabbFree(world, bx + 0.5, sy, bz + 0.5, HALF_W, HEIGHT)) continue;
     const mob = wantType === 'slime' ? makeSlime(bx + 0.5, sy, bz + 0.5, Math.random() < 0.6 ? 4 : 2) : makeMob(wantType, bx + 0.5, sy, bz + 0.5); // 史莱姆生成大/中档（MC）
+    // 牛/猪/鸡：按出生地群系定群系变种（1.21.5 Spring to Life，MC）
+    if (VARIANT_SPECIES.includes(mob.type)) mob.variant = variantForBiome(biome);
     if (mob.type === 'villager' && village) {
       mob.homeX = village.x;
       mob.homeZ = village.z;
@@ -1490,12 +1514,12 @@ export function tickMobs(
             mx = (px / pd) * def.speed;
             mz = (pz / pd) * def.speed;
           } else {
-            // 配对成功：产仔并清恋爱、进冷却
+            // 配对成功：产仔并清恋爱、进冷却（变种随机继承双亲之一，见 breedMob）
             partner.loveTimer = 0;
             m.loveTimer = 0;
             partner.breedCd = 60;
             m.breedCd = 60;
-            if (mobs.length < 40) breedMob(m);
+            if (mobs.length < 40) breedMob(m, partner);
           }
         }
       } else if (

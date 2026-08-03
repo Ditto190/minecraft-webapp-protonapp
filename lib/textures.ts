@@ -10,7 +10,6 @@ import {
   ATLAS_COLS,
   ATLAS_PAD_RATIO,
   ATLAS_ROWS,
-  ICON_TILE_COUNT,
   ICON_TILE_START,
   TILE_STEMS,
   TILE_PX as DEFAULT_TILE_PX,
@@ -25,6 +24,10 @@ export let tilePx = DEFAULT_TILE_PX;
 
 const LEATHER = '#a06830';
 const LEATHER_DARK = '#6b4420';
+// 铜系（1.21.9 铜工具/铜甲图标；贴图包版本较老无 1.21.9/1.21 新贴图 → canvas 自绘）
+const COPPER = '#c06a3a';
+const COPPER_DARK = '#7e3f1e';
+const COPPER_LIGHT = '#e89a5f';
 
 // ——— 灰度贴图染色（MC 生物群系着色的简化：固定平原绿） ———
 // Faithful/原版中草顶、树叶、草类是灰度图，游戏里靠群系着色；这里在拼 atlas 时统一染绿
@@ -71,8 +74,25 @@ function drawMeat(ctx: CanvasRenderingContext2D, dx: number, dy: number, base: s
   ctx.fillRect(dx + 12, dy + 4, 2, 2);
 }
 
-/** 部分 tile 在贴图基础上用 canvas 叠加绘制（工作台/熔炉/皮革/装备/食物图标，格号见 ICON_TILE_START） */
-const TEXTURE_OVERLAYS: Record<number, (ctx: CanvasRenderingContext2D, dx: number, dy: number) => void> = {
+/** 工具手柄：两条斜棍（与 ICON_TILE_START+8 木棍画法一致） */
+function drawToolHandle(ctx: CanvasRenderingContext2D, dx: number, dy: number): void {
+  ctx.strokeStyle = LEATHER_DARK;
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(dx + 4, dy + 13);
+  ctx.lineTo(dx + 12, dy + 3);
+  ctx.stroke();
+  ctx.strokeStyle = '#9a7a4a';
+  ctx.lineWidth = 1;
+  ctx.beginPath();
+  ctx.moveTo(dx + 5, dy + 13);
+  ctx.lineTo(dx + 13, dy + 3);
+  ctx.stroke();
+}
+
+/** 部分 tile 在贴图基础上用 canvas 叠加绘制（工作台/熔炉/皮革/装备/食物图标，格号见 ICON_TILE_START；
+ * 1.21.9 铜系/重锤另有 ICON_TILE_START+31 与 pack 预留区 506..511 格；导出供 copper-age 测试校验格号映射） */
+export const TEXTURE_OVERLAYS: Record<number, (ctx: CanvasRenderingContext2D, dx: number, dy: number) => void> = {
   // 工作台顶：深色边框 + 2×2 网格
   [ICON_TILE_START + 0]: (ctx, dx, dy) => {
     ctx.fillStyle = '#5a4326';
@@ -310,6 +330,174 @@ const TEXTURE_OVERLAYS: Record<number, (ctx: CanvasRenderingContext2D, dx: numbe
     ctx.fillRect(dx + 9, dy + 8, 1, 1);
     ctx.fillRect(dx + 11, dy + 8, 1, 1);
   },
+  // ——— 1.21.5 新植物（blocks.ts 落叶层/野花簇/萤火虫灌木/仙人掌花/两种干草丛；贴图包未收录，canvas 自绘）———
+  // 落叶层：褐调碎叶密铺（留缝隙透出下方草皮，MC 落叶层观感；贴地薄层顶面即全部）
+  [ICON_TILE_START + 25]: (ctx, dx, dy) => {
+    const rand = mulberry32(41);
+    const palette = ['#6b4a2f', '#7d5a38', '#54401f', '#8a6a42', '#463217'];
+    for (let py = 0; py < 16; py++) {
+      for (let px = 0; px < 16; px++) {
+        if (rand() < 0.66) {
+          ctx.fillStyle = palette[Math.floor(rand() * palette.length)];
+          ctx.fillRect(dx + px, dy + py, 1, 1);
+        }
+      }
+    }
+  },
+  // 野花簇：绿茎 + 黄色小花团（MC 白桦林野花簇为黄色小花丛）
+  [ICON_TILE_START + 26]: (ctx, dx, dy) => {
+    ctx.fillStyle = '#3f7a28';
+    for (const [sx, sh] of [[4, 7], [8, 9], [12, 6]] as const) ctx.fillRect(dx + sx, dy + 16 - sh, 1, sh);
+    const heads: [number, number, string][] = [
+      [3, 6, '#e8c83a'], [4, 5, '#f0d850'], [7, 4, '#e8c83a'], [8, 3, '#f5e060'],
+      [9, 4, '#e8c83a'], [11, 7, '#f0d850'], [12, 6, '#e8c83a'], [13, 7, '#f5e060'],
+    ];
+    for (const [hx, hy, c] of heads) {
+      ctx.fillStyle = c;
+      ctx.fillRect(dx + hx, dy + hy, 2, 2);
+    }
+  },
+  // 萤火虫灌木：深绿小灌木 + 荧光黄绿光点（MC 夜间飞萤；方块另带发光值 2，见 blocks.ts）
+  [ICON_TILE_START + 27]: (ctx, dx, dy) => {
+    ctx.fillStyle = '#2f5a20'; // 灌木主体
+    ctx.fillRect(dx + 4, dy + 8, 8, 8);
+    ctx.fillRect(dx + 3, dy + 10, 10, 6);
+    ctx.fillRect(dx + 5, dy + 6, 6, 3);
+    ctx.fillStyle = '#3f7a28'; // 叶面高光
+    ctx.fillRect(dx + 5, dy + 8, 3, 2);
+    ctx.fillRect(dx + 9, dy + 10, 3, 2);
+    ctx.fillStyle = '#e8f06a'; // 荧光点
+    ctx.fillRect(dx + 3, dy + 6, 1, 1);
+    ctx.fillRect(dx + 12, dy + 5, 1, 1);
+    ctx.fillRect(dx + 8, dy + 3, 1, 1);
+  },
+  // 仙人掌花：短茎 + 粉色五瓣小花（MC 沙漠仙人掌柱顶花）
+  [ICON_TILE_START + 28]: (ctx, dx, dy) => {
+    ctx.fillStyle = '#4a7a2f'; // 短茎
+    ctx.fillRect(dx + 7, dy + 11, 2, 5);
+    ctx.fillStyle = '#e87ab0'; // 花瓣
+    ctx.fillRect(dx + 5, dy + 6, 6, 5);
+    ctx.fillRect(dx + 6, dy + 5, 4, 1);
+    ctx.fillRect(dx + 4, dy + 7, 1, 3);
+    ctx.fillRect(dx + 11, dy + 7, 1, 3);
+    ctx.fillStyle = '#f0a0c8'; // 花瓣高光
+    ctx.fillRect(dx + 6, dy + 7, 2, 2);
+    ctx.fillStyle = '#e8c83a'; // 花心
+    ctx.fillRect(dx + 8, dy + 8, 1, 1);
+  },
+  // 矮干草丛：枯黄短草叶（MC 沙漠/恶地；1 格高）
+  [ICON_TILE_START + 29]: (ctx, dx, dy) => {
+    for (const [bx, bh] of [[3, 6], [5, 8], [7, 5], [9, 7], [11, 6], [13, 4]] as const) {
+      ctx.fillStyle = '#b89a4a';
+      ctx.fillRect(dx + bx, dy + 16 - bh, 1, bh);
+      ctx.fillStyle = '#cbb26a'; // 叶尖高光
+      ctx.fillRect(dx + bx, dy + 16 - bh, 1, 2);
+    }
+  },
+  // 高干草丛：同色系更高草叶（MC：仍为 1 格高，仅贴图更高）
+  [ICON_TILE_START + 30]: (ctx, dx, dy) => {
+    for (const [bx, bh] of [[3, 11], [5, 13], [7, 10], [9, 14], [11, 12], [13, 9]] as const) {
+      ctx.fillStyle = '#b89a4a';
+      ctx.fillRect(dx + bx, dy + 16 - bh, 1, bh);
+      ctx.fillStyle = '#cbb26a';
+      ctx.fillRect(dx + bx, dy + 16 - bh, 1, 2);
+    }
+  },
+  // ——— 1.21.9 铜系 + 1.21 重锤（贴图包无新贴图 → canvas 自绘） ———
+  // 格位说明：ICON_TILE_START 后的图标区已被 1.21.5 植物（+25..+30）占满，atlas 容量（ATLAS_ROWS×ATLAS_COLS=68×8=544）
+  // 内仅剩 +31 一个合法空格；其余 6 格借用 pack 预留区尾部空格（ICON_TILE_START-1=511 往下——贴图 stem 仅 494 个，
+  // 该区间无贴图绘制；copper-age 测试里有 TILE_STEMS.length ≤ 506 的护栏，新增贴图 stem 触线即须迁移这些格）
+  // 铜镐（tools.ts 铜镐/斧/锹/剑共用此格——项目惯例：同 tier 斧/锹/剑复用镐形贴图）
+  [ICON_TILE_START + 31]: (ctx, dx, dy) => {
+    drawToolHandle(ctx, dx, dy);
+    ctx.fillStyle = COPPER; // 镐头：横担 + 两端下弯尖
+    ctx.fillRect(dx + 3, dy + 1, 11, 2);
+    ctx.fillRect(dx + 2, dy + 3, 3, 2);
+    ctx.fillRect(dx + 2, dy + 5, 2, 2);
+    ctx.fillRect(dx + 12, dy + 3, 3, 2);
+    ctx.fillRect(dx + 13, dy + 5, 2, 2);
+    ctx.fillStyle = COPPER_LIGHT; // 顶部高光
+    ctx.fillRect(dx + 3, dy + 1, 11, 1);
+    ctx.fillStyle = COPPER_DARK; // 横担下沿
+    ctx.fillRect(dx + 5, dy + 3, 7, 1);
+  },
+  // 铜锄（独立格——项目各 tier 锄均有独立贴图）
+  [ICON_TILE_START - 1]: (ctx, dx, dy) => {
+    drawToolHandle(ctx, dx, dy);
+    ctx.fillStyle = COPPER; // 锄刃横条 + 左端下勾
+    ctx.fillRect(dx + 8, dy + 1, 6, 2);
+    ctx.fillRect(dx + 8, dy + 3, 2, 4);
+    ctx.fillStyle = COPPER_LIGHT;
+    ctx.fillRect(dx + 8, dy + 1, 6, 1);
+    ctx.fillStyle = COPPER_DARK;
+    ctx.fillRect(dx + 10, dy + 3, 4, 1);
+  },
+  // 铜头盔/胸甲/护腿/靴子（形同皮革格 ICON_TILE_START+4..+7，换铜色；armor.ts COPPER_ICON）
+  [ICON_TILE_START - 2]: (ctx, dx, dy) => {
+    ctx.fillStyle = COPPER;
+    ctx.fillRect(dx + 3, dy + 3, 10, 5);
+    ctx.fillRect(dx + 3, dy + 8, 2, 5);
+    ctx.fillRect(dx + 11, dy + 8, 2, 5);
+    ctx.fillStyle = COPPER_LIGHT; // 顶部高光
+    ctx.fillRect(dx + 3, dy + 3, 10, 1);
+    ctx.fillStyle = COPPER_DARK;
+    ctx.fillRect(dx + 3, dy + 7, 10, 1);
+  },
+  [ICON_TILE_START - 3]: (ctx, dx, dy) => {
+    ctx.fillStyle = COPPER;
+    ctx.fillRect(dx + 4, dy + 3, 8, 10);
+    ctx.fillRect(dx + 2, dy + 3, 2, 5);
+    ctx.fillRect(dx + 12, dy + 3, 2, 5);
+    ctx.fillStyle = COPPER_DARK;
+    ctx.fillRect(dx + 4, dy + 6, 8, 1);
+  },
+  [ICON_TILE_START - 4]: (ctx, dx, dy) => {
+    ctx.fillStyle = COPPER;
+    ctx.fillRect(dx + 4, dy + 2, 8, 3);
+    ctx.fillRect(dx + 4, dy + 5, 3, 9);
+    ctx.fillRect(dx + 9, dy + 5, 3, 9);
+    ctx.fillStyle = COPPER_DARK;
+    ctx.fillRect(dx + 4, dy + 4, 8, 1);
+  },
+  [ICON_TILE_START - 5]: (ctx, dx, dy) => {
+    ctx.fillStyle = COPPER;
+    ctx.fillRect(dx + 3, dy + 7, 5, 7);
+    ctx.fillRect(dx + 8, dy + 7, 5, 7);
+    ctx.fillStyle = COPPER_DARK;
+    ctx.fillRect(dx + 3, dy + 12, 5, 2);
+    ctx.fillRect(dx + 8, dy + 12, 5, 2);
+  },
+  // 重锤（1.21）：木柄 + 方锤头（深灰褐 + 环带 + 顶部凸钉）
+  [ICON_TILE_START - 6]: (ctx, dx, dy) => {
+    ctx.fillStyle = '#6b4420'; // 柄
+    ctx.fillRect(dx + 7, dy + 9, 2, 6);
+    ctx.fillStyle = '#7a6a58'; // 锤头
+    ctx.fillRect(dx + 4, dy + 2, 8, 7);
+    ctx.fillStyle = '#9a8a76'; // 锤头高光棱
+    ctx.fillRect(dx + 4, dy + 2, 8, 1);
+    ctx.fillRect(dx + 4, dy + 2, 1, 7);
+    ctx.fillStyle = '#4a3f34'; // 环带 + 底缘 + 顶部凸钉
+    ctx.fillRect(dx + 4, dy + 5, 8, 1);
+    ctx.fillRect(dx + 4, dy + 8, 8, 1);
+    ctx.fillRect(dx + 6, dy + 1, 4, 1);
+  },
+  // 收纳袋（1.21.2 bundle）：皮质袋身 + 束口绳结（materials.ts bundle 图标）
+  [ICON_TILE_START + 32]: (ctx, dx, dy) => {
+    ctx.fillStyle = '#b89a6a'; // 袋身
+    ctx.fillRect(dx + 3, dy + 7, 10, 2);
+    ctx.fillRect(dx + 2, dy + 9, 12, 5);
+    ctx.fillStyle = '#8a6f47'; // 两侧与底部阴影
+    ctx.fillRect(dx + 2, dy + 9, 1, 5);
+    ctx.fillRect(dx + 13, dy + 9, 1, 5);
+    ctx.fillRect(dx + 3, dy + 13, 10, 1);
+    ctx.fillStyle = '#cbb27f'; // 正面高光
+    ctx.fillRect(dx + 4, dy + 8, 3, 4);
+    ctx.fillStyle = '#7a5a2a'; // 束口与绳结
+    ctx.fillRect(dx + 5, dy + 5, 6, 2);
+    ctx.fillRect(dx + 7, dy + 3, 2, 2);
+    ctx.fillRect(dx + 6, dy + 2, 1, 1);
+    ctx.fillRect(dx + 9, dy + 2, 1, 1);
+  },
 };
 
 /** atlas 画布的 dataURL（HUD 图标裁剪用），build 完成后可用。
@@ -542,40 +730,40 @@ async function build(kind: RendererKind): Promise<AtlasMaterials> {
     drawTile(i, (i % ATLAS_COLS) * cellPx, Math.floor(i / ATLAS_COLS) * cellPx);
   }
 
-  // 图标格（ICON_TILE_START..+24）：工作台/熔炉先铺木板/圆石底座，再叠加绘制
+  // 图标格：遍历 TEXTURE_OVERLAYS（ICON_TILE_START 之后的图标区 + pack 预留区尾部 506..511 的 1.21.9 铜系/重锤自绘格）；
+  // 工作台/熔炉/箱子先铺木板/圆石底座，再叠加绘制
   ctx.imageSmoothingEnabled = false;
-  for (let k = 0; k < ICON_TILE_COUNT; k++) {
-    const cell = ICON_TILE_START + k;
+  for (const [cellKey, overlay] of Object.entries(TEXTURE_OVERLAYS)) {
+    const cell = Number(cellKey);
     const dx = (cell % ATLAS_COLS) * cellPx;
     const dy = Math.floor(cell / ATLAS_COLS) * cellPx;
-    const baseStem = k <= 1 || k === 16 ? 'oak_planks' : k === 2 ? 'cobblestone' : null;
+    const baseStem =
+      cell === ICON_TILE_START + 0 || cell === ICON_TILE_START + 1 || cell === ICON_TILE_START + 16
+        ? 'oak_planks'
+        : cell === ICON_TILE_START + 2
+          ? 'cobblestone'
+          : null;
     if (baseStem) drawTile(tileOf(baseStem), dx, dy);
-    else {
-      // 无底座图标也要挤出（先画内容再补边）
-    }
     // 叠加绘制（工作台/熔炉/装备/食物图标）按 16px 坐标系编写，随分辨率缩放
-    const overlay = TEXTURE_OVERLAYS[cell];
-    if (overlay) {
-      ctx.save();
-      ctx.translate(dx + padPx, dy + padPx);
-      ctx.scale(tilePx / 16, tilePx / 16);
-      overlay(ctx, 0, 0);
-      ctx.restore();
-      // 叠加后对图标格做同样的挤出（无底座时图标即全部内容）
-      if (!baseStem) {
-        const P = padPx;
-        const T = tilePx;
-        const cx = dx + P;
-        const cy = dy + P;
-        ctx.drawImage(canvas, cx, cy, T, 1, cx, dy, T, P);
-        ctx.drawImage(canvas, cx, cy + T - 1, T, 1, cx, cy + T, T, P);
-        ctx.drawImage(canvas, cx, cy, 1, T, dx, cy, P, T);
-        ctx.drawImage(canvas, cx + T - 1, cy, 1, T, cx + T, cy, P, T);
-        ctx.drawImage(canvas, cx, cy, 1, 1, dx, dy, P, P);
-        ctx.drawImage(canvas, cx + T - 1, cy, 1, 1, cx + T, dy, P, P);
-        ctx.drawImage(canvas, cx, cy + T - 1, 1, 1, dx, cy + T, P, P);
-        ctx.drawImage(canvas, cx + T - 1, cy + T - 1, 1, 1, cx + T, cy + T, P, P);
-      }
+    ctx.save();
+    ctx.translate(dx + padPx, dy + padPx);
+    ctx.scale(tilePx / 16, tilePx / 16);
+    overlay(ctx, 0, 0);
+    ctx.restore();
+    // 叠加后对图标格做同样的挤出（无底座时图标即全部内容）
+    if (!baseStem) {
+      const P = padPx;
+      const T = tilePx;
+      const cx = dx + P;
+      const cy = dy + P;
+      ctx.drawImage(canvas, cx, cy, T, 1, cx, dy, T, P);
+      ctx.drawImage(canvas, cx, cy + T - 1, T, 1, cx, cy + T, T, P);
+      ctx.drawImage(canvas, cx, cy, 1, T, dx, cy, P, T);
+      ctx.drawImage(canvas, cx + T - 1, cy, 1, T, cx + T, cy, P, T);
+      ctx.drawImage(canvas, cx, cy, 1, 1, dx, dy, P, P);
+      ctx.drawImage(canvas, cx + T - 1, cy, 1, 1, cx + T, dy, P, P);
+      ctx.drawImage(canvas, cx, cy + T - 1, 1, 1, dx, cy + T, P, P);
+      ctx.drawImage(canvas, cx + T - 1, cy + T - 1, 1, 1, cx + T, cy + T, P, P);
     }
   }
 

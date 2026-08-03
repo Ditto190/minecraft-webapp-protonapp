@@ -28,10 +28,13 @@ function setup(slots?: Slot[]): void {
 beforeEach(() => setup());
 
 describe('砂轮方块与配方', () => {
-  it('方块注册在注册表末尾（id 写存档）：镐挖、utility 类', () => {
+  it('方块注册位置稳定（id 写存档；之后只允许末尾追加新方块）：镐挖、utility 类', () => {
     const def = BLOCK_BY_KEY.grindstone;
     expect(def).toBeDefined();
-    expect(def.id).toBe(BLOCKS.length - 1);
+    // 砂轮之后不得插入方块（否则其 id 漂移、旧存档错位）；1.21.5 新植物是其后唯一合法追加
+    expect(BLOCKS.slice(def.id + 1).map((d) => d.key)).toEqual([
+      'leaf_litter', 'wildflowers', 'firefly_bush', 'cactus_flower', 'short_dry_grass', 'tall_dry_grass',
+    ]);
     expect(def.tool).toBe('pickaxe');
     expect(def.cat).toBe('utility');
   });

@@ -336,6 +336,89 @@ describe('标志植被生成', () => {
   });
 });
 
+describe('1.21.5 新植物生成（Spring to Life）', () => {
+  /** 统计 6×6 chunk 内某方块数量 */
+  const countBlock = (w: World, key: string, n = 6): number => {
+    let c = 0;
+    for (let cx = 0; cx < n; cx++) {
+      for (let cz = 0; cz < n; cz++) {
+        for (const { id } of cells(w.getChunk(cx, cz).data)) if (id === K(key)) c++;
+      }
+    }
+    return c;
+  };
+
+  it('落叶层：森林/黑森林地表生成，白桦林/平原不出（Java 群系归属）', () => {
+    expect(countBlock(new World('flora-forest', undefined, mockTerrain({ biomeAt: () => 'forest' })), 'leaf_litter')).toBeGreaterThan(0);
+    expect(countBlock(new World('flora-dark', undefined, mockTerrain({ biomeAt: () => 'dark_forest' })), 'leaf_litter')).toBeGreaterThan(0);
+    expect(countBlock(new World('flora-birch', undefined, mockTerrain({ biomeAt: () => 'birch_forest' })), 'leaf_litter')).toBe(0);
+    expect(countBlock(new World('flora-plains', undefined, mockTerrain({ biomeAt: () => 'plains' })), 'leaf_litter')).toBe(0);
+  });
+
+  it('野花簇：白桦林地表生成，普通森林不出（Java 群系归属）', () => {
+    expect(countBlock(new World('flora-birch-wf', undefined, mockTerrain({ biomeAt: () => 'birch_forest' })), 'wildflowers')).toBeGreaterThan(0);
+    expect(countBlock(new World('flora-forest-wf', undefined, mockTerrain({ biomeAt: () => 'forest' })), 'wildflowers')).toBe(0);
+  });
+
+  it('萤火虫灌木：沼泽滨水地表生成（脚下海平面且四邻有水），森林不出', () => {
+    // 半侧水潭半侧岸：岸线列才可能出萤火虫灌木
+    const t = mockTerrain({
+      heightAt: (x) => ((x & 15) < 8 ? SEA_LEVEL - 1 : SEA_LEVEL),
+      biomeAt: () => 'swamp',
+    });
+    const w = new World('flora-firefly', undefined, t);
+    let n = 0;
+    for (let cx = 0; cx < 6; cx++) {
+      for (let cz = 0; cz < 6; cz++) {
+        const data = w.getChunk(cx, cz).data;
+        for (const { x, y, z, id } of cells(data)) {
+          if (id !== K('firefly_bush')) continue;
+          n++;
+          expect(y).toBe(SEA_LEVEL + 1); // 岸线地表之上
+          const wx = cx * 16 + x;
+          const wz = cz * 16 + z;
+          const near =
+            w.getBlock(wx + 1, SEA_LEVEL, wz) === K('water') ||
+            w.getBlock(wx - 1, SEA_LEVEL, wz) === K('water') ||
+            w.getBlock(wx, SEA_LEVEL, wz + 1) === K('water') ||
+            w.getBlock(wx, SEA_LEVEL, wz - 1) === K('water');
+          expect(near).toBe(true); // 滨水（MC：沼泽近水生成）
+        }
+      }
+    }
+    expect(n).toBeGreaterThan(0);
+    expect(countBlock(new World('flora-firefly-forest', undefined, mockTerrain({ biomeAt: () => 'forest' })), 'firefly_bush')).toBe(0);
+  });
+
+  it('干草丛：沙漠/恶地地表生成且只替换部分枯灌木，热带草原/森林不出（Java 群系归属）', () => {
+    const desert = new World('flora-desert', undefined, mockTerrain({ biomeAt: () => 'desert' }));
+    expect(countBlock(desert, 'short_dry_grass')).toBeGreaterThan(0);
+    expect(countBlock(desert, 'tall_dry_grass')).toBeGreaterThan(0);
+    expect(countBlock(desert, 'dead_bush')).toBeGreaterThan(0);
+    const badlands = new World('flora-badlands', undefined, mockTerrain({ heightAt: () => 70, biomeAt: () => 'badlands' }));
+    expect(countBlock(badlands, 'short_dry_grass') + countBlock(badlands, 'tall_dry_grass')).toBeGreaterThan(0);
+    expect(countBlock(new World('flora-savanna', undefined, mockTerrain({ biomeAt: () => 'savanna' })), 'short_dry_grass')).toBe(0); // Java：干草丛不生在热带草原
+    expect(countBlock(new World('flora-forest-dg', undefined, mockTerrain({ biomeAt: () => 'forest' })), 'tall_dry_grass')).toBe(0);
+  });
+
+  it('仙人掌花：沙漠部分仙人掌柱顶开花，花下必为仙人掌，非沙漠不出', () => {
+    const w = new World('flora-cactus', undefined, mockTerrain({ biomeAt: () => 'desert' }));
+    let flowers = 0;
+    for (let cx = 0; cx < 8; cx++) {
+      for (let cz = 0; cz < 8; cz++) {
+        const data = w.getChunk(cx, cz).data;
+        for (const { x, y, z, id } of cells(data)) {
+          if (id !== K('cactus_flower')) continue;
+          flowers++;
+          expect(data[localIndex(x, y - 1, z)]).toBe(K('cactus'));
+        }
+      }
+    }
+    expect(flowers).toBeGreaterThan(0);
+    expect(countBlock(new World('flora-cactus-plains', undefined, mockTerrain({ biomeAt: () => 'plains' })), 'cactus_flower')).toBe(0);
+  });
+});
+
 describe('恶地陶瓦地层', () => {
   it('台地柱内出现彩色陶瓦带', () => {
     const w = new World('bad-bands', undefined, mockTerrain({ heightAt: () => 70, biomeAt: () => 'badlands' }));

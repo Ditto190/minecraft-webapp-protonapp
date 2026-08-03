@@ -19,7 +19,7 @@ import { trySummonWither } from './wither';
 import { pistonIdFor } from './pistons';
 import { cycleRepeaterDelay, isComparatorId, isRepeaterId, observerIdFor, pressButton, toggleComparatorMode, toggleLever, tuneNoteBlock } from './redstone';
 import { XP_ORE } from './xp';
-import { BREED_FOOD, barterWith, damageMob, feedMob, fireEnderPearl, fireEyeOfEnder, firePlayerArrow, MOB_DEFS, mobInReach, mobs, onSlept, woolBlockId, type Mob } from './mobs';
+import { BREED_FOOD, barterWith, damageMob, feedMob, fireEnderPearl, fireEyeOfEnder, firePlayerArrow, MOB_DEFS, mobInReach, mobs, onSlept, variantForBiome, woolBlockId, type Mob } from './mobs';
 import { fillPortalFrame, nearestStronghold } from './stronghold';
 import { markTreasureOpened, nearestBuriedTreasure } from './structures';
 import { bobber, castBobber, reelIn } from './fishing';
@@ -408,6 +408,7 @@ export function throwEgg(world: World, origin: { x: number; y: number; z: number
         fleeTimer: 0, fleeFromX: 0, fleeFromZ: 0,
         arrowCd: 1, ignite: -1,
         baby: true, growUp: 90,
+        variant: variantForBiome(world.terrain.biomeAt(bx, bz)), // 1.21.5：小鸡按当地群系温度分变种（同自然刷怪）
       });
     }
     return { x: px, y: py, z: pz };
