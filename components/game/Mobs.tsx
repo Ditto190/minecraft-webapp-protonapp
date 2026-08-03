@@ -2,89 +2,18 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useFrame } from '@react-three/fiber';
-import { Box3, BoxGeometry, Group, Mesh, Vector3, type Material } from 'three';
+import { BoxGeometry, Group, Mesh, Vector3, type Material } from 'three';
 import { playerPosition } from '@/lib/game';
-import { arrows, clearMobs, MOB_DEATH_DURATION, mobs, type Mob, type MobType } from '@/lib/mobs';
-import { professionOf, PROFESSION_INFO, type Profession } from '@/lib/trading';
+import { arrows, clearMobs, mobs } from '@/lib/mobs';
+import { PROFESSION_INFO } from '@/lib/trading';
 import { useGameStore } from '@/lib/store';
 import { getAtlasMaterials, type AtlasMaterials } from '@/lib/textures';
+import { MobInstancePools } from './mob-instancing';
 import { useRendererKind, type RendererKind } from './renderer-kind';
 
-// ——— 共享几何 ———
-const headGeo = new BoxGeometry(0.42, 0.42, 0.42);
-const bodyGeo = new BoxGeometry(0.5, 0.7, 0.28);
-const legGeo = new BoxGeometry(0.2, 0.75, 0.22);
-const armGeo = new BoxGeometry(0.18, 0.6, 0.2);
-// MC 僵尸招牌姿势：双臂前平举（水平臂几何）
-const armForwardGeo = new BoxGeometry(0.18, 0.18, 0.55);
-const bodyWideGeo = new BoxGeometry(0.9, 0.5, 0.4);
-const pigLegGeo = new BoxGeometry(0.12, 0.3, 0.12);
-const chickenBodyGeo = new BoxGeometry(0.32, 0.35, 0.35);
-const chickenHeadGeo = new BoxGeometry(0.2, 0.2, 0.2);
-const beakGeo = new BoxGeometry(0.08, 0.06, 0.12);
-const spiderBodyGeo = new BoxGeometry(0.9, 0.35, 0.7);
-const spiderHeadGeo = new BoxGeometry(0.35, 0.3, 0.3);
-const spiderLegGeo = new BoxGeometry(0.55, 0.06, 0.06);
-const creeperBodyGeo = new BoxGeometry(0.45, 0.85, 0.3);
-const creeperFaceGeo = new BoxGeometry(0.3, 0.3, 0.02);
-const snoutGeo = new BoxGeometry(0.16, 0.14, 0.08);
-const hornGeo = new BoxGeometry(0.08, 0.12, 0.08);
-const shroomGeo = new BoxGeometry(0.14, 0.06, 0.14);
-const shroomCapGeo = new BoxGeometry(0.18, 0.06, 0.18);
+// ——— 投射物几何（箭/火球等逐个体网格，量小不实例化；生物部件几何见 mob-instancing.ts） ———
 const arrowGeo = new BoxGeometry(0.05, 0.05, 0.5);
-const swordGeo = new BoxGeometry(0.05, 0.5, 0.05);
-const blazeRodGeo = new BoxGeometry(0.09, 0.9, 0.09);
 const fireballGeo = new BoxGeometry(0.22, 0.22, 0.22);
-const ghastBodyGeo = new BoxGeometry(2.2, 2.2, 2.2);
-const ghastTentacleGeo = new BoxGeometry(0.22, 1.1, 0.22);
-const sheepWoolGeo = new BoxGeometry(1.0, 0.62, 0.62);
-const sheepSlimGeo = new BoxGeometry(0.7, 0.42, 0.42);
-const sheepHeadGeo = new BoxGeometry(0.36, 0.3, 0.3);
-const wolfBodyGeo = new BoxGeometry(0.55, 0.4, 0.9);
-const wolfHeadGeo = new BoxGeometry(0.34, 0.3, 0.34);
-const wolfEarGeo = new BoxGeometry(0.08, 0.14, 0.08);
-const wolfTailGeo = new BoxGeometry(0.12, 0.12, 0.45);
-const collarGeo = new BoxGeometry(0.4, 0.14, 0.14);
-const enderLegGeo = new BoxGeometry(0.18, 1.2, 0.18);
-const enderBodyGeo = new BoxGeometry(0.42, 1.1, 0.26);
-const enderArmGeo = new BoxGeometry(0.12, 1.4, 0.12);
-const enderEyeGeo = new BoxGeometry(0.08, 0.06, 0.02);
-const witherRibGeo = new BoxGeometry(0.7, 0.16, 0.3);
-const witherHeadGeo = new BoxGeometry(0.44, 0.44, 0.44);
-const witherSideHeadGeo = new BoxGeometry(0.34, 0.34, 0.34);
-// 末影龙：躯干纵贯 z 轴（头朝 +z，与 mob 朝向 yaw 一致），部件以体心为原点
-const dragonBodyGeo = new BoxGeometry(1.1, 1, 4.2);
-const dragonNeckGeo = new BoxGeometry(0.55, 0.55, 1.1);
-const dragonHeadGeo = new BoxGeometry(0.85, 0.85, 1.3);
-const dragonSnoutGeo = new BoxGeometry(0.5, 0.4, 0.6);
-const dragonHornGeo = new BoxGeometry(0.12, 0.5, 0.12);
-const dragonTailGeo = new BoxGeometry(0.55, 0.55, 2.2);
-const dragonTailTipGeo = new BoxGeometry(0.3, 0.3, 1.8);
-const dragonWingGeo = new BoxGeometry(3.2, 0.12, 1.7);
-const dragonEyeBandGeo = new BoxGeometry(0.9, 0.15, 0.15);
-const shulkerBaseGeo = new BoxGeometry(0.9, 0.55, 0.9);
-const shulkerLidGeo = new BoxGeometry(0.8, 0.35, 0.8);
-const slimeBodyGeo = new BoxGeometry(1.2, 1.2, 1.2);
-const slimeEyeGeo = new BoxGeometry(0.14, 0.14, 0.04);
-const slimeMouthGeo = new BoxGeometry(0.32, 0.09, 0.04);
-// 幻翼：扁平翼膜 + 小身板（MC 鳐形）
-const phantomBodyGeo = new BoxGeometry(0.9, 0.25, 0.5);
-const phantomWingGeo = new BoxGeometry(1.6, 0.08, 0.6);
-const phantomTailGeo = new BoxGeometry(0.3, 0.06, 0.5);
-const phantomEyeGeo = new BoxGeometry(0.1, 0.08, 0.02);
-// 铁傀儡：高大人形部件（MC 2.7 格村庄守卫——宽肩、过膝长臂、大扁头+大鼻子）
-const golemLegGeo = new BoxGeometry(0.26, 1.1, 0.3);
-const golemBodyGeo = new BoxGeometry(0.95, 1.0, 0.55);
-const golemArmGeo = new BoxGeometry(0.26, 1.35, 0.26);
-const golemHeadGeo = new BoxGeometry(0.58, 0.5, 0.5);
-const golemNoseGeo = new BoxGeometry(0.12, 0.28, 0.14);
-const golemVineGeo = new BoxGeometry(0.14, 0.3, 0.04);
-// 村民：MC 大扁头 + 前垂大鼻子 + 抱臂长袍
-const villagerHeadGeo = new BoxGeometry(0.52, 0.46, 0.46);
-const villagerNoseGeo = new BoxGeometry(0.1, 0.24, 0.12);
-const villagerArmsGeo = new BoxGeometry(0.56, 0.2, 0.3);
-// 受击红闪壳：单位盒按各生物部件包围盒缩放（略大于本体），平时隐藏（共享纯色材质不能染红，Java hurt flash 用罩壳近似）
-const flashGeo = new BoxGeometry(1, 1, 1);
 
 type MobMats = Record<string, Material>;
 
@@ -93,7 +22,7 @@ type MobMats = Record<string, Material>;
  * 取舍：生物材质是无纹理的纯色 Lambert（~80 个/套，GPU 占用极小），缓存常驻页面生命周期、
  * 不随进/出世界 dispose —— 换取同局同种生物部件共享、反复进出世界零重建
  * （此前每次进世界新建一套且从不 dispose，GL program 会累积）。
- * 几何不受影响：部件几何本就是模块级共享常量，与尺寸无关的材质缓存不改变这一现状。
+ * 几何不受影响：部件几何本就是模块级共享常量（mob-instancing.ts MOB_GEOS），与尺寸无关的材质缓存不改变这一现状。
  */
 const mobMatsCache = new Map<RendererKind, MobMats>();
 
@@ -173,316 +102,31 @@ function buildMobMats(mats: AtlasMaterials): MobMats {
   };
 }
 
-function addPart(g: Group, geo: BoxGeometry, mat: Material, x: number, y: number, z: number): Mesh {
-  const m = new Mesh(geo, mat);
-  m.position.set(x, y, z);
-  g.add(m);
-  return m;
-}
-
-/** 职业袍色材质（buildMobMats 预建 robe_<profession> 键） */
-function profRobe(mats: MobMats, prof: Profession): Material {
-  return mats[`robe_${prof}`] ?? mats.robe;
-}
-
-/** 羊毛色材质（buildMobMats 预建 wool_<color> 键） */
-function woolMats(mats: MobMats, key: string): Material {
-  return mats[`wool_${key}`] ?? mats.wolf;
-}
-
-function makeMobMesh(type: MobType, mats: MobMats, mob?: Mob): Group {
-  const g = new Group();
-  switch (type) {
-    case 'zombie':
-      addPart(g, legGeo, mats.zombiePants, -0.13, 0.375, 0);
-      addPart(g, legGeo, mats.zombiePants, 0.13, 0.375, 0);
-      addPart(g, bodyGeo, mats.zombieShirt, 0, 1.1, 0);
-      // MC 僵尸双臂前平举（与肩同高，指向移动方向）
-      addPart(g, armForwardGeo, mats.zombieSkin, -0.34, 1.32, 0.22);
-      addPart(g, armForwardGeo, mats.zombieSkin, 0.34, 1.32, 0.22);
-      addPart(g, headGeo, mats.zombieSkin, 0, 1.66, 0);
-      break;
-    case 'skeleton':
-      addPart(g, legGeo, mats.boneDark, -0.13, 0.375, 0);
-      addPart(g, legGeo, mats.boneDark, 0.13, 0.375, 0);
-      addPart(g, bodyGeo, mats.bone, 0, 1.1, 0);
-      addPart(g, armGeo, mats.bone, -0.34, 1.15, 0);
-      addPart(g, armGeo, mats.bone, 0.34, 1.15, 0);
-      addPart(g, headGeo, mats.bone, 0, 1.66, 0);
-      break;
-    case 'creeper':
-      addPart(g, pigLegGeo, mats.creeperDark, -0.12, 0.15, -0.12);
-      addPart(g, pigLegGeo, mats.creeperDark, 0.12, 0.15, -0.12);
-      addPart(g, pigLegGeo, mats.creeperDark, -0.12, 0.15, 0.12);
-      addPart(g, pigLegGeo, mats.creeperDark, 0.12, 0.15, 0.12);
-      addPart(g, creeperBodyGeo, mats.creeper, 0, 0.85, 0);
-      addPart(g, headGeo, mats.creeper, 0, 1.48, 0);
-      addPart(g, creeperFaceGeo, mats.creeperDark, 0, 1.48, 0.22);
-      break;
-    case 'spider':
-      addPart(g, spiderBodyGeo, mats.spider, 0, 0.4, 0);
-      addPart(g, spiderHeadGeo, mats.spider, 0, 0.35, 0.5);
-      for (const side of [-1, 1]) {
-        for (let i = 0; i < 4; i++) {
-          addPart(g, spiderLegGeo, mats.spider, side * 0.6, 0.3, -0.3 + i * 0.2);
-        }
-      }
-      break;
-    case 'pig':
-      addPart(g, pigLegGeo, mats.pigDark, -0.25, 0.15, -0.25);
-      addPart(g, pigLegGeo, mats.pigDark, 0.25, 0.15, -0.25);
-      addPart(g, pigLegGeo, mats.pigDark, -0.25, 0.15, 0.25);
-      addPart(g, pigLegGeo, mats.pigDark, 0.25, 0.15, 0.25);
-      addPart(g, bodyWideGeo, mats.pig, 0, 0.55, 0);
-      addPart(g, headGeo, mats.pig, 0, 0.6, 0.55);
-      addPart(g, snoutGeo, mats.pigDark, 0, 0.5, 0.79);
-      break;
-    case 'cow':
-      addPart(g, pigLegGeo, mats.cow, -0.25, 0.15, -0.25);
-      addPart(g, pigLegGeo, mats.cow, 0.25, 0.15, -0.25);
-      addPart(g, pigLegGeo, mats.cow, -0.25, 0.15, 0.25);
-      addPart(g, pigLegGeo, mats.cow, 0.25, 0.15, 0.25);
-      addPart(g, bodyWideGeo, mats.cow, 0, 0.6, 0);
-      addPart(g, headGeo, mats.cowLight, 0, 0.75, 0.55);
-      addPart(g, hornGeo, mats.cowLight, -0.18, 1.02, 0.55);
-      addPart(g, hornGeo, mats.cowLight, 0.18, 1.02, 0.55);
-      break;
-    case 'mooshroom':
-      // 红身牛 + 背上蘑菇伞 + 白斑（MC 蘑菇牛）
-      addPart(g, pigLegGeo, mats.mooshroom, -0.25, 0.15, -0.25);
-      addPart(g, pigLegGeo, mats.mooshroom, 0.25, 0.15, -0.25);
-      addPart(g, pigLegGeo, mats.mooshroom, -0.25, 0.15, 0.25);
-      addPart(g, pigLegGeo, mats.mooshroom, 0.25, 0.15, 0.25);
-      addPart(g, bodyWideGeo, mats.mooshroom, 0, 0.6, 0);
-      addPart(g, headGeo, mats.mooshroomSpot, 0, 0.75, 0.55);
-      addPart(g, hornGeo, mats.mooshroomSpot, -0.18, 1.02, 0.55);
-      addPart(g, hornGeo, mats.mooshroomSpot, 0.18, 1.02, 0.55);
-      // 背上三朵蘑菇（红伞白斑小方块）
-      addPart(g, shroomGeo, mats.mooshroom, -0.15, 1.05, -0.1);
-      addPart(g, shroomCapGeo, mats.mooshroomSpot, -0.15, 1.13, -0.1);
-      addPart(g, shroomGeo, mats.mooshroom, 0.18, 1.05, 0.15);
-      addPart(g, shroomCapGeo, mats.mooshroomSpot, 0.18, 1.13, 0.15);
-      addPart(g, shroomGeo, mats.mooshroom, 0, 1.05, -0.25);
-      addPart(g, shroomCapGeo, mats.mooshroomSpot, 0, 1.13, -0.25);
-      break;
-    case 'zombified_piglin':
-      // 僵尸猪灵：腐粉与尸斑拼接的人形 + 金剑（MC 标志性中立怪；与僵尸同款双臂前平举）
-      addPart(g, legGeo, mats.piglinRot, -0.13, 0.375, 0);
-      addPart(g, legGeo, mats.piglinRot, 0.13, 0.375, 0);
-      addPart(g, bodyGeo, mats.piglinSkin, 0, 1.1, 0);
-      addPart(g, armForwardGeo, mats.piglinSkin, -0.34, 1.32, 0.22);
-      addPart(g, armForwardGeo, mats.piglinRot, 0.34, 1.32, 0.22);
-      addPart(g, headGeo, mats.piglinSkin, 0, 1.66, 0);
-      addPart(g, snoutGeo, mats.piglinRot, 0, 1.6, 0.22);
-      addPart(g, swordGeo, mats.goldSword, 0.42, 1.0, 0.1);
-      break;
-    case 'piglin':
-      // 猪灵：粉棕皮猪人 + 金剑（MC；金甲玩家的朋友）
-      addPart(g, legGeo, mats.piglinDark, -0.13, 0.375, 0);
-      addPart(g, legGeo, mats.piglinDark, 0.13, 0.375, 0);
-      addPart(g, bodyGeo, mats.piglinFlesh, 0, 1.1, 0);
-      addPart(g, armGeo, mats.piglinFlesh, -0.34, 1.15, 0);
-      addPart(g, armGeo, mats.piglinFlesh, 0.34, 1.15, 0);
-      addPart(g, headGeo, mats.piglinFlesh, 0, 1.66, 0);
-      addPart(g, snoutGeo, mats.piglinDark, 0, 1.6, 0.22);
-      addPart(g, swordGeo, mats.goldSword, 0.42, 1.0, 0.1);
-      break;
-    case 'piglin_brute':
-      // 猪灵蛮兵：深褐魁梧猪人 + 金斧（更高大，MC 堡垒守卫）
-      addPart(g, legGeo, mats.bruteDark, -0.15, 0.375, 0);
-      addPart(g, legGeo, mats.bruteDark, 0.15, 0.375, 0);
-      addPart(g, bodyGeo, mats.brute, 0, 1.15, 0);
-      addPart(g, armGeo, mats.brute, -0.36, 1.2, 0);
-      addPart(g, armGeo, mats.brute, 0.36, 1.2, 0);
-      addPart(g, headGeo, mats.brute, 0, 1.72, 0);
-      addPart(g, snoutGeo, mats.bruteDark, 0, 1.66, 0.22);
-      addPart(g, swordGeo, mats.goldSword, 0.44, 1.05, 0.1);
-      break;
-    case 'blaze':
-      // 烈焰人：明黄头 + 环身烈焰棒（MC 标志造型）
-      addPart(g, headGeo, mats.blaze, 0, 1.3, 0);
-      for (const [rx, rz] of [[0.3, 0], [-0.3, 0], [0, 0.3], [0, -0.3]] as const) {
-        addPart(g, blazeRodGeo, mats.blazeRod, rx, 0.85, rz);
-      }
-      break;
-    case 'wither_skeleton':
-      // 凋灵骷髅：炭黑高个 + 石剑
-      addPart(g, legGeo, mats.wither, -0.13, 0.45, 0);
-      addPart(g, legGeo, mats.wither, 0.13, 0.45, 0);
-      addPart(g, bodyGeo, mats.wither, 0, 1.25, 0);
-      addPart(g, armGeo, mats.wither, -0.34, 1.3, 0);
-      addPart(g, armGeo, mats.wither, 0.34, 1.3, 0);
-      addPart(g, headGeo, mats.wither, 0, 1.85, 0);
-      addPart(g, swordGeo, mats.arrow, 0.42, 1.1, 0.1);
-      break;
-    case 'enderman':
-      // 末影人：炭黑高个（2.9 高）+ 紫瞳 + 垂手长臂（MC 标志造型）
-      addPart(g, enderLegGeo, mats.enderman, -0.12, 0.6, 0);
-      addPart(g, enderLegGeo, mats.enderman, 0.12, 0.6, 0);
-      addPart(g, enderBodyGeo, mats.enderman, 0, 1.75, 0);
-      addPart(g, enderArmGeo, mats.enderman, -0.36, 1.3, 0);
-      addPart(g, enderArmGeo, mats.enderman, 0.36, 1.3, 0);
-      addPart(g, headGeo, mats.enderman, 0, 2.55, 0);
-      addPart(g, enderEyeGeo, mats.enderEyes, -0.09, 2.6, 0.22);
-      addPart(g, enderEyeGeo, mats.enderEyes, 0.09, 2.6, 0.22);
-      break;
-    case 'wither':
-      // 凋灵 Boss：三头骨 + 炭黑骨架体（MC 标志造型）
-      addPart(g, witherRibGeo, mats.witherBody, 0, 1.0, 0);
-      addPart(g, witherRibGeo, mats.witherBody, 0, 1.35, 0);
-      addPart(g, witherHeadGeo, mats.witherBody, 0, 1.8, 0);
-      addPart(g, witherSideHeadGeo, mats.witherBody, -0.42, 1.55, 0);
-      addPart(g, witherSideHeadGeo, mats.witherBody, 0.42, 1.55, 0);
-      break;
-    case 'shulker':
-      // 潜影贝：紫壳方盒 + 微开顶盖（MC 标志造型；固着不动）
-      addPart(g, shulkerBaseGeo, mats.shulkerShell, 0, 0.3, 0);
-      addPart(g, shulkerLidGeo, mats.shulkerTop, 0.04, 0.72, 0.04);
-      break;
-    case 'slime':
-      // 史莱姆：绿方块 + 双眼与嘴（MC 标志造型；体型由 slimeSize 缩放）
-      addPart(g, slimeBodyGeo, mats.slimeOuter, 0, 0.7, 0);
-      addPart(g, slimeEyeGeo, mats.slimeDark, -0.2, 0.85, 0.62);
-      addPart(g, slimeEyeGeo, mats.slimeDark, 0.2, 0.85, 0.62);
-      addPart(g, slimeMouthGeo, mats.slimeDark, 0, 0.5, 0.62);
-      break;
-    case 'ender_dragon': {
-      // 末影龙 Boss：黑紫长躯 + 双翼展开 + 紫眼（MC 标志造型）；部件以体心为原点
-      addPart(g, dragonBodyGeo, mats.dragonBody, 0, 0, 0);
-      addPart(g, dragonNeckGeo, mats.dragonBody, 0, 0.3, 2.3);
-      addPart(g, dragonHeadGeo, mats.dragonBody, 0, 0.45, 3.1);
-      addPart(g, dragonSnoutGeo, mats.dragonBody, 0, 0.3, 3.9);
-      addPart(g, dragonEyeBandGeo, mats.dragonEye, 0, 0.65, 3.45);
-      addPart(g, dragonHornGeo, mats.dragonWing, -0.25, 1.05, 2.9);
-      addPart(g, dragonHornGeo, mats.dragonWing, 0.25, 1.05, 2.9);
-      addPart(g, dragonTailGeo, mats.dragonBody, 0, -0.1, -2.8);
-      addPart(g, dragonTailTipGeo, mats.dragonBody, 0, -0.05, -4.6);
-      const lw = addPart(g, dragonWingGeo, mats.dragonWing, -2.1, 0.7, 0.4);
-      lw.rotation.z = 0.5;
-      const rw = addPart(g, dragonWingGeo, mats.dragonWing, 2.1, 0.7, 0.4);
-      rw.rotation.z = -0.5;
-      break;
-    }
-    case 'ghast':
-      // 恶魂：雪白巨体 + 下垂触手（MC 下界空中巨怪）
-      addPart(g, ghastBodyGeo, mats.ghast, 0, 1.2, 0);
-      for (const [tx, tz] of [[-0.7, -0.7], [0, -0.7], [0.7, -0.7], [-0.7, 0], [0.7, 0], [-0.7, 0.7], [0, 0.7], [0.7, 0.7]] as const) {
-        addPart(g, ghastTentacleGeo, mats.ghastTear, tx, -0.15, tz);
-      }
-      break;
-    case 'chicken':
-      addPart(g, chickenBodyGeo, mats.chicken, 0, 0.35, 0);
-      addPart(g, chickenHeadGeo, mats.chicken, 0, 0.62, 0.2);
-      addPart(g, beakGeo, mats.beak, 0, 0.58, 0.38);
-      break;
-    case 'villager': {
-      // 长袍身体 + MC 大扁头 + 前垂大鼻子 + 抱臂（横袖）；袍色随职业（农民/图书管理员/石匠/牧师/皮匠）
-      const robe = mob ? profRobe(mats, professionOf(mob.id)) : mats.robe;
-      addPart(g, legGeo, robe, -0.13, 0.375, 0);
-      addPart(g, legGeo, robe, 0.13, 0.375, 0);
-      addPart(g, bodyGeo, robe, 0, 1.1, 0);
-      addPart(g, villagerHeadGeo, mats.villagerSkin, 0, 1.64, 0);
-      // 大鼻子：面中部前垂（MC 村民标志）
-      addPart(g, villagerNoseGeo, mats.villagerSkin, 0, 1.52, 0.27);
-      // 抱臂横袖（MC 村民双手交叠于袍前）
-      addPart(g, villagerArmsGeo, robe, 0, 1.12, 0.2);
-      break;
-    }
-    case 'sheep': {
-      // 羊：毛壳（按毛色）+ 头；剪过毛的只剩瘦脸与细身
-      const woolMat = woolMats(mats, mob?.woolColor ?? 'white');
-      addPart(g, pigLegGeo, mats.sheepFace, -0.2, 0.15, -0.2);
-      addPart(g, pigLegGeo, mats.sheepFace, 0.2, 0.15, -0.2);
-      addPart(g, pigLegGeo, mats.sheepFace, -0.2, 0.15, 0.2);
-      addPart(g, pigLegGeo, mats.sheepFace, 0.2, 0.15, 0.2);
-      if (mob?.sheared) {
-        addPart(g, sheepSlimGeo, mats.sheepFace, 0, 0.5, 0);
-      } else {
-        addPart(g, sheepWoolGeo, woolMat, 0, 0.62, 0);
-      }
-      addPart(g, sheepHeadGeo, mats.sheepFace, 0, mob?.sheared ? 0.72 : 0.78, 0.5);
-      break;
-    }
-    case 'wolf': {
-      // 狼：四足 + 头 + 竖耳 + 尾；驯服的有红项圈（MC）
-      addPart(g, pigLegGeo, mats.wolfDark, -0.18, 0.15, -0.2);
-      addPart(g, pigLegGeo, mats.wolfDark, 0.18, 0.15, -0.2);
-      addPart(g, pigLegGeo, mats.wolfDark, -0.18, 0.15, 0.2);
-      addPart(g, pigLegGeo, mats.wolfDark, 0.18, 0.15, 0.2);
-      addPart(g, wolfBodyGeo, mats.wolf, 0, 0.55, 0);
-      addPart(g, wolfHeadGeo, mats.wolf, 0, 0.72, 0.45);
-      addPart(g, wolfEarGeo, mats.wolfDark, -0.12, 0.95, 0.42);
-      addPart(g, wolfEarGeo, mats.wolfDark, 0.12, 0.95, 0.42);
-      addPart(g, wolfTailGeo, mats.wolf, 0, 0.68, -0.5);
-      if (mob?.tamed) addPart(g, collarGeo, mats.collar, 0, 0.62, 0.28);
-      break;
-    }
-    case 'phantom': {
-      // 幻翼：扁平灰身 + 双翼展开微翘 + 尾鳍（MC 鳐形；盘旋姿态由整体朝向表达）
-      addPart(g, phantomBodyGeo, mats.phantomBody, 0, 0.1, 0);
-      addPart(g, phantomEyeGeo, mats.phantomEye, -0.18, 0.18, 0.26);
-      addPart(g, phantomEyeGeo, mats.phantomEye, 0.18, 0.18, 0.26);
-      const lw = addPart(g, phantomWingGeo, mats.phantomWing, -1.1, 0.15, -0.1);
-      lw.rotation.z = 0.18;
-      const rw = addPart(g, phantomWingGeo, mats.phantomWing, 1.1, 0.15, -0.1);
-      rw.rotation.z = -0.18;
-      addPart(g, phantomTailGeo, mats.phantomWing, 0, 0.12, -0.5);
-      break;
-    }
-    case 'iron_golem':
-      // 铁傀儡：宽肩厚背 + 过膝垂臂 + 大扁头与大鼻子 + 藤蔓斑（MC 2.7 格村庄守卫）
-      addPart(g, golemLegGeo, mats.golemIron, -0.18, 0.55, 0);
-      addPart(g, golemLegGeo, mats.golemIron, 0.18, 0.55, 0);
-      addPart(g, golemBodyGeo, mats.golemIron, 0, 1.6, 0);
-      addPart(g, golemArmGeo, mats.golemIronDark, -0.6, 1.35, 0);
-      addPart(g, golemArmGeo, mats.golemIronDark, 0.6, 1.35, 0);
-      addPart(g, golemHeadGeo, mats.golemIron, 0, 2.35, 0);
-      addPart(g, golemNoseGeo, mats.golemIronDark, 0, 2.26, 0.29);
-      addPart(g, golemVineGeo, mats.golemVine, 0.34, 1.7, 0.28);
-      break;
-  }
-  // 受击红闪壳：按部件包围盒生成略大的外套盒，平时隐藏；存 userData.flash 供帧同步显隐（含死亡态全程）
-  const flash = new Mesh(flashGeo, mats.hurtFlash);
-  const bb = new Box3().setFromObject(g);
-  bb.getCenter(flash.position);
-  bb.getSize(flash.scale);
-  flash.scale.addScalar(0.12); // 罩壳比本体略大一圈
-  flash.visible = false;
-  g.add(flash);
-  g.userData.flash = flash;
-  return g;
-}
-
 const arrowForward = new Vector3(0, 0, 1);
 const arrowDir = new Vector3();
 /** 帧循环复用的去重集合（避免每帧分配） */
-const seenScratch = new Set<string>();
 const seenArrowsScratch = new Set<number>();
-/** 敌对生物类型（朝向玩家；其余朝移动方向）。模块级 Set 常量：每生物每帧查成员，Set.has 替代数组线性 includes */
-const HOSTILE_TYPES: ReadonlySet<MobType> = new Set(['zombie', 'skeleton', 'spider', 'creeper', 'phantom', 'iron_golem']);
-/** 受击红闪阈值（秒）：hurtImmune 从 0.5 倒数，剩余 > 0.25 期间显示红壳 ≈ 受击后 0.25s 红闪（Java hurt flash） */
-const HURT_FLASH_LEFT = 0.25;
-/** 距离门（格²）：水平距玩家超 48 格的生物只同步位置，跳过朝向/缩放/红闪（远景不可辨；AI 在 lib/sim，与网格无关） */
-const FAR_SYNC_DIST_SQ = 48 * 48;
-/** 网格键缓存：键含剪毛/驯服状态位，状态位不变就不重建模板字符串（生物对象与 mobs 数组同生命周期，WeakMap 随其回收） */
-const meshKeyCache = new WeakMap<Mob, { sheared: boolean; tamed: boolean; key: string }>();
 
-/** 生物渲染与 AI 驱动（仅生存模式；网格按 id 复用） */
+/**
+ * 生物渲染（仅生存模式）。生物网格全部实例化：同种同变体的每个部件层一个 InstancedMesh，
+ * 每帧按生物位姿合成实例矩阵（位姿/红闪/死亡动画/距离门逻辑见 mob-instancing.ts），
+ * draw call 从 O(生物数×部件数) 降到 O(变体数×部件层数)；AI 已收口到 lib/sim.ts tickWorld。
+ */
 export function Mobs() {
   const groupRef = useRef<Group>(null);
-  const meshMap = useRef(new Map<string, Group>());
+  const poolsRef = useRef<MobInstancePools | null>(null);
   const arrowMeshMap = useRef(new Map<number, Mesh>());
   const [mobMats, setMobMats] = useState<MobMats | null>(null);
   const kind = useRendererKind();
 
-  // 按渲染器类型取材质表（模块级缓存，进出世界不重建）；卸载（退出世界）时清空怪物与网格
+  // 按渲染器类型取材质表（模块级缓存，进出世界不重建）；卸载（退出世界）时清空怪物与实例池
   useEffect(() => {
     void getAtlasMaterials(kind).then((m) => setMobMats(getMobMats(kind, m)));
-    const meshes = meshMap.current;
     const arrowMeshes = arrowMeshMap.current;
     return () => {
       clearMobs();
-      meshes.clear();
+      poolsRef.current?.dispose();
+      poolsRef.current = null;
       arrowMeshes.clear();
     };
   }, [kind]);
@@ -494,64 +138,20 @@ export function Mobs() {
     // 暂停时冻结网格同步（画面停在暂停前最后一帧；AI 由 sim 统一暂停）
     if (useGameStore.getState().paused) return;
 
-    // 同步生物网格（材质表就绪后才创建）
+    // 同步生物实例（材质表就绪后才建池；渲染器切换导致材质表换对象时重建池）
     if (mobMats) {
-      const seen = seenScratch;
-      seen.clear();
-      for (const m of mobs) {
-        // 羊剪毛/狼驯服会换模型：网格键带状态位，状态变时旧网格被回收重建；键按生物缓存，状态位不变不重建模板字符串
-        let kc = meshKeyCache.get(m);
-        const sheared = !!m.sheared;
-        const tamed = !!m.tamed;
-        if (!kc || kc.sheared !== sheared || kc.tamed !== tamed) {
-          kc = { sheared, tamed, key: `${m.id}:${m.sheared ? 1 : 0}${m.tamed ? 1 : 0}` };
-          meshKeyCache.set(m, kc);
-        }
-        const meshKey = kc.key;
-        seen.add(meshKey);
-        let mesh = meshMap.current.get(meshKey);
-        if (!mesh) {
-          mesh = makeMobMesh(m.type, mobMats, m);
-          group.add(mesh);
-          meshMap.current.set(meshKey, mesh);
-        }
-      mesh.position.set(m.x, m.y, m.z);
-      // 距离门：水平距玩家 >48 格只同步位置（朝向/缩放/红闪冻结在上次同步值，远景不可辨；
-      // Boss 条/吼声等远程消费都读 lib 状态而非网格，不受影响）
-      const pdx = m.x - playerPosition.x;
-      const pdz = m.z - playerPosition.z;
-      if (pdx * pdx + pdz * pdz > FAR_SYNC_DIST_SQ) continue;
-      // 朝向：敌对朝玩家，被动朝移动方向
-      const def = m.fleeTimer > 0 || !HOSTILE_TYPES.has(m.type);
-      mesh.rotation.y = def && m.wanderMoving
-        ? Math.atan2(Math.cos(m.wanderDir), Math.sin(m.wanderDir))
-        : Math.atan2(playerPosition.x - m.x, playerPosition.z - m.z);
-      // 苦力怕引爆时闪烁膨胀；幼体体型 0.55；史莱姆按体型档缩放（大 1.4 / 中 0.7 / 小 0.35）
-      if (m.type === 'creeper' && m.ignite >= 0) {
-        mesh.scale.setScalar(1 + 0.08 * Math.sin(performance.now() / 50));
-      } else if (m.type === 'slime') {
-        mesh.scale.setScalar((m.slimeSize ?? 4) * 0.35);
-      } else {
-        mesh.scale.setScalar(m.baby ? 0.55 : 1);
+      let pools = poolsRef.current;
+      if (pools && pools.materials !== mobMats) {
+        pools.dispose();
+        pools = null;
+        poolsRef.current = null;
       }
-      // 受击红闪（0.25s；死亡态全程保持红，MC 尸体倒地期间为红）与死亡倒地动画（绕 z 倒 90° + 缓沉，结束白烟见 mobs.ts）
-      const flash = mesh.userData.flash as Mesh | undefined;
-      const dying = m.deathTimer !== undefined;
-      if (flash) flash.visible = dying || (m.hurtImmune ?? 0) > HURT_FLASH_LEFT;
-      if (dying) {
-        const p = 1 - Math.max(0, m.deathTimer ?? 0) / MOB_DEATH_DURATION; // 进度 0 → 1
-        mesh.rotation.z = -(Math.PI / 2) * Math.min(1, p * 1.5); // 前 2/3 时间倒完，余下躺地
-        mesh.position.y -= p * 0.3; // 缓沉，配合结束白烟掩盖消失（共享材质无法逐生物调透明）
-      } else if (mesh.rotation.z !== 0) {
-        mesh.rotation.z = 0; // 网格按 id 复用：非死亡态复位
+      if (!pools) {
+        pools = new MobInstancePools(mobMats);
+        group.add(pools.root);
+        poolsRef.current = pools;
       }
-      }
-      for (const [id, mesh] of meshMap.current) {
-        if (!seen.has(id)) {
-          mesh.removeFromParent();
-          meshMap.current.delete(id);
-        }
-      }
+      pools.sync(mobs, playerPosition.x, playerPosition.z, performance.now());
 
       // 同步箭网格
       const seenArrows = seenArrowsScratch;
