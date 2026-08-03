@@ -11,6 +11,8 @@ export interface SurvivalEnv {
   headInWater: boolean;
   onGround: boolean;
   velY: number;
+  /** 藤蔓攀爬中（MC Java：onClimbable 每 tick 重置摔落距离，攀爬免除摔落伤害） */
+  climbing?: boolean;
 }
 
 /** 可变的生存记忆（组件用 ref 持有） */
@@ -50,11 +52,14 @@ export function tickSurvival(
 ): void {
   if (s.worldMode !== 'survival') return;
 
-  // 掉落伤害：空中累计下落距离，着地结算（>3 格起，MC 公式 floor(dist-3)；MC 摔落不吃护甲）
-  if (!env.flying && !env.inWater && !env.onGround && env.velY < 0) {
+  // 掉落伤害：空中累计下落距离，着地结算（>3 格起，MC 公式 floor(dist-3)；MC 摔落不吃护甲）。
+  // 攀爬（藤蔓）中不累计且清零既有下落距离（MC Java：onClimbable 每 tick resetFallDistance，抓住藤蔓即安全）
+  if (!env.flying && !env.inWater && !env.climbing && !env.onGround && env.velY < 0) {
     mem.fallDist -= env.velY * env.dt;
   }
-  if (env.onGround || env.inWater || env.flying) {
+  if (env.climbing) {
+    mem.fallDist = 0;
+  } else if (env.onGround || env.inWater || env.flying) {
     if (env.onGround && !env.inWater && !env.flying && mem.fallDist > 3) {
       actions.damagePlayer(Math.floor(mem.fallDist - 3), { bypassArmor: true });
     }

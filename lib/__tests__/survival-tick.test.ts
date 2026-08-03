@@ -153,4 +153,33 @@ describe('生存数值 tick', () => {
     resetSurvivalMem(mem);
     expect(mem).toEqual({ fallDist: 0, air: 15, regenTick: 0, witherTick: 0, regenPotionTick: 0 });
   });
+
+  it('藤蔓攀爬：攀爬中不累计下落距离，抓住藤蔓清零既有下落（MC Java 攀爬免摔伤）', () => {
+    const mem = makeMem();
+    const dmg: number[] = [];
+    const actions = { damagePlayer: (a: number) => dmg.push(a), setHealth: () => {}, setHunger: () => {}, setSaturation: () => {} };
+    const s = { worldMode: 'survival', health: 20, hunger: 20, saturation: 5 };
+    // 高处坠落 8 格后抓住藤蔓（climbing）：既有 fallDist 清零
+    mem.fallDist = 8;
+    tickSurvival({ ...ENV, onGround: false, velY: -4, climbing: true }, mem, s, actions);
+    expect(mem.fallDist).toBe(0);
+    // 攀爬中继续贴着藤蔓下滑/悬停：不累计下落距离
+    tickSurvival({ ...ENV, onGround: false, velY: -1, climbing: true }, mem, s, actions);
+    expect(mem.fallDist).toBe(0);
+    // 松手落地（不再攀爬）：按清零后的距离结算，无摔落伤害
+    tickSurvival({ ...ENV, onGround: true, velY: 0, climbing: false }, mem, s, actions);
+    expect(dmg).toEqual([]);
+  });
+
+  it('藤蔓攀爬：攀爬中落地不受摔落伤害（climbing 优先于着地结算）', () => {
+    const mem = makeMem();
+    mem.fallDist = 10;
+    const dmg: number[] = [];
+    const actions = { damagePlayer: (a: number) => dmg.push(a), setHealth: () => {}, setHunger: () => {}, setSaturation: () => {} };
+    const s = { worldMode: 'survival', health: 20, hunger: 20, saturation: 5 };
+    // 踩着地面但仍贴藤（如藤格落地）：按攀爬处理清零，不吃 10 格摔落伤害
+    tickSurvival({ ...ENV, onGround: true, climbing: true }, mem, s, actions);
+    expect(dmg).toEqual([]);
+    expect(mem.fallDist).toBe(0);
+  });
 });
