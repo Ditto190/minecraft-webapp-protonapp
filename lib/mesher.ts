@@ -29,6 +29,12 @@ export interface GeometryData {
   /** 逐顶点 AO 亮度（顶点色，与材质颜色相乘） */
   colors: Float32Array;
   indices: Uint32Array;
+  /**
+   * 逐顶点 atlas 格号（块单位 UV 的 tile 基址，shader 内 tileBase + fract(uv) 拼装最终 UV）。
+   * 仅 chunk 几何（buildFromGrid，块单位 UV 新约定）携带；单方块几何
+   * （buildBlockGeometry/buildTileGeometry，atlas 终值 UV 旧约定）无此字段
+   */
+  tiles?: Float32Array;
 }
 
 type Vec3 = [number, number, number];
@@ -44,6 +50,18 @@ interface FaceCorner {
 interface Face {
   dir: Vec3;
   corners: FaceCorner[];
+  /** uv[0] 增长方向的世界轴向量（贪心合并发射用） */
+  uAxis: Vec3;
+  /** uv[1] 增长方向的世界轴向量 */
+  vAxis: Vec3;
+  /** u/v 轴下标（0=x,1=y,2=z） */
+  ui: number;
+  vi: number;
+  /** 角点下标：按 (cu,cv) 取 corners 下标（合并颜色一致性判断用） */
+  c00: number;
+  c10: number;
+  c01: number;
+  c11: number;
 }
 
 /** AO 亮度曲线：遮蔽等级 0..3 → 顶点色 */
@@ -84,9 +102,17 @@ const RAW_FACES: { dir: Vec3; corners: { pos: Vec3; uv: [number, number] }[] }[]
   ] },
 ];
 
-/** 预计算每个面每个顶点的 AO 探测方向（法线的两条切轴 × 顶点所在侧） */
+/** 预计算每个面每个顶点的 AO 探测方向（法线的两条切轴 × 顶点所在侧）+ uv 轴向量/角点索引 */
 const FACES: Face[] = RAW_FACES.map(({ dir, corners }) => {
   const [ta, tb] = ([0, 1, 2] as const).filter((i) => dir[i] === 0);
+  const idxOf = (u: number, v: number): number => corners.findIndex((c) => c.uv[0] === u && c.uv[1] === v);
+  const c00 = idxOf(0, 0);
+  const c10 = idxOf(1, 0);
+  const c01 = idxOf(0, 1);
+  const c11 = idxOf(1, 1);
+  const sub = (a: Vec3, b: Vec3): Vec3 => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+  const uAxis = sub(corners[c11].pos, corners[c01].pos);
+  const vAxis = sub(corners[c01].pos, corners[c00].pos);
   return {
     dir,
     corners: corners.map(({ pos, uv }) => {
@@ -96,6 +122,14 @@ const FACES: Face[] = RAW_FACES.map(({ dir, corners }) => {
       side2[tb] = pos[tb] === 1 ? 1 : -1;
       return { pos, uv, side1, side2 };
     }),
+    uAxis,
+    vAxis,
+    ui: uAxis[0] !== 0 ? 0 : uAxis[1] !== 0 ? 1 : 2,
+    vi: vAxis[0] !== 0 ? 0 : vAxis[1] !== 0 ? 1 : 2,
+    c00,
+    c10,
+    c01,
+    c11,
   };
 });
 
@@ -111,6 +145,18 @@ class GeometryBuilder {
   private uvs: number[] = [];
   private colors: number[] = [];
   private indices: number[] = [];
+  private tiles: number[] = [];
+
+  /**
+   * chunkUV=true：块单位 UV（0..w/0..h）+ 逐顶点 tile 基址（atlas 拼装在 shader 内完成，配合
+   * 贪心合并跨格重复采样）；chunkUV=false：atlas 终值 UV 旧约定（单方块几何，材质无注入）
+   */
+  constructor(private readonly chunkUV = false) {}
+
+  private pushTile(tile: number): void {
+    // 水面 tile 走独立 strip 纹理（shader 不读 aTile），占位 0
+    this.tiles.push(tile === WATER_UV_TILE ? 0 : tile);
+  }
 
   addFace(x: number, y: number, z: number, face: Face, tile: number, ao: readonly number[], topY = 1, light = 0, sky = 1, tint?: readonly [number, number, number]): void {
     const ndx = this.positions.length / 3;
@@ -140,6 +186,43 @@ class GeometryBuilder {
     }
   }
 
+  /**
+   * 合并矩形发射（仅 chunkUV 模式）：w×h 共面单位面合并为一个四边形。
+   * 位置沿面内 u/v 轴拉伸（负轴角点取 1-c，保证矩形落在 [0,w]×[0,h] 偏移内）；
+   * UV 为块单位（0..w, 0..h），shader fract 后与逐格平铺逐像素一致；
+   * 颜色取扫掠描述子存储值（合并已保证沿合并方向一致，插值结果与逐格发射相同）；
+   * 单格矩形（w=h=1）按 AO 翻转三角剖分，合并矩形颜色沿合并方向定常、与剖分无关
+   */
+  addMergedFace(x: number, y: number, z: number, face: Face, tile: number, cols: Float32Array, co: number, ao: readonly number[], topY: number, w: number, h: number): void {
+    const ndx = this.positions.length / 3;
+    const { ui, vi, uAxis, vAxis } = face;
+    const uPos = uAxis[ui] > 0;
+    const vPos = vAxis[vi] > 0;
+    // 沿 y 的拉伸量（侧面竖直方向；±y 面不拉伸）
+    const yExt = face.dir[1] !== 0 ? 1 : ui === 1 ? w : h;
+    for (let i = 0; i < 4; i++) {
+      const c = face.corners[i];
+      const cu = c.uv[0];
+      const cv = c.uv[1];
+      let px = c.pos[0];
+      let pz = c.pos[2];
+      if (face.dir[0] === 0) px = (ui === 0 ? (uPos ? cu : 1 - cu) * w : (vPos ? cv : 1 - cv) * h);
+      if (face.dir[2] === 0) pz = (ui === 2 ? (uPos ? cu : 1 - cu) * w : (vPos ? cv : 1 - cv) * h);
+      // 顶边水面向 topY 下沉（竖直合并时顶边在最高格：(yExt-1)+topY）
+      const py = c.pos[1] === 1 ? yExt - 1 + topY : 0;
+      this.positions.push(x + px, y + py, z + pz);
+      this.normals.push(face.dir[0], face.dir[1], face.dir[2]);
+      this.uvs.push(cu * w, cv * h);
+      this.pushTile(tile);
+      this.colors.push(cols[co + i * 3], cols[co + i * 3 + 1], cols[co + i * 3 + 2]);
+    }
+    if (ao[0] + ao[3] < ao[1] + ao[2]) {
+      this.indices.push(ndx, ndx + 1, ndx + 3, ndx, ndx + 3, ndx + 2);
+    } else {
+      this.indices.push(ndx, ndx + 1, ndx + 2, ndx + 2, ndx + 1, ndx + 3);
+    }
+  }
+
   build(): GeometryData {
     return {
       positions: new Float32Array(this.positions),
@@ -147,6 +230,7 @@ class GeometryBuilder {
       uvs: new Float32Array(this.uvs),
       colors: new Float32Array(this.colors),
       indices: new Uint32Array(this.indices),
+      tiles: this.chunkUV ? new Float32Array(this.tiles) : undefined,
     };
   }
 
@@ -163,7 +247,12 @@ class GeometryBuilder {
     for (const [px, pz, u, v] of corners) {
       this.positions.push(x + px, y, z + pz);
       this.normals.push(0, 1, 0);
-      this.uvs.push(...atlasUV(tile, u, v));
+      if (this.chunkUV) {
+        this.uvs.push(u, v);
+        this.pushTile(tile);
+      } else {
+        this.uvs.push(...atlasUV(tile, u, v));
+      }
       const b = Math.max(AO_CURVE[ao[3]] * sky, light);
       this.colors.push(b, b, b);
     }
@@ -184,7 +273,12 @@ class GeometryBuilder {
     for (const [px, pz, u, v] of corners) {
       this.positions.push(x + px, y, z + pz);
       this.normals.push(0, -1, 0);
-      this.uvs.push(...atlasUV(tile, u, v));
+      if (this.chunkUV) {
+        this.uvs.push(u, v);
+        this.pushTile(tile);
+      } else {
+        this.uvs.push(...atlasUV(tile, u, v));
+      }
       const b = Math.max(AO_CURVE[ao[0]] * sky, light);
       this.colors.push(b, b, b);
     }
@@ -215,8 +309,13 @@ class GeometryBuilder {
         const pz = d[2] === 0 ? (c.pos[2] === 0 ? minZ : maxZ) : d[2] === 1 ? maxZ : minZ;
         this.positions.push(x + px, y + py, z + pz);
         this.normals.push(d[0], d[1], d[2]);
-        const [u, v] = atlasUV(tile, c.uv[0], c.uv[1]);
-        this.uvs.push(u, v);
+        if (this.chunkUV) {
+          this.uvs.push(c.uv[0], c.uv[1]);
+          this.pushTile(tile);
+        } else {
+          const [u, v] = atlasUV(tile, c.uv[0], c.uv[1]);
+          this.uvs.push(u, v);
+        }
         const b = Math.max(AO_CURVE[ao[i]] * sky, light);
         this.colors.push(b, b, b);
       }
@@ -243,7 +342,12 @@ class GeometryBuilder {
         for (const [px, py, pz, u] of q) {
           this.positions.push(x + px, y + py, z + pz);
           this.normals.push(0, 1, 0);
-          this.uvs.push(...atlasUV(tile, u, py as number));
+          if (this.chunkUV) {
+            this.uvs.push(u, py as number);
+            this.pushTile(tile);
+          } else {
+            this.uvs.push(...atlasUV(tile, u, py as number));
+          }
           if (tint) this.colors.push(light * tint[0], light * tint[1], light * tint[2]);
           else this.colors.push(light, light, light);
         }
@@ -254,7 +358,8 @@ class GeometryBuilder {
   }
 }
 
-const aoScratch = [0, 0, 0, 0];
+/** 单格面发射用的 AO 暂存（避免 subarray 视图逐面分配；addMergedFace 立即读值） */
+const aoEmit = [0, 0, 0, 0];
 
 /** 不透明查找表（id → 1/0）：替代热路径上的 BLOCKS[id]?.opaque 属性链访问 */
 const OPAQUE = new Uint8Array(BLOCKS.length);
@@ -287,13 +392,29 @@ const ltGrid = new Uint8Array(idGrid.length);
 const skGrid = new Uint8Array(idGrid.length);
 const gidx = (x: number, y: number, z: number): number => ((y + 1) * GW + (z + CHUNK_SIZE)) * GW + (x + CHUNK_SIZE);
 
+// ——— 贪心合并扫掠的逐平面描述子 scratch（模块级复用）———
+// 平面网格最大 16×128（±x/±z 方向的 u×v 截面）；逐格：tile（-1 空）、topY、四角 AO、四角颜色（RGB×4）
+const MAX_PLANE = CHUNK_SIZE * WORLD_HEIGHT;
+const EMPTY_TILE = -1;
+const cellTile = new Int32Array(MAX_PLANE);
+const cellTopY = new Float32Array(MAX_PLANE);
+const cellAO = new Uint8Array(MAX_PLANE * 4);
+const cellCol = new Float32Array(MAX_PLANE * 12);
+/** 合并访问标记（stamp 递增免清零） */
+const cellMark = new Int32Array(MAX_PLANE);
+let planeStamp = 0;
+/** 颜色三分量相等（合并一致性判断；同输入同运算序，浮点位级相等） */
+function colEq(arr: Float32Array, a: number, b: number): boolean {
+  return arr[a] === arr[b] && arr[a + 1] === arr[b + 1] && arr[a + 2] === arr[b + 2];
+}
+
 /**
  * 纯数据网格化：输入 3×3 邻居 chunk 的方块数据（datas[9]，索引 (gz+1)*3+(gx+1)，可为 null），
  * 输出几何。与 World/Chunk 解耦，主线程与 Web Worker 共用
  */
-export function buildFromGrid(cx: number, cz: number, datas: (Uint16Array | null)[], lights: (Uint8Array | null)[], skys: (Uint8Array | null)[], biomes?: Uint8Array | null): { solid: GeometryData; water: GeometryData } {
-  const solid = new GeometryBuilder();
-  const water = new GeometryBuilder();
+export function buildFromGrid(cx: number, cz: number, datas: (Uint16Array | null)[], lights: (Uint8Array | null)[], skys: (Uint8Array | null)[], biomes?: Uint8Array | null, greedy = true): { solid: GeometryData; water: GeometryData } {
+  const solid = new GeometryBuilder(true);
+  const water = new GeometryBuilder(true);
 
   // 把 3×3 chunk 数据摊平进邻居网格：热路径全部变成无闭包的直接数组读。
   // 行拷贝用小 for 循环直写（消除 subarray 视图分配，~55k 次/建网）；opGrid 融合进拷贝循环，
@@ -471,20 +592,49 @@ export function buildFromGrid(cx: number, cz: number, datas: (Uint16Array | null
           continue;
         }
 
-        for (const face of FACES) {
-          const n = idAt(x + face.dir[0], y + face.dir[1], z + face.dir[2]);
-          // 同类透明方块之间不画（玻璃-玻璃、树叶-树叶、水-水）；不透明邻居挡住的面剔除
-          const visible = isWaterId(id)
-            ? !isWaterId(n) && opGrid[gidx(x + face.dir[0], y + face.dir[1], z + face.dir[2])] !== 1
-            : opGrid[gidx(x + face.dir[0], y + face.dir[1], z + face.dir[2])] !== 1 && n !== id;
-          if (!visible) continue;
-          const tile = face.dir[1] === 1 ? def.top : face.dir[1] === -1 ? def.bottom : def.side;
-          // 逐顶点 AO：探测邻层（面外侧那一格）的两个侧边与对角
+        // ——— 全立方体（含水）：由下方贪心合并扫掠统一处理 ———
+      }
+    }
+  }
+
+  // ——— 全立方体面的贪心合并扫掠：6 方向 × 逐平面 ———
+  // 合并规则（保守，宁可少合不能错）：同 tile、同 topY、共面共向，且顶点色沿合并方向一致——
+  // 沿 u 合并要求每面两 cv 轨各自左右相等且跨缝相等，沿 v 合并要求两 cu 轨各自上下相等且跨缝相等。
+  // 满足时合并矩形双线性插值与逐格分段插值逐像素一致（且与三角剖分无关）；不满足则不合并，
+  // 单格面按原 AO 翻转规则发射，与旧逐面实现一致。剔除/AO/光照/topY/tint 语义与旧逐面路径相同
+  for (let d = 0; d < 6; d++) {
+    const face = FACES[d];
+    const a = face.dir[0] !== 0 ? 0 : face.dir[1] !== 0 ? 1 : 2;
+    const { ui, vi, c00, c10, c01, c11 } = face;
+    const pExt = a === 1 ? WORLD_HEIGHT : CHUNK_SIZE;
+    const uExt = ui === 1 ? WORLD_HEIGHT : CHUNK_SIZE;
+    const vExt = vi === 1 ? WORLD_HEIGHT : CHUNK_SIZE;
+    const fShade = faceShade(face.dir);
+    for (let p = 0; p < pExt; p++) {
+      // 填充本平面描述子（tile=-1 为空：空气/形状块/被剔除面）
+      for (let j = 0; j < vExt; j++) {
+        for (let i = 0; i < uExt; i++) {
+          const cell = j * uExt + i;
+          cellTile[cell] = EMPTY_TILE;
+          const x = a === 0 ? p : ui === 0 ? i : j;
+          const y = a === 1 ? p : ui === 1 ? i : j;
+          const z = a === 2 ? p : ui === 2 ? i : j;
+          const id = idAt(x, y, z);
+          if (id === AIR) continue;
+          const def = BLOCKS[id];
+          if (!def || def.shape !== undefined) continue; // 未知 id 按空气；非立方体走形状循环
           const bx = x + face.dir[0];
           const by = y + face.dir[1];
           const bz = z + face.dir[2];
-          for (let i = 0; i < 4; i++) {
-            const c = face.corners[i];
+          const n = idAt(bx, by, bz);
+          // 同类透明方块之间不画（玻璃-玻璃、树叶-树叶、水-水）；不透明邻居挡住的面剔除
+          const visible = isWaterId(id)
+            ? !isWaterId(n) && opGrid[gidx(bx, by, bz)] !== 1
+            : opGrid[gidx(bx, by, bz)] !== 1 && n !== id;
+          if (!visible) continue;
+          // 逐顶点 AO：探测邻层（面外侧那一格）的两个侧边与对角
+          for (let ci = 0; ci < 4; ci++) {
+            const c = face.corners[ci];
             const s1 = isOpaque(bx + c.side1[0], by + c.side1[1], bz + c.side1[2]);
             const s2 = isOpaque(bx + c.side2[0], by + c.side2[1], bz + c.side2[2]);
             const cc = isOpaque(
@@ -492,12 +642,85 @@ export function buildFromGrid(cx: number, cz: number, datas: (Uint16Array | null
               by + c.side1[1] + c.side2[1],
               bz + c.side1[2] + c.side2[2],
             );
-            aoScratch[i] = aoValue(s1, s2, cc);
+            cellAO[cell * 4 + ci] = aoValue(s1, s2, cc);
           }
           // 水面按水位下沉；上方还有水则满格
+          const isWater = isWaterId(id);
           const level = id === WATER ? 0 : id - WATER_FLOW_1 + 1;
-          const topY = isWaterId(id) ? (isWaterId(idGrid[gidx(x, y + 1, z)]) ? 1 : WATER_TOP[level]) : 1;
-          (isWaterId(id) ? water : solid).addFace(wx, y, wz, face, isWaterId(id) ? WATER_UV_TILE : tile, aoScratch, topY, ltGrid[gidx(bx, by, bz)] / 15, skGrid[gidx(bx, by, bz)] / 15, tintFor(id, x, z, face.dir[1]) ?? undefined);
+          const topY = isWater ? (isWaterId(idGrid[gidx(x, y + 1, z)]) ? 1 : WATER_TOP[level]) : 1;
+          const light = ltGrid[gidx(bx, by, bz)] / 15;
+          const sky = skGrid[gidx(bx, by, bz)] / 15;
+          const tint = tintFor(id, x, z, face.dir[1]);
+          const co = cell * 12;
+          for (let ci = 0; ci < 4; ci++) {
+            const b = Math.max(AO_CURVE[cellAO[cell * 4 + ci]] * sky * fShade, light);
+            const o = co + ci * 3;
+            if (tint) {
+              cellCol[o] = b * tint[0];
+              cellCol[o + 1] = b * tint[1];
+              cellCol[o + 2] = b * tint[2];
+            } else {
+              cellCol[o] = b;
+              cellCol[o + 1] = b;
+              cellCol[o + 2] = b;
+            }
+          }
+          cellTopY[cell] = topY;
+          cellTile[cell] = isWater ? WATER_UV_TILE : face.dir[1] === 1 ? def.top : face.dir[1] === -1 ? def.bottom : def.side;
+        }
+      }
+      // 贪心合并并发射
+      planeStamp += 1;
+      const stamp = planeStamp;
+      for (let j = 0; j < vExt; j++) {
+        for (let i = 0; i < uExt; i++) {
+          const cell = j * uExt + i;
+          const t0 = cellTile[cell];
+          if (t0 === EMPTY_TILE || cellMark[cell] === stamp) continue;
+          const ty = cellTopY[cell];
+          const K = cell * 12;
+          // 沿 +u 扩：每面两 cv 轨各自左右相等（颜色沿 u 定常），跨缝轨值相等
+          let w = 1;
+          if (greedy && colEq(cellCol, K + c00 * 3, K + c10 * 3) && colEq(cellCol, K + c01 * 3, K + c11 * 3)) {
+            while (i + w < uExt) {
+              const c2 = j * uExt + i + w;
+              if (cellTile[c2] !== t0 || cellTopY[c2] !== ty || cellMark[c2] === stamp) break;
+              const K2 = c2 * 12;
+              if (!colEq(cellCol, K2 + c00 * 3, K2 + c10 * 3) || !colEq(cellCol, K2 + c01 * 3, K2 + c11 * 3)) break;
+              if (!colEq(cellCol, K2 + c00 * 3, K + c00 * 3) || !colEq(cellCol, K2 + c01 * 3, K + c01 * 3)) break;
+              w++;
+            }
+          }
+          // 沿 +v 扩：整行每面两 cu 轨各自上下相等（颜色沿 v 定常），跨缝轨值相等
+          let h = 1;
+          if (greedy && colEq(cellCol, K + c00 * 3, K + c01 * 3) && colEq(cellCol, K + c10 * 3, K + c11 * 3)) {
+            outer: while (j + h < vExt) {
+              for (let ii = 0; ii < w; ii++) {
+                const c2 = (j + h) * uExt + i + ii;
+                if (cellTile[c2] !== t0 || cellTopY[c2] !== ty || cellMark[c2] === stamp) break outer;
+                const K2 = c2 * 12;
+                if (!colEq(cellCol, K2 + c00 * 3, K2 + c01 * 3) || !colEq(cellCol, K2 + c10 * 3, K2 + c11 * 3)) break outer;
+                if (!colEq(cellCol, K2 + c00 * 3, K + c00 * 3) || !colEq(cellCol, K2 + c10 * 3, K + c10 * 3)) break outer;
+              }
+              h++;
+            }
+          }
+          for (let jj = 0; jj < h; jj++) {
+            for (let ii = 0; ii < w; ii++) cellMark[(j + jj) * uExt + i + ii] = stamp;
+          }
+          const x = a === 0 ? p : ui === 0 ? i : j;
+          const y = a === 1 ? p : ui === 1 ? i : j;
+          const z = a === 2 ? p : ui === 2 ? i : j;
+          // 单格面沿用 AO 翻转三角剖分（合并矩形颜色沿合并方向定常，剖分无关，用满 AO 走默认剖分）
+          let ao4: readonly number[] = FULL_AO;
+          if (w === 1 && h === 1) {
+            aoEmit[0] = cellAO[cell * 4];
+            aoEmit[1] = cellAO[cell * 4 + 1];
+            aoEmit[2] = cellAO[cell * 4 + 2];
+            aoEmit[3] = cellAO[cell * 4 + 3];
+            ao4 = aoEmit;
+          }
+          (t0 === WATER_UV_TILE ? water : solid).addMergedFace(baseX + x, y, baseZ + z, face, t0, cellCol, K, ao4, ty, w, h);
         }
       }
     }

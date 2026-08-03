@@ -6,6 +6,7 @@
 // 运行时 three 改在 build() 内动态 import，避免 three 全家进入主菜单首屏 chunk（见 page.tsx 代码分割）
 import type * as THREE from 'three';
 import {
+  ATLAS_CELL_RATIO,
   ATLAS_COLS,
   ATLAS_PAD_RATIO,
   ATLAS_ROWS,
@@ -341,11 +342,15 @@ export interface AtlasMaterials {
   texture: THREE.Texture;
   /** 水面动画纹理（32 帧竖排条带，帧 0 在底部；offset 驱动） */
   waterTex: THREE.Texture;
-  /** chunk 不透明材质（alphaTest 镂空 + 顶点色 AO） */
+  /**
+   * chunk 不透明材质（alphaTest 镂空 + 顶点色 AO）。
+   * 块单位 UV + 逐顶点 aTile 新约定（注入 tileBase + fract 拼装），仅可用于 buildFromGrid 输出的
+   * chunk 几何；单方块几何（buildBlockGeometry/buildTileGeometry，atlas 终值 UV 旧约定）须走 lambert() 工厂材质
+   */
   solid: THREE.Material;
-  /** chunk 半透明水 */
+  /** chunk 半透明水（同 solid 的块单位 UV 约定，仅用于 chunk 水几何） */
   water: THREE.Material;
-  /** Lambert 纯色材质（生物模型等） */
+  /** Lambert 纯色材质（生物模型、掉落物/手持物等单方块 atlas 材质——旧 UV 约定） */
   lambert: (opts?: MaterialOptions) => THREE.Material;
   /** Basic 材质（裂纹/云/粒子） */
   basic: (opts?: MaterialOptions) => THREE.Material;
@@ -353,6 +358,59 @@ export interface AtlasMaterials {
   sprite: (opts?: MaterialOptions) => THREE.Material;
   /** Line 材质（选框高亮） */
   line: (opts?: MaterialOptions) => THREE.Material;
+}
+
+// ——— chunk 网格专用 UV 注入（贪心合并配套；mesher 块单位 UV + 逐顶点 aTile 约定）———
+// shader 内 finalUV = tileBase + fract(blockUV) × 格内容，跨格重复采样不串到相邻 tile。
+// fract 的不连续会让隐式导数在拼缝处误判到最低 mip（远处出现网格缝），故用连续块单位 UV
+// 的显式梯度采样（WebGL textureGrad / WebGPU TSL .grad）。水走独立 strip 纹理：fract 后缩到单帧
+const WATER_FRAMES = 32;
+const glslFloat = (n: number): string => (Number.isInteger(n) ? `${n}.0` : String(n));
+const ATLAS_UW = ATLAS_COLS * ATLAS_CELL_RATIO;
+const ATLAS_VW = ATLAS_ROWS * ATLAS_CELL_RATIO;
+
+/**
+ * WebGL Lambert 注入（onBeforeCompile）：顶点 UV 原样透传（块单位），fragment 拼装最终 UV。
+ * solid：atlas 格基址 + fract；water：strip 单帧 + mapTransform（offset 帧动画）。
+ * customProgramCacheKey 必须区分——否则与同类的未注入 Lambert 共享编译程序
+ */
+function injectChunkUVWebGL(mat: THREE.Material, water: boolean): void {
+  mat.onBeforeCompile = (shader) => {
+    if (water) {
+      shader.vertexShader = shader.vertexShader.replace(
+        '#include <uv_vertex>',
+        '#include <uv_vertex>\n#ifdef USE_MAP\n\tvMapUv = MAP_UV;\n#endif',
+      );
+      shader.fragmentShader = shader.fragmentShader.replace(
+        '#include <map_fragment>',
+        `#ifdef USE_MAP
+	vec2 mcUv = vec2( fract( vMapUv.x ), fract( vMapUv.y ) / ${glslFloat(WATER_FRAMES)} );
+	vec4 sampledDiffuseColor = textureGrad( map, ( mapTransform * vec3( mcUv, 1.0 ) ).xy, dFdx( vMapUv ) * vec2( 1.0, ${glslFloat(1 / WATER_FRAMES)} ), dFdy( vMapUv ) * vec2( 1.0, ${glslFloat(1 / WATER_FRAMES)} ) );
+	diffuseColor *= sampledDiffuseColor;
+#endif`,
+      );
+    } else {
+      shader.vertexShader = shader.vertexShader
+        .replace('#include <uv_pars_vertex>', '#include <uv_pars_vertex>\nattribute float aTile;\nvarying float vMcTile;')
+        .replace('#include <uv_vertex>', '#include <uv_vertex>\n#ifdef USE_MAP\n\tvMapUv = MAP_UV;\n\tvMcTile = aTile;\n#endif');
+      shader.fragmentShader = shader.fragmentShader
+        .replace('#include <uv_pars_fragment>', '#include <uv_pars_fragment>\nvarying float vMcTile;')
+        .replace(
+          '#include <map_fragment>',
+          `#ifdef USE_MAP
+	vec2 mcF = fract( vMapUv );
+	float mcCol = mod( vMcTile, ${glslFloat(ATLAS_COLS)} );
+	float mcRow = floor( vMcTile / ${glslFloat(ATLAS_COLS)} );
+	vec2 mcUv = vec2(
+		( mcCol * ${glslFloat(ATLAS_CELL_RATIO)} + ${glslFloat(ATLAS_PAD_RATIO)} + mcF.x ) / ${glslFloat(ATLAS_UW)},
+		1.0 - ( mcRow * ${glslFloat(ATLAS_CELL_RATIO)} + ${glslFloat(ATLAS_PAD_RATIO)} + ( 1.0 - mcF.y ) ) / ${glslFloat(ATLAS_VW)} );
+	vec4 sampledDiffuseColor = textureGrad( map, mcUv, dFdx( vMapUv ) * vec2( ${glslFloat(1 / ATLAS_UW)}, ${glslFloat(1 / ATLAS_VW)} ), dFdy( vMapUv ) * vec2( ${glslFloat(1 / ATLAS_UW)}, ${glslFloat(1 / ATLAS_VW)} ) );
+	diffuseColor *= sampledDiffuseColor;
+#endif`,
+        );
+    }
+  };
+  mat.customProgramCacheKey = () => (water ? 'mc-chunk-water' : 'mc-chunk-solid');
 }
 
 function loadImage(src: string): Promise<HTMLImageElement> {
@@ -557,6 +615,7 @@ async function build(kind: RendererKind): Promise<AtlasMaterials> {
   if (kind === 'webgpu') {
     // WebGPU 节点材质（three/webgpu 动态加载，不进默认包）
     const webgpu = await import('three/webgpu');
+    const tsl = await import('three/tsl');
     const lambert = (o: MaterialOptions = {}) =>
       new webgpu.MeshLambertNodeMaterial({
         color: o.color ?? '#ffffff',
@@ -592,13 +651,57 @@ async function build(kind: RendererKind): Promise<AtlasMaterials> {
       }) as unknown as THREE.Material;
     const line = (o: MaterialOptions = {}) =>
       new webgpu.LineBasicNodeMaterial({ color: o.color ?? '#ffffff' }) as unknown as THREE.Material;
+    // chunk 不透明材质：colorNode 覆盖默认 color×map(uv) 路径，等效 WebGL 注入（块单位 UV + aTile 拼装 + 显式梯度）
+    const solid = new webgpu.MeshLambertNodeMaterial({
+      color: '#ffffff',
+      map: texture,
+      transparent: false,
+      opacity: 1,
+      alphaTest: 0.5,
+      vertexColors: true,
+      depthWrite: true,
+      side: THREE.FrontSide,
+      fog: true,
+    });
+    {
+      const aTile = tsl.attribute<'float'>('aTile', 'float');
+      const buv = tsl.uv();
+      const bf = tsl.fract(buv);
+      const colT = tsl.floor(tsl.mod(aTile, ATLAS_COLS));
+      const rowT = tsl.floor(tsl.div(aTile, ATLAS_COLS));
+      const u = tsl.div(tsl.mul(colT, ATLAS_CELL_RATIO).add(ATLAS_PAD_RATIO).add(bf.x), ATLAS_UW);
+      const v = tsl.float(1).sub(tsl.div(tsl.mul(rowT, ATLAS_CELL_RATIO).add(ATLAS_PAD_RATIO).add(tsl.float(1).sub(bf.y)), ATLAS_VW));
+      const grad = tsl.vec2(1 / ATLAS_UW, 1 / ATLAS_VW);
+      solid.colorNode = tsl.texture(texture, tsl.vec2(u, v)).grad(tsl.mul(tsl.dFdx(buv), grad), tsl.mul(tsl.dFdy(buv), grad));
+    }
+    // 水：MC 群系水色蓝调（#3f76e4 乘算），不透明度 0.85 对齐 MC 观感；
+    // strip 单帧 fract + setUpdateMatrix 保留 offset 帧动画（tickWaterTexture 驱动）
+    const water = new webgpu.MeshLambertNodeMaterial({
+      color: '#3f76e4',
+      map: waterStrip,
+      transparent: true,
+      opacity: 0.85,
+      alphaTest: 0,
+      vertexColors: true,
+      depthWrite: false,
+      side: THREE.FrontSide,
+      fog: true,
+    });
+    {
+      const buv = tsl.uv();
+      const wuv = tsl.vec2(tsl.fract(buv.x), tsl.div(tsl.fract(buv.y), WATER_FRAMES));
+      const grad = tsl.vec2(1, 1 / WATER_FRAMES);
+      const tex = tsl.texture(waterStrip!, wuv).grad(tsl.mul(tsl.dFdx(buv), grad), tsl.mul(tsl.dFdy(buv), grad));
+      // setUpdateMatrix(true)：自定义 uv 默认关矩阵，这里打开以保留 offset 帧动画（类型定义未暴露该方法，同名字段等效）
+      tex.updateMatrix = true;
+      water.colorNode = tsl.vec4(tex.rgb.mul(tsl.uniform(water.color)), tex.a);
+    }
     return {
       kind,
       texture,
       waterTex: waterStrip!,
-      solid: lambert({ map: texture, alphaTest: 0.5, vertexColors: true }),
-      // 水：MC 群系水色蓝调（#3f76e4 乘算），不透明度 0.85 对齐 MC 观感
-      water: lambert({ color: '#3f76e4', map: waterStrip, transparent: true, opacity: 0.85, depthWrite: false, vertexColors: true }),
+      solid: solid as unknown as THREE.Material,
+      water: water as unknown as THREE.Material,
       lambert,
       basic,
       sprite,
@@ -640,13 +743,18 @@ async function build(kind: RendererKind): Promise<AtlasMaterials> {
       fog: o.fog ?? true,
     });
   const line = (o: MaterialOptions = {}) => new THREE.LineBasicMaterial({ color: o.color ?? '#ffffff' });
+  // chunk 材质：块单位 UV 新约定（onBeforeCompile 注入 tileBase + fract 拼装，见上方注释）
+  const solid = lambert({ map: texture, alphaTest: 0.5, vertexColors: true });
+  injectChunkUVWebGL(solid, false);
+  // 水：MC 群系水色蓝调（#3f76e4 乘算），不透明度 0.85 对齐 MC 观感
+  const water = lambert({ color: '#3f76e4', map: waterStrip, transparent: true, opacity: 0.85, depthWrite: false, vertexColors: true });
+  injectChunkUVWebGL(water, true);
   return {
     kind,
     texture,
     waterTex: waterStrip!,
-    solid: lambert({ map: texture, alphaTest: 0.5, vertexColors: true }),
-    // 水：MC 群系水色蓝调（#3f76e4 乘算），不透明度 0.85 对齐 MC 观感
-    water: lambert({ color: '#3f76e4', map: waterStrip, transparent: true, opacity: 0.85, depthWrite: false, vertexColors: true }),
+    solid,
+    water,
     lambert,
     basic,
     sprite,

@@ -2,14 +2,14 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useFrame } from '@react-three/fiber';
-import { AdditiveBlending, Mesh, MeshBasicMaterial, type BufferGeometry, type Group } from 'three';
+import { AdditiveBlending, Mesh, MeshBasicMaterial, type BufferGeometry, type Group, type Material } from 'three';
 import { armorDefOf } from '@/lib/armor';
 import { getActiveWorld, playerPosition } from '@/lib/game';
 import { clearDrops, itemDrops, tickDrops, type ItemDrop } from '@/lib/items';
 import { materialTile } from '@/lib/materials';
 import { buildBlockGeometry, buildTileGeometry } from '@/lib/mesher';
 import { useGameStore } from '@/lib/store';
-import { getAtlasMaterials, type AtlasMaterials } from '@/lib/textures';
+import { getAtlasMaterials } from '@/lib/textures';
 import { TOOLS } from '@/lib/tools';
 import { toGeometry } from './ChunkMesh';
 import { useRendererKind } from './renderer-kind';
@@ -26,18 +26,29 @@ export function ItemDrops() {
   /** 附魔光泽材质（additive 紫，全部附魔掉落物共享一份，useFrame 里整体脉动） */
   const glintMat = useRef<MeshBasicMaterial | null>(null);
   const kind = useRendererKind();
-  const [materials, setMaterials] = useState<AtlasMaterials | null>(null);
+  /** 掉落物专用 atlas 材质（单方块几何为 atlas 终值 UV 旧约定——不能共用 chunk 的
+   *  materials.solid（块单位 UV + aTile 注入），同 HeldItem 走 lambert 工厂自建） */
+  const [dropMat, setDropMat] = useState<Material | null>(null);
 
   useEffect(() => {
-    void getAtlasMaterials(kind).then(setMaterials);
+    let disposed = false;
+    let mat: Material | null = null;
+    void getAtlasMaterials(kind).then((m) => {
+      if (disposed) return;
+      mat = m.lambert({ map: m.texture, alphaTest: 0.5, vertexColors: true });
+      setDropMat(mat);
+    });
     const glint = new MeshBasicMaterial({ color: '#b26bff', transparent: true, opacity: 0.3, blending: AdditiveBlending, depthWrite: false, fog: false });
     glintMat.current = glint;
     const meshes = meshMap.current;
     const geos = geoCache.current;
     return () => {
+      disposed = true;
       clearDrops();
       glint.dispose();
       glintMat.current = null;
+      mat?.dispose();
+      setDropMat(null);
       meshes.clear();
       for (const g of geos.values()) g.dispose(); // 几何缓存卸载时释放 GPU 资源
       geos.clear();
@@ -47,7 +58,7 @@ export function ItemDrops() {
   useFrame((state, delta) => {
     const world = getActiveWorld();
     const group = groupRef.current;
-    if (!world || !group || !materials) return;
+    if (!world || !group || !dropMat) return;
     if (useGameStore.getState().paused) return;
     const dt = Math.min(delta, 0.05);
 
@@ -88,7 +99,7 @@ export function ItemDrops() {
       if (!mesh) {
         const geo = geometryForDrop(d, geoCache.current);
         if (!geo) continue;
-        mesh = new Mesh(geo, materials.solid);
+        mesh = new Mesh(geo, dropMat);
         mesh.scale.setScalar(0.25);
         // 附魔物品：略大的紫色 additive 罩层（复用同一几何，子节点随主体旋转/浮动）
         if (glint && hasEnchants(d.ench)) {

@@ -29,6 +29,7 @@ function expectGeometryEqual(a: GeometryData, b: GeometryData): void {
   expect(Buffer.from(a.uvs.buffer).equals(Buffer.from(b.uvs.buffer))).toBe(true);
   expect(Buffer.from(a.colors.buffer).equals(Buffer.from(b.colors.buffer))).toBe(true);
   expect(Buffer.from(a.indices.buffer).equals(Buffer.from(b.indices.buffer))).toBe(true);
+  expect(a.tiles === undefined && b.tiles === undefined ? true : a.tiles !== undefined && b.tiles !== undefined && Buffer.from(a.tiles.buffer).equals(Buffer.from(b.tiles.buffer))).toBe(true);
 }
 
 describe('mesher 边界切片快照', () => {

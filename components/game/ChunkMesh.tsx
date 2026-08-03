@@ -14,6 +14,8 @@ export function toGeometry(data: GeometryData): THREE.BufferGeometry | null {
   geo.setAttribute('normal', new THREE.BufferAttribute(data.normals, 3));
   geo.setAttribute('uv', new THREE.BufferAttribute(data.uvs, 2));
   geo.setAttribute('color', new THREE.BufferAttribute(data.colors, 3));
+  // chunk 几何（块单位 UV 约定）携带逐顶点 tile 基址；单方块几何（旧约定）无此属性
+  if (data.tiles) geo.setAttribute('aTile', new THREE.BufferAttribute(data.tiles, 1));
   geo.setIndex(new THREE.BufferAttribute(data.indices, 1));
   return geo;
 }

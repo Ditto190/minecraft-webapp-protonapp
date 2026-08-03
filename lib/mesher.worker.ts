@@ -31,16 +31,10 @@ ctx.onmessage = (e) => {
   const { datas, lights, skys } = expandBorders(e.data);
   const { solid, water } = buildFromGrid(cx, cz, datas, lights, skys, biomes);
   const response: MeshResponse = { key, version, solid, water };
-  ctx.postMessage(response, [
-    solid.positions.buffer,
-    solid.normals.buffer,
-    solid.uvs.buffer,
-    solid.colors.buffer,
-    solid.indices.buffer,
-    water.positions.buffer,
-    water.normals.buffer,
-    water.uvs.buffer,
-    water.colors.buffer,
-    water.indices.buffer,
-  ]);
+  const transfer: Transferable[] = [];
+  for (const g of [solid, water]) {
+    transfer.push(g.positions.buffer, g.normals.buffer, g.uvs.buffer, g.colors.buffer, g.indices.buffer);
+    if (g.tiles) transfer.push(g.tiles.buffer);
+  }
+  ctx.postMessage(response, transfer);
 };
