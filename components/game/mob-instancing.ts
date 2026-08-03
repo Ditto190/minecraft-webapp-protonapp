@@ -92,6 +92,12 @@ export const MOB_GEOS: Record<string, BoxGeometry> = {
   golemHead: geo(0.58, 0.5, 0.5),
   golemNose: geo(0.12, 0.28, 0.14),
   golemVine: geo(0.14, 0.3, 0.04),
+  // 铜傀儡（1.21.9）：约 1 格高的小傀儡——方头小身、细臂、小鼻、头顶短避雷针（MC 标志）
+  copperBody: geo(0.4, 0.45, 0.28),
+  copperHead: geo(0.36, 0.32, 0.32),
+  copperArm: geo(0.1, 0.35, 0.1),
+  copperNose: geo(0.08, 0.14, 0.1),
+  copperRod: geo(0.05, 0.24, 0.05),
   // 村民：MC 大扁头 + 前垂大鼻子 + 抱臂长袍
   villagerHead: geo(0.52, 0.46, 0.46),
   villagerNose: geo(0.1, 0.24, 0.12),
@@ -318,6 +324,20 @@ const BASE_PARTS: Record<string, PartDef[]> = {
     pt('phantomWing', 'phantomWing', -1.1, 0.15, -0.1, 0.18),
     pt('phantomWing', 'phantomWing', 1.1, 0.15, -0.1, -0.18),
     pt('phantomTail', 'phantomWing', 0, 0.12, -0.5),
+  ],
+  copper_golem: [
+    // 铜傀儡（1.21.9）：铜色小傀儡——短腿细臂、方头小鼻、发光黄眼（MC 铜灯质感）、头顶短避雷针。
+    // Java 另有 4 氧化级变色（变绿）与涂蜡，本项目从简只做未氧化态（差异见 mobs.ts 铜傀儡注释）
+    pt('pigLeg', 'copperGolemDark', -0.09, 0.15, 0),
+    pt('pigLeg', 'copperGolemDark', 0.09, 0.15, 0),
+    pt('copperBody', 'copperGolem', 0, 0.53, 0),
+    pt('copperArm', 'copperGolemDark', -0.26, 0.55, 0),
+    pt('copperArm', 'copperGolemDark', 0.26, 0.55, 0),
+    pt('copperHead', 'copperGolem', 0, 0.92, 0),
+    pt('copperNose', 'copperGolemDark', 0, 0.86, 0.2),
+    pt('enderEye', 'copperGolemEye', -0.08, 0.97, 0.17),
+    pt('enderEye', 'copperGolemEye', 0.08, 0.97, 0.17),
+    pt('copperRod', 'copperGolemLight', 0, 1.2, 0),
   ],
 };
 

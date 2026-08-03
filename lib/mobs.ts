@@ -8,11 +8,13 @@ import { useGameStore } from './store';
 import { XP_BREED, XP_MOB } from './xp';
 import { explodeAt } from './explosion';
 import { endCrystals, hitCrystal } from './endfight';
-import { spawnBlockDrop, spawnMaterialDrop } from './items';
+import { spawnArmorDrop, spawnBlockDrop, spawnMaterialDrop, spawnToolDrop } from './items';
 import { bastionNear, fortressNear } from './netherstructures';
 import { outerIslandContaining } from './end';
 import { aabbFree, collideAxis } from './physics';
 import { raycastBlock } from './raycast';
+import { getStorage, mergeIntoStorage, sameStack, storages } from './storage';
+import { type Slot } from './slots';
 import { villageCenterNear } from './structures';
 import { weather, precipAt, type WeatherKind } from './weather';
 // 循环引用说明：redstone.ts 的 tickPlates 引用本文件 mobs 列表；此处 strikeTarget 仅运行时调用，ESM live binding 安全
@@ -21,7 +23,7 @@ import { type World } from './world';
 import { registerWorldScope } from './worldScope';
 import { chunkKey, localIndex, WORLD_HEIGHT } from './grid';
 
-export type MobType = 'zombie' | 'skeleton' | 'spider' | 'creeper' | 'pig' | 'cow' | 'chicken' | 'villager' | 'mooshroom' | 'zombified_piglin' | 'piglin' | 'piglin_brute' | 'blaze' | 'wither_skeleton' | 'ghast' | 'sheep' | 'wolf' | 'enderman' | 'wither' | 'ender_dragon' | 'shulker' | 'slime' | 'phantom' | 'iron_golem';
+export type MobType = 'zombie' | 'skeleton' | 'spider' | 'creeper' | 'pig' | 'cow' | 'chicken' | 'villager' | 'mooshroom' | 'zombified_piglin' | 'piglin' | 'piglin_brute' | 'blaze' | 'wither_skeleton' | 'ghast' | 'sheep' | 'wolf' | 'enderman' | 'wither' | 'ender_dragon' | 'shulker' | 'slime' | 'phantom' | 'iron_golem' | 'copper_golem';
 
 /** 农场动物群系变种（1.21.5 Spring to Life：牛/猪/鸡按出生地群系温度分寒带/温带/热带） */
 export type AnimalVariant = 'cold' | 'temperate' | 'warm';
@@ -96,6 +98,8 @@ export const MOB_DEFS: Record<MobType, MobDef> = {
   phantom: { name: '幻翼', hp: 20, speed: 4.5, hostile: true, burnsAtDay: true, damage: 4, attackRange: 1.8, attackCd: 2, drops: [{ material: 'feather', count: [0, 1] }] },
   // 铁傀儡：村庄守卫——中立，猎杀威胁玩家的敌对怪；玩家攻击村民或它则仇恨玩家；高伤 7-14 随机（MC 普通 7-21 取低段）
   iron_golem: { name: '铁傀儡', hp: 100, speed: 1.1, hostile: true, burnsAtDay: false, damage: 7, attackRange: 1.8, attackCd: 1, drops: [{ material: 'iron_ingot', count: [3, 5] }] },
+  // 铜傀儡（1.21.9 Copper Age）：友好搬运工——从铜箱取货分拣到普通箱子（AI 见 tickCopperGolem）；Java 掉铜锭 2-3（玩家/驯狼击杀）
+  copper_golem: { name: '铜傀儡', hp: 12, speed: 1.4, hostile: false, burnsAtDay: false, damage: 0, attackRange: 0, attackCd: 0, drops: [{ material: 'copper_ingot', count: [2, 3] }] },
 };
 
 export interface Mob {
@@ -185,6 +189,15 @@ export interface Mob {
   /** 击退水平冲量（击退附魔施加，随时间指数衰减；Boss/铁傀儡免疫） */
   kbx?: number;
   kbz?: number;
+  /** 铜傀儡：手持的搬运物（每次 ≤16 一组；工具/装备为整件） */
+  carrying?: Slot;
+  /** 铜傀儡：当前目标容器坐标（空手 → 铜箱取货；手持 → 普通箱子放货） */
+  golemTX?: number;
+  golemTY?: number;
+  golemTZ?: number;
+  /** 铜傀儡：交接冷却（搬运完成 3s / 无目标驻留）与容器扫描节流 */
+  golemCd?: number;
+  golemScan?: number;
 }
 
 export interface Arrow {
@@ -411,6 +424,168 @@ export function spawnMobAt(type: MobType, x: number, y: number, z: number): Mob 
   const m = makeMob(type, x, y, z);
   mobs.push(m);
   return m;
+}
+
+// ——— 铜傀儡（1.21.9 Copper Age）：建造 + 铜箱 → 箱子的物品分拣搬运 ———
+
+/** 搬运搜索范围：水平 ≤32 格、竖直 ±8（Java 铜傀儡在附近容器间往返的简化） */
+const GOLEM_RANGE = 32;
+const GOLEM_RANGE_Y = 8;
+/** 单次搬运上限（Java ≤16 个） */
+const GOLEM_CARRY_MAX = 16;
+/** 一次交接完成后的冷却（对齐 Java ~3s 节奏）；空手到铜箱却发现没有可放的目标箱时同样驻留（无目标不搬） */
+const GOLEM_TRANSFER_CD = 3;
+/** 取货后的小停顿（再动身找目标箱） */
+const GOLEM_TAKE_PAUSE = 0.6;
+/** 容器扫描节流（65×17×65 逐格读块不便宜；目标达成/失效会立即重扫） */
+const GOLEM_SCAN_INTERVAL = 0.5;
+
+/**
+ * 铜傀儡建造（1.21.9）：南瓜放到铜块贴邻（上/下/侧面均可，Java 同规则）→ 铜块转化为铜箱、南瓜转化为铜傀儡。
+ * Java 用雕刻南瓜/南瓜灯；项目无雕刻南瓜变种，从简用普通南瓜（与 Java 的差异点）。
+ * 召唤触发在 actions.ts 放置方块后调用（与凋灵 trySummonWither 同路径）。
+ */
+export function tryBuildCopperGolem(world: World, x: number, y: number, z: number): boolean {
+  if (world.getBlock(x, y, z) !== BLOCK_BY_KEY.pumpkin.id) return false;
+  for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]] as const) {
+    const bx = x + dx;
+    const by = y + dy;
+    const bz = z + dz;
+    if (world.getBlock(bx, by, bz) !== BLOCK_BY_KEY.copper_block.id) continue;
+    world.setBlock(bx, by, bz, BLOCK_BY_KEY.copper_chest.id); // Java：铜块原位转化为铜箱
+    world.setBlock(x, y, z, AIR);
+    spawnMobAt('copper_golem', x + 0.5, y, z + 0.5);
+    return true;
+  }
+  return false;
+}
+
+/** 水平 ≤32 格、竖直 ±8 内满足 match 的最近容器（只读已加载 chunk；每列先按水平距剪枝） */
+function scanContainer(world: World, m: Mob, match: (id: number, key: string) => boolean): { x: number; y: number; z: number } | null {
+  const x0 = Math.floor(m.x);
+  const y0 = Math.floor(m.y);
+  const z0 = Math.floor(m.z);
+  let best: { x: number; y: number; z: number } | null = null;
+  let bestD = Infinity;
+  for (let x = x0 - GOLEM_RANGE; x <= x0 + GOLEM_RANGE; x++) {
+    for (let z = z0 - GOLEM_RANGE; z <= z0 + GOLEM_RANGE; z++) {
+      const d = Math.hypot(x + 0.5 - m.x, z + 0.5 - m.z);
+      if (d > GOLEM_RANGE || d >= bestD) continue;
+      if (!world.isChunkLoaded(x, z)) continue;
+      for (let y = Math.max(0, y0 - GOLEM_RANGE_Y); y <= Math.min(WORLD_HEIGHT - 1, y0 + GOLEM_RANGE_Y); y++) {
+        const id = world.getBlock(x, y, z);
+        if (id === AIR) continue;
+        if (!match(id, `${x},${y},${z}`)) continue;
+        best = { x, y, z };
+        bestD = d;
+      }
+    }
+  }
+  return best;
+}
+
+/** 取货目标：范围内最近的有货铜箱（storages 有该位置数据且至少一格非空） */
+function findCopperChestWithItems(world: World, m: Mob): { x: number; y: number; z: number } | null {
+  const cid = BLOCK_BY_KEY.copper_chest.id;
+  return scanContainer(world, m, (id, key) => id === cid && (storages.get(key)?.some((s) => s !== null) ?? false));
+}
+
+/**
+ * 放货目标箱（Java 简化规则）：优先已有同类物品且未满的箱，其次有空位的箱（从未开过的箱 = 全空）。
+ * 只放普通箱子（Java：箱子/陷阱箱；项目无陷阱箱）——不放回铜箱/木桶。
+ */
+function findDepositChest(world: World, m: Mob, item: Slot): { x: number; y: number; z: number } | null {
+  const cid = BLOCK_BY_KEY.chest.id;
+  if (item && (item.kind === 'block' || item.kind === 'material')) {
+    const same = scanContainer(world, m, (id, key) => {
+      if (id !== cid) return false;
+      const st = storages.get(key);
+      return st?.some((s) => s !== null && s.kind !== 'tool' && s.kind !== 'armor' && s.count < 64 && sameStack(s, item)) ?? false;
+    });
+    if (same) return same;
+  }
+  return scanContainer(world, m, (id, key) => {
+    if (id !== cid) return false;
+    const st = storages.get(key);
+    return !st || st.some((s) => s === null);
+  });
+}
+
+/**
+ * 铜傀儡搬运 AI：空手 → 走到最近有货铜箱取第一格非空物品一组（≤16）→ 走到目标箱放入 → 冷却 3s。
+ * 返回 [mx,mz] 表示本帧有搬运任务（已到达为 [0,0]，原地交接/驻留），null = 无任务（走普通游走）。
+ * Java 差异：Java 依次拜访最多 10 个铜箱/箱子、空铜箱驻留 7s；本项目取最近目标、空铜箱直接跳过，驻留 3s 重看。
+ */
+function tickCopperGolem(world: World, m: Mob, dt: number): [number, number] | null {
+  const def = MOB_DEFS.copper_golem;
+  m.golemCd = Math.max(0, (m.golemCd ?? 0) - dt);
+  m.golemScan = Math.max(0, (m.golemScan ?? 0) - dt);
+  // 目标失效（容器被挖掉）：立即重扫
+  if (m.golemTX !== undefined) {
+    const want = m.carrying ? BLOCK_BY_KEY.chest.id : BLOCK_BY_KEY.copper_chest.id;
+    if (world.getBlock(m.golemTX, m.golemTY ?? 0, m.golemTZ ?? 0) !== want) m.golemTX = m.golemTY = m.golemTZ = undefined;
+  }
+  if (m.golemTX === undefined) {
+    if (m.golemScan > 0) return null;
+    m.golemScan = GOLEM_SCAN_INTERVAL;
+    const t = m.carrying ? findDepositChest(world, m, m.carrying) : findCopperChestWithItems(world, m);
+    if (!t) return null;
+    m.golemTX = t.x;
+    m.golemTY = t.y;
+    m.golemTZ = t.z;
+  }
+  // 目标坐标收窄（设置/清除总是三元同步，此处只为类型收窄）
+  const gx = m.golemTX;
+  const gy = m.golemTY ?? 0;
+  const gz = m.golemTZ;
+  if (gx === undefined || gz === undefined) return null;
+  const dx = gx + 0.5 - m.x;
+  const dz = gz + 0.5 - m.z;
+  const hd = Math.hypot(dx, dz);
+  // 已到达（水平贴近 + 竖直可及）：冷却结束才交接；交接后清目标并立即允许重扫下一步
+  if (hd < 1.6 && Math.abs(gy - m.y) < 2.5) {
+    if (m.golemCd <= 0) {
+      const key = `${gx},${gy},${gz}`;
+      if (m.carrying) {
+        // 放入目标箱；放不下的留在手上（箱被填满的竞态），下轮再找别的箱
+        const left = mergeIntoStorage(getStorage(key), m.carrying);
+        if (m.carrying.kind === 'tool' || m.carrying.kind === 'armor') {
+          if (left === 0) m.carrying = undefined;
+        } else {
+          m.carrying = left > 0 ? { ...m.carrying, count: left } : undefined;
+        }
+        m.golemCd = GOLEM_TRANSFER_CD;
+      } else {
+        const st = getStorage(key);
+        const i = st.findIndex((s) => s !== null);
+        const first = i >= 0 ? st[i] : null;
+        if (!first || !findDepositChest(world, m, first)) {
+          // 铜箱已空 / 范围内没有可放的目标箱：不取，驻留冷却后再看（Java 空箱驻留 7s 的简化）
+          m.golemCd = GOLEM_TRANSFER_CD;
+        } else if (first.kind === 'tool' || first.kind === 'armor') {
+          m.carrying = first;
+          st[i] = null;
+          m.golemCd = GOLEM_TAKE_PAUSE;
+        } else {
+          const take = Math.min(GOLEM_CARRY_MAX, first.count);
+          m.carrying = { ...first, count: take };
+          st[i] = first.count > take ? { ...first, count: first.count - take } : null;
+          m.golemCd = GOLEM_TAKE_PAUSE;
+        }
+      }
+      m.golemTX = m.golemTY = m.golemTZ = undefined;
+      m.golemScan = 0;
+    }
+    m.wanderMoving = false; // 到达后原地站立（渲染朝向停在最后一次移动方向）
+    return [0, 0];
+  }
+  // 走向目标容器（移动方向写入 wander 字段，渲染朝向随行走方向）
+  if (hd > 0.01) {
+    m.wanderDir = Math.atan2(dz, dx);
+    m.wanderMoving = true;
+    return [(dx / hd) * def.speed, (dz / hd) * def.speed];
+  }
+  return [0, 0];
 }
 
 /** 史莱姆区块判定（MC：种子 + 区块坐标哈希，约 1/10 区块；区块内 y<40 无视亮度刷史莱姆） */
@@ -1441,6 +1616,15 @@ export function tickMobs(
           }
         }
       }
+      // 铜傀儡（1.21.9）：铜箱取货 → 普通箱子分拣（搬运规则见 tickCopperGolem）；无任务时落入普通游走
+      if (m.type === 'copper_golem') {
+        const g = tickCopperGolem(world, m, dt);
+        if (g) {
+          handled = true;
+          mx = g[0];
+          mz = g[1];
+        }
+      }
       if (m.type === 'wolf' && m.tamed) {
         handled = true;
         const target =
@@ -1759,6 +1943,15 @@ export function damageMob(mob: Mob, damage: number, attackerPos?: { x: number; z
   for (const drop of MOB_DEFS[mob.type].drops) {
     const count = drop.count[0] + Math.floor(Math.random() * (drop.count[1] - drop.count[0] + 1)) + (lootBonus > 0 ? Math.floor(Math.random() * (lootBonus + 1)) : 0);
     if (count > 0) spawnMaterialDrop(drop.material, mob.x, mob.y + 0.3, mob.z, count);
+  }
+  // 铜傀儡：搬运中的物品随死亡掉落（Java：傀儡死亡掉落手持物）
+  if (mob.type === 'copper_golem' && mob.carrying) {
+    const c = mob.carrying;
+    if (c.kind === 'block') spawnBlockDrop(c.id, mob.x, mob.y + 0.3, mob.z, c.count);
+    else if (c.kind === 'material') spawnMaterialDrop(c.material, mob.x, mob.y + 0.3, mob.z, c.count);
+    else if (c.kind === 'tool') spawnToolDrop(c.tool, mob.x, mob.y + 0.3, mob.z, c.durability, c.ench);
+    else spawnArmorDrop(c.piece, mob.x, mob.y + 0.3, mob.z, c.durability, c.material, c.ench);
+    mob.carrying = undefined;
   }
   // 蜘蛛眼：仅玩家击杀时 1/3 概率掉 1 个（MC 稀有掉落；烧死/摔死等环境击杀不掉）
   if (mob.type === 'spider' && attackerPos && Math.random() < 1 / 3) {

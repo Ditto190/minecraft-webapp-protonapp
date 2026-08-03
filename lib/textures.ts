@@ -404,9 +404,9 @@ export const TEXTURE_OVERLAYS: Record<number, (ctx: CanvasRenderingContext2D, dx
     }
   },
   // ——— 1.21.9 铜系 + 1.21 重锤（贴图包无新贴图 → canvas 自绘） ———
-  // 格位说明：ICON_TILE_START 后的图标区已被 1.21.5 植物（+25..+30）占满，atlas 容量（ATLAS_ROWS×ATLAS_COLS=68×8=544）
-  // 内仅剩 +31 一个合法空格；其余 6 格借用 pack 预留区尾部空格（ICON_TILE_START-1=511 往下——贴图 stem 仅 494 个，
-  // 该区间无贴图绘制；copper-age 测试里有 TILE_STEMS.length ≤ 506 的护栏，新增贴图 stem 触线即须迁移这些格）
+  // 格位说明：铜镐占 +31；铜锄/铜甲/重锤 6 格借用 pack 预留区尾部空格（ICON_TILE_START-1=511 往下——贴图 stem 仅 494 个，
+  // 该区间无贴图绘制；copper-age 测试里有 TILE_STEMS.length ≤ 506 的护栏，新增贴图 stem 触线即须迁移这些格）。
+  // 1.21.9 Copper Age 起 ICON_TILE_COUNT 扩到 40（ATLAS_ROWS 68→69，容量 552 格）：+32 收纳袋（此前越界未绘）与 +33 铜箱侧回到合法格内。
   // 铜镐（tools.ts 铜镐/斧/锹/剑共用此格——项目惯例：同 tier 斧/锹/剑复用镐形贴图）
   [ICON_TILE_START + 31]: (ctx, dx, dy) => {
     drawToolHandle(ctx, dx, dy);
@@ -497,6 +497,20 @@ export const TEXTURE_OVERLAYS: Record<number, (ctx: CanvasRenderingContext2D, dx
     ctx.fillRect(dx + 7, dy + 3, 2, 2);
     ctx.fillRect(dx + 6, dy + 2, 1, 1);
     ctx.fillRect(dx + 9, dy + 2, 1, 1);
+  },
+  // 铜箱侧（1.21.9 Copper Age）：铜质底 + 深色包边 + 盖缝 + 锁扣（结构同木箱格 +16，整格自绘含底色）
+  [ICON_TILE_START + 33]: (ctx, dx, dy) => {
+    speckle(ctx, dx, dy, COPPER, COPPER_DARK, 33);
+    ctx.fillStyle = COPPER_DARK;
+    ctx.fillRect(dx, dy, 16, 2);
+    ctx.fillRect(dx, dy + 14, 16, 2);
+    ctx.fillRect(dx, dy, 2, 16);
+    ctx.fillRect(dx + 14, dy, 2, 16);
+    ctx.fillRect(dx + 2, dy + 5, 12, 1); // 盖缝
+    ctx.fillStyle = '#3a2214';
+    ctx.fillRect(dx + 7, dy + 4, 2, 4); // 锁扣
+    ctx.fillStyle = COPPER_LIGHT;
+    ctx.fillRect(dx + 7, dy + 5, 2, 1);
   },
 };
 

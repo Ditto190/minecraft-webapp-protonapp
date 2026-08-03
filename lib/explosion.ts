@@ -6,7 +6,7 @@ import { checkGravityAt } from './gravity';
 import { breakParticles, addShake } from './game';
 import { spawnBlockDrop, spawnMaterialDrop } from './items';
 import { boom, playSound } from './sound';
-import { dropStorageContents } from './storage';
+import { dropStorageContents, isStorageBlockId } from './storage';
 import { useGameStore } from './store';
 import { igniteTnt, primedTnt } from './tnt';
 import type { World } from './world';
@@ -134,7 +134,7 @@ export function explodeAt(
         if (Math.random() < 1 - (d + absorb + ownRes) / strength) {
           const key = `${bx},${by},${bz}`;
           // 容器/熔炉被炸：内容物先掉落并清状态，否则原地重建会复活内容/幽灵烧炼
-          if (id === BLOCK_BY_KEY.chest.id || id === BLOCK_BY_KEY.barrel.id) dropStorageContents(key, bx, by, bz);
+          if (isStorageBlockId(id)) dropStorageContents(key, bx, by, bz);
           else if (id === FURNACE) dropFurnaceContents(key, bx, by, bz);
           // 正在查看被炸的容器/熔炉：顺便关闭界面
           const s = useGameStore.getState();

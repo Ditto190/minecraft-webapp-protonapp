@@ -26,6 +26,7 @@ export const XP_MOB: Record<MobType, number> = {
   slime: 4, // 大 4 / 中 2 / 小 1（分裂特判按档给；此处为大档）
   phantom: 5,
   iron_golem: 0, // MC：铁傀儡不掉经验
+  copper_golem: 0, // MC：铜傀儡同为傀儡类，不掉经验（1.21.9）
   pig: 2,
   cow: 2,
   chicken: 2,

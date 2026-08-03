@@ -19,7 +19,7 @@ import { trySummonWither } from './wither';
 import { pistonIdFor } from './pistons';
 import { cycleRepeaterDelay, isComparatorId, isRepeaterId, observerIdFor, pressButton, toggleComparatorMode, toggleLever, tuneNoteBlock } from './redstone';
 import { XP_ORE } from './xp';
-import { BREED_FOOD, barterWith, damageMob, feedMob, fireEnderPearl, fireEyeOfEnder, firePlayerArrow, MOB_DEFS, mobInReach, mobs, onSlept, variantForBiome, woolBlockId, type Mob } from './mobs';
+import { BREED_FOOD, barterWith, damageMob, feedMob, fireEnderPearl, fireEyeOfEnder, firePlayerArrow, MOB_DEFS, mobInReach, mobs, onSlept, tryBuildCopperGolem, variantForBiome, woolBlockId, type Mob } from './mobs';
 import { fillPortalFrame, nearestStronghold } from './stronghold';
 import { markTreasureOpened, nearestBuriedTreasure } from './structures';
 import { bobber, castBobber, reelIn } from './fishing';
@@ -27,7 +27,7 @@ import { MATERIAL_INFO, materialTile } from './materials';
 import { blockIntersectsPlayer } from './physics';
 import { anchorCharges, anchorKey, getAnchorCharge, MAX_ANCHOR_CHARGE, setAnchorCharge } from './respawnanchor';
 import { eatSound, glugSound, playSound } from './sound';
-import { dropStorageContents } from './storage';
+import { dropStorageContents, isStorageBlockId } from './storage';
 import { useGameStore, MAX_HEALTH, MAX_HUNGER } from './store';
 import { igniteTnt } from './tnt';
 import { TOOLS } from './tools';
@@ -361,8 +361,8 @@ export function breakBlock(world: World, x: number, y: number, z: number): void 
     if (oldId === FURNACE) dropFurnaceContents(`${x},${y},${z}`, x, y, z);
     // 酿造台被破坏：台内容物一并掉落
     if (oldId === BLOCK_BY_KEY.brewing_stand.id) dropBrewingContents(`${x},${y},${z}`, x, y, z);
-    // 容器被破坏：内容物一并掉落
-    if (oldId === BLOCK_BY_KEY.chest.id || oldId === BLOCK_BY_KEY.barrel.id) {
+    // 容器被破坏：内容物一并掉落（箱子/木桶/铜箱 1.21.9）
+    if (isStorageBlockId(oldId)) {
       dropStorageContents(`${x},${y},${z}`, x, y, z);
     }
   }
@@ -794,8 +794,8 @@ export function tryPlace(): boolean {
       }
       return false;
     }
-    // 箱子/木桶：右键打开容器界面（埋藏的宝藏箱被打开后藏宝图不再指向它——内存集合不持久化，见 structures.ts）
-    if (hitId === BLOCK_BY_KEY.chest.id || hitId === BLOCK_BY_KEY.barrel.id) {
+    // 箱子/木桶/铜箱（1.21.9）：右键打开容器界面（埋藏的宝藏箱被打开后藏宝图不再指向它——内存集合不持久化，见 structures.ts）
+    if (isStorageBlockId(hitId)) {
       s.setStorageOpen(`${bx},${by},${bz}`);
       markTreasureOpened(world.seedHash, world.terrain, bx, by, bz);
       return false;
@@ -1066,6 +1066,8 @@ export function tryPlace(): boolean {
   checkGravityAt(world, px, py, pz);
   // 凋灵骷髅头放下：检测 T 形召唤（MC 凋灵仪式）
   if (id === BLOCK_BY_KEY.wither_skeleton_skull.id) trySummonWither(world, px, py, pz, (d) => s.damagePlayer(d));
+  // 南瓜放到铜块旁：铜傀儡建造（1.21.9 简化——Java 需雕刻南瓜；铜块原位转化为铜箱，见 mobs.ts）
+  if (id === BLOCK_BY_KEY.pumpkin.id) tryBuildCopperGolem(world, px, py, pz);
   playSound(BLOCKS[id]?.placeSound ?? 'place');
   lastPlace = now;
   return true;

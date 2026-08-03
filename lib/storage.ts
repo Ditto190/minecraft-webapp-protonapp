@@ -1,5 +1,6 @@
-// 容器存储（箱子/木桶）：按位置 key 持久 27 格，破坏时掉落内容物。纯数据逻辑（可单测）
+// 容器存储（箱子/木桶/铜箱）：按位置 key 持久 27 格，破坏时掉落内容物。纯数据逻辑（可单测）
 
+import { BLOCK_BY_KEY, type BlockId } from './blocks';
 import { spawnArmorDrop, spawnBlockDrop, spawnMaterialDrop, spawnToolDrop } from './items';
 import { addStackToSlots, type Slot } from './slots';
 import { registerWorldScope } from './worldScope';
@@ -8,6 +9,11 @@ export const STORAGE_SIZE = 27;
 
 /** 世界内所有容器，key = "x,y,z" */
 export const storages = new Map<string, Slot[]>();
+
+/** 27 槽容器方块判定（箱子/木桶/铜箱 1.21.9；右键打开、比较器满度、破坏/炸毁掉内容物的各分派处共用） */
+export function isStorageBlockId(id: BlockId): boolean {
+  return id === BLOCK_BY_KEY.chest.id || id === BLOCK_BY_KEY.barrel.id || id === BLOCK_BY_KEY.copper_chest.id;
+}
 
 export function getStorage(key: string): Slot[] {
   let s = storages.get(key);
@@ -22,24 +28,22 @@ export function clearStorages(): void {
   storages.clear();
 }
 
-function sameStack(a: Slot, b: Slot): boolean {
+/** 同类堆叠判定（方块按 id、材料按名；工具/装备永不堆叠）——铜傀儡按同类找目标箱也用本判定 */
+export function sameStack(a: Slot, b: Slot): boolean {
   if (!a || !b || a.kind !== b.kind) return false;
   if (a.kind === 'block' && b.kind === 'block') return a.id === b.id;
   if (a.kind === 'material' && b.kind === 'material') return a.material === b.material;
   return false;
 }
 
-/** 热键栏 slotIndex 整叠 → 容器（先并堆再占空格）；放不下的部分留在热键栏 */
-export function putIntoStorage(slots: Slot[], slotIndex: number, storage: Slot[]): Slot[] {
-  const slot = slots[slotIndex];
-  if (!slot) return slots;
+/** 向容器并入一个槽位物品（先并同类未满堆、再占空格；就地修改 storage）。
+ *  返回未能放入的剩余数量（方块/材料按个数；工具/装备 0=已放入 1=放不进）。铜傀儡搬运与 putIntoStorage 共用 */
+export function mergeIntoStorage(storage: Slot[], slot: NonNullable<Slot>): number {
   if (slot.kind === 'tool' || slot.kind === 'armor') {
     const empty = storage.findIndex((s) => s === null);
-    if (empty < 0) return slots;
+    if (empty < 0) return 1;
     storage[empty] = slot;
-    const next = [...slots];
-    next[slotIndex] = null;
-    return next;
+    return 0;
   }
   let count = slot.count;
   for (let i = 0; i < storage.length && count > 0; i++) {
@@ -61,6 +65,22 @@ export function putIntoStorage(slots: Slot[], slotIndex: number, storage: Slot[]
       count -= add;
     }
   }
+  return count;
+}
+
+/** 热键栏 slotIndex 整叠 → 容器（先并堆再占空格）；放不下的部分留在热键栏 */
+export function putIntoStorage(slots: Slot[], slotIndex: number, storage: Slot[]): Slot[] {
+  const slot = slots[slotIndex];
+  if (!slot) return slots;
+  if (slot.kind === 'tool' || slot.kind === 'armor') {
+    const empty = storage.findIndex((s) => s === null);
+    if (empty < 0) return slots;
+    storage[empty] = slot;
+    const next = [...slots];
+    next[slotIndex] = null;
+    return next;
+  }
+  const count = mergeIntoStorage(storage, slot);
   if (count === slot.count) return slots; // 一个都没放进去
   const next = [...slots];
   next[slotIndex] = count > 0 ? { ...slot, count } : null;

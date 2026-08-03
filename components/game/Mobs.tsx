@@ -87,6 +87,10 @@ function buildMobMats(mats: AtlasMaterials): MobMats {
     golemIron: l('#c9c4b8'), // 铁傀儡：铁灰
     golemIronDark: l('#a09a8c'),
     golemVine: l('#5d7a3a'), // 藤蔓斑（MC 铁傀儡青苔纹）
+    copperGolem: l('#c06a3a'), // 铜傀儡（1.21.9）：铜本色（与 textures.ts COPPER 一致）
+    copperGolemDark: l('#7e3f1e'),
+    copperGolemLight: l('#e89a5f'),
+    copperGolemEye: l('#f0c040'), // 发光黄眼（MC 铜灯质感）
     chicken: l('#e8e8e8'),
     beak: l('#e8a030'),
     // ——— 1.21.5 群系变种配色（牛/猪/鸡 × 寒带深/热带浅，MC 纯色近似；温带沿用上方原色）———

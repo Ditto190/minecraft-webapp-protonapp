@@ -47,7 +47,7 @@ import { mobs } from './mobs';
 import { cleanupOrphanHeads, FACING_VEC, isExtended, isPistonId, isStickyPistonId, pushedObservers, retract, tryExtend } from './pistons';
 import { STACK_MAX } from './slots';
 import { noteBlock } from './sound';
-import { storages } from './storage';
+import { isStorageBlockId, storages } from './storage';
 import { igniteTnt } from './tnt';
 import { type World } from './world';
 import { CHUNK_SIZE, CHUNK_VOLUME, chunkKey, WORLD_HEIGHT } from './grid';
@@ -952,10 +952,10 @@ function computeCompOut(world: World, x: number, y: number, z: number): number {
 
 // ——— 比较器容器检测（MC Java：背向紧贴容器时按装满度输出 0-15） ———
 
-/** 容器方块（比较器可测：箱子/木桶 27 格、熔炉 3 槽、酿造台 5 槽） */
+/** 容器方块（比较器可测：箱子/木桶/铜箱 27 格、熔炉 3 槽、酿造台 5 槽） */
 const isContainerId = (id: BlockId): boolean => {
   const bk = blockKeyOf(id);
-  return bk === 'chest' || bk === 'barrel' || bk === 'furnace' || bk === 'brewing_stand';
+  return isStorageBlockId(id) || bk === 'furnace' || bk === 'brewing_stand';
 };
 
 /** 装满度公式（MC Java）：空容器 0，否则 1 + floor(Σ(槽内数量/该物品最大堆叠) / 槽位数 × 14) */
@@ -969,7 +969,7 @@ function fullnessSignal(sum: number, slotCount: number): number {
 function containerSignalAt(world: World, x: number, y: number, z: number): number | null {
   const bk = blockKeyOf(getBlockLoaded(world, x, y, z));
   const k = key(x, y, z);
-  if (bk === 'chest' || bk === 'barrel') {
+  if (bk === 'chest' || bk === 'barrel' || bk === 'copper_chest') {
     const slots = storages.get(k);
     if (!slots) return 0;
     let sum = 0;

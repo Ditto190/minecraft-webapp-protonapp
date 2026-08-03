@@ -65,7 +65,7 @@ describe('partsForVariant 部件表与原 makeMobMesh 逐点一致', () => {
       zombie: 6, skeleton: 6, creeper: 7, spider: 10, pig: 7, cow: 8, mooshroom: 14,
       zombified_piglin: 8, piglin: 8, piglin_brute: 8, blaze: 5, wither_skeleton: 7,
       enderman: 8, wither: 5, shulker: 2, slime: 4, ender_dragon: 11, ghast: 9,
-      chicken: 3, iron_golem: 8, phantom: 6,
+      chicken: 3, iron_golem: 8, phantom: 6, copper_golem: 10,
     };
     for (const [type, n] of Object.entries(counts)) {
       expect(partsForVariant(type), type).toHaveLength(n);

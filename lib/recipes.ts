@@ -120,9 +120,10 @@ export const RECIPES: Recipe[] = [
   // 弓：3 线 + 3 木棍（MC 配方）；箭：燧石 + 木棍 + 羽毛（MC 配方，对齐原版）
   { id: 'bow', name: '弓', out: { kind: 'tool', tool: 'bow' }, cost: [{ item: 'material:string', count: 3 }, { item: STICK, count: 3 }], needsTable: true },
   { id: 'arrow', name: '箭 ×4', out: { kind: 'material', material: 'arrow', count: 4 }, cost: [{ item: 'material:flint', count: 1 }, { item: STICK, count: 1 }, { item: 'material:feather', count: 1 }], needsTable: false },
-  // 容器：箱子 8 木板（MC）；木桶 6 木板 + 2 台阶（MC）
+  // 容器：箱子 8 木板（MC）；木桶 6 木板 + 2 台阶（MC）；铜箱 1 箱子 + 8 铜锭（1.21.9 MC：箱子居中、铜锭围一圈）
   { id: 'chest', name: '箱子', out: { kind: 'block', id: KID('chest'), count: 1 }, cost: [{ item: PLANKS_ITEM, count: 8 }], needsTable: true },
   { id: 'barrel', name: '木桶', out: { kind: 'block', id: KID('barrel'), count: 1 }, cost: [{ item: PLANKS_ITEM, count: 6 }, { item: K('planks_slab'), count: 2 }], needsTable: true },
+  { id: 'copper_chest', name: '铜箱', out: { kind: 'block', id: KID('copper_chest'), count: 1 }, cost: [{ item: K('chest'), count: 1 }, { item: 'material:copper_ingot', count: 8 }], needsTable: true },
   // 锄头：2 材料 + 2 木棍（MC 配方）；面包：3 小麦（MC）
   { id: 'wooden_hoe', name: '木锄', out: { kind: 'tool', tool: 'wooden_hoe' }, cost: [{ item: PLANKS_ITEM, count: 2 }, { item: STICK, count: 2 }], needsTable: true },
   { id: 'stone_hoe', name: '石锄', out: { kind: 'tool', tool: 'stone_hoe' }, cost: [{ item: COBBLE_ITEM, count: 2 }, { item: STICK, count: 2 }], needsTable: true },
@@ -333,6 +334,8 @@ const PATTERNS: Record<string, (string | null)[]> = {
   crafting_table: [PLANKS_ITEM, PLANKS_ITEM, null, PLANKS_ITEM, PLANKS_ITEM, null, null, null, null],
   furnace: [COBBLE_ITEM, COBBLE_ITEM, COBBLE_ITEM, COBBLE_ITEM, null, COBBLE_ITEM, COBBLE_ITEM, COBBLE_ITEM, COBBLE_ITEM],
   chest: [PLANKS_ITEM, PLANKS_ITEM, PLANKS_ITEM, PLANKS_ITEM, null, PLANKS_ITEM, PLANKS_ITEM, PLANKS_ITEM, PLANKS_ITEM],
+  // 铜箱（1.21.9 MC 摆法）：箱子居中、8 铜锭围一圈
+  copper_chest: ['material:copper_ingot', 'material:copper_ingot', 'material:copper_ingot', 'material:copper_ingot', K('chest'), 'material:copper_ingot', 'material:copper_ingot', 'material:copper_ingot', 'material:copper_ingot'],
   redstone_torch: [null, 'material:redstone', null, null, STICK, null, null, null, null],
   bow: [null, STICK, 'material:string', STICK, null, 'material:string', null, STICK, 'material:string'],
   shears: [null, 'material:iron_ingot', null, 'material:iron_ingot', null, null, null, null, null],
