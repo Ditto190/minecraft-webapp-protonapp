@@ -248,9 +248,32 @@ export async function loadChunks(keys: string[]): Promise<Map<string, Uint16Arra
   return map;
 }
 
-export async function saveChunk(key: string, data: Uint16Array): Promise<void> {
+// ——— 卸载保存聚合：同一 tick 的多个 saveChunk 合并为单个 IDB 事务 ———
+// （快速移动时 chunk 成批卸载，一 chunk 一个事务会变成每秒数十个事务）
+
+const pendingUnloads = new Map<string, Uint16Array>();
+let unloadFlush: Promise<void> | null = null;
+
+/** 卸载保存：立即落盘（不受 saveModifiedChunks 写预算影响），同一 tick 内的多次调用聚合为单个事务批量 put */
+export function saveChunk(key: string, data: Uint16Array): Promise<void> {
+  pendingUnloads.set(key, data);
+  unloadFlush ??= flushUnloads();
+  return unloadFlush;
+}
+
+async function flushUnloads(): Promise<void> {
+  // 聚合窗口：让出一个微任务，把同一调用栈/tick 内的多次 saveChunk 收进同一批
+  await null;
+  // 先解除「进行中」标记再取批：窗口之后到达的调用会调度下一轮 flush，不会被挂死在已取走的批上
+  unloadFlush = null;
+  const batch = [...pendingUnloads];
+  pendingUnloads.clear();
+  if (batch.length === 0) return;
   const d = await db();
-  await d.put('chunks', data, key);
+  const tx = d.transaction('chunks', 'readwrite');
+  // 单条 put 的 rejection 由 tx.done 统一承载（失败会 abort 事务），此处吞掉避免 unhandled rejection
+  for (const [key, data] of batch) void tx.store.put(data, key).catch(() => {});
+  await tx.done;
 }
 
 /** 屠龙标记的 meta 键：按世界种子隔离（与非主世界 chunk 的 'n:'/'e:' 前缀同风格；清档随 meta 一并清除） */
@@ -279,20 +302,50 @@ export async function loadDragonSlain(seed: string): Promise<boolean> {
 /** 连续写入失败只提示一次（autosave 每 5s 一次，不能刷屏）；恢复成功后重置，再次失败会再提示 */
 let saveErrorNotified = false;
 
-/** 把世界里所有被修改过的 chunk 写入 IndexedDB 并清除标记；同时更新 meta（位置/时刻/模式/生存数值/各维度容器状态）。
+/** 每轮 saveModifiedChunks 最多落盘的 modified chunk 数：autosave 每 5s 一轮，
+ * 一轮内几十~几百个 64KB Uint16Array 的同步 structured clone 会造成 1-10ms 主线程尖刺，
+ * 分批滚动写把单轮成本摊平到多轮；剩余 chunk 保留标记留到下轮 */
+export const CHUNK_SAVE_BUDGET = 16;
+
+let chunkSaveBudget = CHUNK_SAVE_BUDGET;
+
+/** 注入每轮 chunk 写预算（测试/调参用；≤0 按 1 处理） */
+export function setChunkSaveBudget(n: number): void {
+  chunkSaveBudget = Math.max(1, Math.floor(n));
+}
+
+/** 把世界里被修改过的 chunk 写入 IndexedDB（每轮最多 CHUNK_SAVE_BUDGET 个，超出留到下轮）并清除已落盘标记；
+ * 同时更新 meta（位置/时刻/模式/生存数值/各维度容器状态）。卸载保存（saveChunk）不走此预算，保证卸载即落盘。
  * keyPrefix 用于下界存档隔离（下界 chunk 键加 'n:' 前缀） */
 export async function saveModifiedChunks(world: World, extras: SaveExtras = {}, keyPrefix = ''): Promise<void> {
   try {
     const d = await db();
     if (world.modifiedChunks.size > 0) {
       const tx = d.transaction('chunks', 'readwrite');
+      let budget = chunkSaveBudget;
+      const savedKeys: string[] = [];
       for (const key of world.modifiedChunks) {
         const chunk = world.chunks.get(key);
-        if (chunk) void tx.store.put(chunk.data, keyPrefix + key);
+        if (!chunk) {
+          // chunk 已卸载：数据由卸载保存（saveChunk）落盘，残留标记直接丢弃，不占写预算
+          world.modifiedChunks.delete(key);
+          continue;
+        }
+        if (budget <= 0) break; // 预算用尽：剩余标记保留，留到下轮
+        budget--;
+        // put 的 structured clone 是同步完成的；先取标记再 put，clone 之后的再次修改会重新打标、下轮再写
+        world.modifiedChunks.delete(key);
+        // 单条 put 的 rejection 由 tx.done 统一承载（失败会 abort 事务），此处吞掉避免 unhandled rejection
+        void tx.store.put(chunk.data, keyPrefix + key).catch(() => {});
+        savedKeys.push(key);
       }
-      await tx.done;
-      // 事务提交成功后再清标记，失败则保留待下轮重试
-      world.modifiedChunks.clear();
+      try {
+        await tx.done;
+      } catch (err) {
+        // 事务失败：把本轮取下的标记还回去，下轮重试（保持「失败保留标记」语义）
+        for (const key of savedKeys) world.modifiedChunks.add(key);
+        throw err;
+      }
     }
     await saveWorldMeta(worldMeta(world.seed, extras));
     saveErrorNotified = false; // 恢复成功：下次失败允许再次提示

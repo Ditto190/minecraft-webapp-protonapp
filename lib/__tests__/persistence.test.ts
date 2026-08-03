@@ -5,10 +5,11 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Slot } from '../slots';
 import type { World } from '../world';
 
-/** 内存版 IndexedDB：两个 object store（meta/chunks）+ 可注入写失败 */
+/** 内存版 IndexedDB：两个 object store（meta/chunks）+ 可注入写失败 + 事务计数（验证聚合） */
 const h = vi.hoisted(() => ({
   stores: {} as Record<string, Map<string, unknown>>,
   failWrites: false,
+  txCount: 0,
 }));
 
 vi.mock('idb', () => ({
@@ -28,19 +29,22 @@ vi.mock('idb', () => ({
         h.stores[store]?.clear();
         return Promise.resolve();
       },
-      transaction: (store: string) => ({
-        store: {
-          get: (key: string) => Promise.resolve(h.stores[store]?.get(key)),
-          put: (value: unknown, key: string) => {
-            if (h.failWrites) return fail();
-            h.stores[store]?.set(key, value);
-            return Promise.resolve();
+      transaction: (store: string) => {
+        h.txCount++;
+        return {
+          store: {
+            get: (key: string) => Promise.resolve(h.stores[store]?.get(key)),
+            put: (value: unknown, key: string) => {
+              if (h.failWrites) return fail();
+              h.stores[store]?.set(key, value);
+              return Promise.resolve();
+            },
           },
-        },
-        get done() {
-          return h.failWrites ? fail() : Promise.resolve();
-        },
-      }),
+          get done() {
+            return h.failWrites ? fail() : Promise.resolve();
+          },
+        };
+      },
     });
   },
 }));
@@ -65,6 +69,108 @@ function chestWithStone(): Slot[] {
 beforeEach(() => {
   h.stores = {};
   h.failWrites = false;
+  h.txCount = 0;
+});
+
+/** 往 fake world 里放一个修改过的 chunk（仅带 data 字段，saveModifiedChunks 只读 .data） */
+function addModifiedChunk(world: World, key: string, fill: number): void {
+  (world.chunks as unknown as Map<string, { data: Uint16Array }>).set(key, { data: new Uint16Array([fill]) });
+  world.modifiedChunks.add(key);
+}
+
+describe('分批滚动写（写预算结转）', () => {
+  it('>N 时剩余留到下轮且最终全部落盘；已落盘的标记即时清除', async () => {
+    const p = await freshPersistence();
+    p.setChunkSaveBudget(3);
+    const world = fakeWorld('s');
+    for (let i = 0; i < 7; i++) addModifiedChunk(world, `${i},0`, i);
+
+    await p.saveModifiedChunks(world, {});
+    expect(h.stores.chunks.size).toBe(3);
+    expect(world.modifiedChunks.size).toBe(4); // 剩余 4 个留到下轮
+
+    await p.saveModifiedChunks(world, {});
+    expect(h.stores.chunks.size).toBe(6);
+    expect(world.modifiedChunks.size).toBe(1);
+
+    await p.saveModifiedChunks(world, {});
+    expect(h.stores.chunks.size).toBe(7);
+    expect(world.modifiedChunks.size).toBe(0);
+    // 数据内容正确（存档为准，重载时覆盖生成结果）
+    expect(h.stores.chunks.get('5,0')).toEqual(new Uint16Array([5]));
+  });
+
+  it('默认预算 16：一轮最多落 16 个 chunk', async () => {
+    const p = await freshPersistence();
+    const world = fakeWorld('s');
+    for (let i = 0; i < 20; i++) addModifiedChunk(world, `${i},0`, i);
+    await p.saveModifiedChunks(world, {});
+    expect(h.stores.chunks.size).toBe(p.CHUNK_SAVE_BUDGET);
+    expect(p.CHUNK_SAVE_BUDGET).toBe(16);
+    expect(world.modifiedChunks.size).toBe(4);
+  });
+
+  it('写失败：本轮取下的标记归还，恢复后下轮重试不丢', async () => {
+    const p = await freshPersistence();
+    const world = fakeWorld('s');
+    addModifiedChunk(world, '0,0', 1);
+    addModifiedChunk(world, '1,0', 2);
+
+    h.failWrites = true;
+    await p.saveModifiedChunks(world, {});
+    expect(world.modifiedChunks.size).toBe(2); // 标记归还
+    expect(h.stores.chunks.size).toBe(0);
+
+    h.failWrites = false;
+    await p.saveModifiedChunks(world, {});
+    expect(h.stores.chunks.size).toBe(2);
+    expect(world.modifiedChunks.size).toBe(0);
+  });
+
+  it('已卸载 chunk 的残留标记直接丢弃（数据由卸载保存落盘），不占写预算', async () => {
+    const p = await freshPersistence();
+    p.setChunkSaveBudget(1);
+    const world = fakeWorld('s');
+    world.modifiedChunks.add('gone,0'); // 不在 world.chunks：已卸载
+    addModifiedChunk(world, 'a,0', 1);
+    addModifiedChunk(world, 'b,0', 2);
+
+    await p.saveModifiedChunks(world, {});
+    expect(world.modifiedChunks.has('gone,0')).toBe(false); // 残留标记丢弃
+    expect(h.stores.chunks.size).toBe(1); // 预算花在真实 chunk 上
+    expect(world.modifiedChunks.size).toBe(1);
+  });
+});
+
+describe('卸载保存聚合（saveChunk）', () => {
+  it('同一 tick 多个 saveChunk 合并为单个 IDB 事务，且全部立即落盘', async () => {
+    const p = await freshPersistence();
+    const saves = [
+      p.saveChunk('0,0', new Uint16Array([1])),
+      p.saveChunk('1,0', new Uint16Array([2])),
+      p.saveChunk('2,0', new Uint16Array([3])),
+    ];
+    await Promise.all(saves);
+    expect(h.stores.chunks.size).toBe(3);
+    expect(h.txCount).toBe(1); // 聚合成单事务，而非一 chunk 一个事务
+  });
+
+  it('不受 saveModifiedChunks 写预算影响：预算 1 时卸载保存仍立即全部落盘', async () => {
+    const p = await freshPersistence();
+    p.setChunkSaveBudget(1);
+    const saves = [p.saveChunk('u,0', new Uint16Array([9])), p.saveChunk('u,1', new Uint16Array([8]))];
+    await Promise.all(saves);
+    expect(h.stores.chunks.size).toBe(2); // 卸载即落盘，不被滚动队列丢掉/推迟
+    expect(h.stores.chunks.get('u,0')).toEqual(new Uint16Array([9]));
+  });
+
+  it('跨 tick 的卸载保存分批：上一批 flush 后新调用调度下一轮', async () => {
+    const p = await freshPersistence();
+    await p.saveChunk('a,0', new Uint16Array([1]));
+    await p.saveChunk('b,0', new Uint16Array([2]));
+    expect(h.stores.chunks.size).toBe(2);
+    expect(h.txCount).toBe(2); // 不同 tick 各自一个事务
+  });
 });
 
 describe('跨维度存档（任务 1 回归）', () => {
