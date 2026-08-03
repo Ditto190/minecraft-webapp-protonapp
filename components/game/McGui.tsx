@@ -12,10 +12,10 @@ import type { ReactNode } from 'react';
 import { BLOCKS } from '@/lib/blocks';
 import { materialTile } from '@/lib/materials';
 import { withBase } from '@/lib/basepath';
-import type { Slot } from '@/lib/slots';
+import { BUNDLE_CAPACITY, BUNDLE_NAME, bundleContents, bundleUsed, isBundleSlot, type Slot } from '@/lib/slots';
 import { useGameStore } from '@/lib/store';
 import { createTouchPress, LONG_PRESS_MS, pressMove, pressTimeout, pressUp, type TouchButton, type TouchPressState } from '@/lib/touchGestures';
-import { slotDurabilityPct, slotEnchanted, slotTile } from './slotDisplay';
+import { slotDurabilityPct, slotEnchanted, slotName, slotTile } from './slotDisplay';
 import { TileIcon } from './TileIcon';
 
 /** MC 格 18px × 2（Faithful 32x 纹理为 176×166 的 2 倍） */
@@ -160,6 +160,18 @@ export function McGuiFrame({
   );
 }
 
+/** 收纳袋悬停文案（tooltip 从简：title 多行文本）：占用 + 内容列表（最后放入的在前，对齐 Java tooltip 最近物品置顶） */
+function bundleTitle(slot: Slot): string {
+  const used = bundleUsed(slot);
+  const items = bundleContents(slot).filter((s): s is NonNullable<Slot> => s !== null);
+  if (items.length === 0) return `${BUNDLE_NAME}（空，${used}/${BUNDLE_CAPACITY}）`;
+  const lines = items
+    .slice()
+    .reverse()
+    .map((s) => `${slotName(s)} ×${s.kind === 'block' || s.kind === 'material' ? s.count : 1}`);
+  return `${BUNDLE_NAME}（${used}/${BUNDLE_CAPACITY}）\n${lines.join('\n')}`;
+}
+
 /** 通用 absolute 物品格（图标 + 数量 + 点击/光标拖拽），对齐纹理格子 */
 export function GuiSlot({
   pos,
@@ -187,6 +199,8 @@ export function GuiSlot({
   const tile = slotTile(slot);
   /** 工具/装备耐久比例（其余 null 不显示耐久条） */
   const pct = slotDurabilityPct(slot);
+  /** 收纳袋占用比例（非袋 null；有内容时显示袋满度条） */
+  const bundlePct = isBundleSlot(slot) ? bundleUsed(slot) / BUNDLE_CAPACITY : null;
   return (
     <button
       ref={onDragEnter ? (el) => { if (el) dragEnterByEl.set(el, onDragEnter); } : undefined}
@@ -195,7 +209,7 @@ export function GuiSlot({
       onPointerDown={onPress ? (e) => slotPointerDown(e, onPress) : undefined}
       onPointerEnter={onDragEnter}
       onDoubleClick={onDoubleClick}
-      title={title}
+      title={title ?? (bundlePct !== null ? bundleTitle(slot) : undefined)}
       disabled={disabled}
       className="absolute flex items-center justify-center disabled:opacity-30"
       // touchAction none：格子上禁浏览器滚动/缩放手势（拖动分发不被抢走）；callout none：禁 iOS 长按弹窗
@@ -211,6 +225,11 @@ export function GuiSlot({
             className="block h-full"
             style={{ width: `${pct * 100}%`, backgroundColor: pct > 0.3 ? '#4ade80' : '#ef4444' }}
           />
+        </span>
+      )}
+      {bundlePct !== null && bundlePct > 0 && (
+        <span className="pointer-events-none absolute bottom-0.5 left-1 right-1 h-0.5 bg-zinc-700">
+          <span className="block h-full" style={{ width: `${bundlePct * 100}%`, backgroundColor: '#d97706' }} />
         </span>
       )}
     </button>

@@ -4,6 +4,7 @@
 // 全局 pointerup 统一结束拖动分发（store.dragEnd：未形成拖动则对起始格按普通点击处理）。
 
 import { useEffect, useRef, useState } from 'react';
+import { BUNDLE_CAPACITY, bundleUsed, isBundleSlot } from '@/lib/slots';
 import { useGameStore } from '@/lib/store';
 import { slotEnchanted, slotTile } from './slotDisplay';
 import { TileIcon } from './TileIcon';
@@ -52,6 +53,11 @@ export function CursorItem() {
       <TileIcon tile={slotTile(cursor)} size={32} blockId={cursor.kind === 'block' ? cursor.id : undefined} enchanted={slotEnchanted(cursor)} />
       {cursor.kind !== 'tool' && cursor.kind !== 'armor' && cursor.count > 1 && (
         <span className="absolute bottom-0 right-0 text-[10px] font-bold text-white drop-shadow">{cursor.count}</span>
+      )}
+      {isBundleSlot(cursor) && bundleUsed(cursor) > 0 && (
+        <span className="absolute bottom-0 left-0.5 right-0.5 h-0.5 bg-zinc-700">
+          <span className="block h-full" style={{ width: `${(bundleUsed(cursor) / BUNDLE_CAPACITY) * 100}%`, backgroundColor: '#d97706' }} />
+        </span>
       )}
     </div>
   );

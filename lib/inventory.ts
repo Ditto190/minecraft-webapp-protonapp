@@ -3,11 +3,11 @@
 // store.ts 只持有 cursorSlot 状态与薄 action，UI（components/game/McGui.tsx）只做接线。
 
 import type { BlockId } from './blocks';
-import { addStackToSlots, STACK_MAX, type Slot } from './slots';
+import { addStackToSlots, BUNDLE_CAPACITY, bundleContents, bundleUnits, bundleUsed, isBundleSlot, STACK_MAX, type Slot } from './slots';
 
-/** 可堆叠槽位（方块/材料）；工具/装备 count 视为 1 */
+/** 可堆叠槽位（方块/材料；收纳袋除外）；工具/装备/收纳袋 count 视为 1 */
 export function isStackable(slot: Slot): slot is { kind: 'block'; id: BlockId; count: number } | { kind: 'material'; material: string; count: number } {
-  return slot !== null && (slot.kind === 'block' || slot.kind === 'material');
+  return slot !== null && (slot.kind === 'block' || (slot.kind === 'material' && !isBundleSlot(slot)));
 }
 
 /** 槽位数量（工具/装备按 1 计） */
@@ -16,9 +16,10 @@ export function slotCount(slot: Slot): number {
   return isStackable(slot) ? slot.count : 1;
 }
 
-/** 同类可合并（同方块 id / 同材料名）；工具/装备永不合并 */
+/** 同类可合并（同方块 id / 同材料名）；工具/装备/收纳袋永不合并 */
 export function sameStack(a: Slot, b: Slot): boolean {
   if (!a || !b) return false;
+  if (isBundleSlot(a) || isBundleSlot(b)) return false;
   if (a.kind === 'block' && b.kind === 'block') return a.id === b.id;
   if (a.kind === 'material' && b.kind === 'material') return a.material === b.material;
   return false;
@@ -33,6 +34,65 @@ function decCursor(cursor: NonNullable<Slot>): Slot {
 /** 取光标中的 1 个（工具/装备为整件） */
 function oneOf(cursor: NonNullable<Slot>): Slot {
   return isStackable(cursor) ? { ...cursor, count: 1 } : cursor;
+}
+
+// ——— 收纳袋（Java 1.21.2）：右键拿着物品点袋 = 尽量装入；拿着袋右键点槽 = 倒出最后放入的一种（LIFO，最多一组）———
+
+/** 袋内条目同类判断（同方块 id / 同材料名；工具/装备各占独立条目，一袋一件） */
+function sameBundleEntry(a: Slot, b: Slot): boolean {
+  if (!a || !b) return false;
+  if (a.kind === 'block' && b.kind === 'block') return a.id === b.id;
+  if (a.kind === 'material' && b.kind === 'material') return a.material === b.material;
+  return false;
+}
+
+/**
+ * 把光标物品尽量装入收纳袋（容量按点计，见 slots.bundleUnits；袋中袋禁止）。
+ * 已有同类条目并入并移到末尾（LIFO：最后放入的类型最先倒出）；一件都装不进时原样返回（保持引用）。
+ */
+export function insertIntoBundle(bundle: Slot, cursor: Slot): { bundle: Slot; cursor: Slot } {
+  if (!isBundleSlot(bundle) || cursor === null || isBundleSlot(cursor)) return { bundle, cursor };
+  const units = bundleUnits(cursor);
+  const count = isStackable(cursor) ? cursor.count : 1;
+  const take = Math.min(count, Math.floor((BUNDLE_CAPACITY - bundleUsed(bundle)) / units));
+  if (take <= 0) return { bundle, cursor };
+  const items = bundleContents(bundle).filter((s): s is NonNullable<Slot> => s !== null);
+  const idx = items.findIndex((s) => sameBundleEntry(s, cursor));
+  if (idx >= 0) {
+    const e = items[idx];
+    items.splice(idx, 1);
+    items.push(isStackable(e) ? { ...e, count: e.count + take } : e);
+  } else {
+    items.push(isStackable(cursor) ? { ...cursor, count: take } : cursor);
+  }
+  return {
+    bundle: { ...bundle, bundleItems: items },
+    cursor: isStackable(cursor) && cursor.count > take ? { ...cursor, count: cursor.count - take } : null,
+  };
+}
+
+/**
+ * 倒出袋中最后放入的那种物品（LIFO，最多一组 STACK_MAX）到目标槽：空槽放入 / 同类并到 64。
+ * 空袋、目标为异类/已满/不可堆叠时原样返回（保持引用）。
+ */
+export function pourBundle(bundle: Slot, target: Slot): { bundle: Slot; target: Slot } {
+  if (!isBundleSlot(bundle)) return { bundle, target };
+  const items = bundleContents(bundle).filter((s): s is NonNullable<Slot> => s !== null);
+  const last = items[items.length - 1];
+  if (!last) return { bundle, target }; // 空袋
+  const entryCount = isStackable(last) ? last.count : 1;
+  let take: number;
+  if (target === null) {
+    take = Math.min(entryCount, STACK_MAX);
+  } else {
+    if (!isStackable(target) || !sameBundleEntry(target, last) || target.count >= STACK_MAX) return { bundle, target };
+    take = Math.min(entryCount, STACK_MAX - target.count);
+  }
+  const rest = entryCount - take;
+  const restItems = rest > 0 && isStackable(last) ? [...items.slice(0, -1), { ...last, count: rest }] : items.slice(0, -1);
+  const newTarget: Slot =
+    target !== null ? { ...target, count: target.count + take } : isStackable(last) ? { ...last, count: take } : last;
+  return { bundle: { ...bundle, bundleItems: restItems }, target: newTarget };
 }
 
 /**
@@ -69,8 +129,9 @@ export function clickSlot(slots: Slot[], index: number, cursor: Slot): { slots: 
 
 /**
  * 右键点击槽位：
- * - 光标空 → 拿起一半（向上取整；工具/装备为整件）
+ * - 光标空 → 拿起一半（向上取整；工具/装备/收纳袋为整件）
  * - 光标有物 → 放一个（空格或同类未满格；异类/已满不动）
+ * - 目标是收纳袋 → 尽量装入（袋中袋拒绝）；光标是收纳袋 → 倒出最后放入的一种（LIFO，最多一组）
  */
 export function rightClickSlot(slots: Slot[], index: number, cursor: Slot): { slots: Slot[]; cursor: Slot } {
   const slot = slots[index];
@@ -86,6 +147,22 @@ export function rightClickSlot(slots: Slot[], index: number, cursor: Slot): { sl
     const next = [...slots];
     next[index] = slot.count > half ? { ...slot, count: slot.count - half } : null;
     return { slots: next, cursor: { ...slot, count: half } };
+  }
+  // 收纳袋（Java 1.21.2）：拿着物品右键点袋 = 尽量装入（袋中袋在 insertIntoBundle 内拒绝）
+  if (isBundleSlot(slot)) {
+    const r = insertIntoBundle(slot, cursor);
+    if (r.bundle === slot) return { slots, cursor };
+    const next = [...slots];
+    next[index] = r.bundle;
+    return { slots: next, cursor: r.cursor };
+  }
+  // 拿着收纳袋右键点槽 = 倒出最后放入的一种（LIFO，最多一组）
+  if (isBundleSlot(cursor)) {
+    const r = pourBundle(cursor, slot);
+    if (r.bundle === cursor) return { slots, cursor };
+    const next = [...slots];
+    next[index] = r.target;
+    return { slots: next, cursor: r.bundle };
   }
   // 放一个
   if (slot === null) {

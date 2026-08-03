@@ -27,7 +27,7 @@ import { applyCraft, canCraft, hasSpaceFor } from './recipes';
 import { grindResult } from './grindstone';
 import { netheriteUpgradeOf } from './smithing';
 import { setPersistenceNoticeHandler } from './persistence';
-import { addArmorToSlots, addStackToSlots, addToolToSlots, emptyBackpack, emptySlots, type Slot } from './slots';
+import { addArmorToSlots, addStackToSlots, addToolToSlots, BUNDLE_MATERIAL, bundleContents, emptyBackpack, emptySlots, isBundleSlot, type Slot } from './slots';
 import { anvilSound, eatSound, hurtSound, levelupSound } from './sound';
 import { getStorage, putIntoStorage, storages, takeFromStorage } from './storage';
 import { TOOLS } from './tools';
@@ -75,11 +75,31 @@ function replaceSlot(slots: Slot[], index: number, slot: Slot): Slot[] {
 
 type StoreSet = (partial: Partial<GameStore>) => void;
 
+/** 在 (x,y,z) 生成槽位物品的掉落实体（死亡掉落 / 退回背包溢出共用）。
+ *  收纳袋：掉落实体（lib/items.ts DropKind）无法携带袋内容，袋本身 + 内容物分别散出（不静默丢内容物） */
+function spawnSlotDrop(slot: NonNullable<Slot>, x: number, y: number, z: number): void {
+  if (isBundleSlot(slot)) {
+    spawnMaterialDrop(BUNDLE_MATERIAL, x, y, z, 1);
+    for (const s of bundleContents(slot)) {
+      if (!s) continue;
+      if (s.kind === 'block') spawnBlockDrop(s.id, x, y, z, s.count);
+      else if (s.kind === 'material') spawnMaterialDrop(s.material, x, y, z, s.count);
+      else if (s.kind === 'tool') spawnToolDrop(s.tool, x, y, z, s.durability, s.ench);
+      else spawnArmorDrop(s.piece, x, y, z, s.durability, s.material, s.ench);
+    }
+    return;
+  }
+  if (slot.kind === 'block') spawnBlockDrop(slot.id, x, y, z, slot.count);
+  else if (slot.kind === 'material') spawnMaterialDrop(slot.material, x, y, z, slot.count);
+  else if (slot.kind === 'tool') spawnToolDrop(slot.tool, x, y, z, slot.durability, slot.ench);
+  else spawnArmorDrop(slot.piece, x, y, z, slot.durability, slot.material, slot.ench);
+}
+
 /** 把一个槽位物品退回背包（热键栏优先，溢出到主物品栏）；放不下在玩家脚下生成掉落实体（与死亡掉落同路径）。
  *  stowCursor / stowEnchantSlots / stowGrindSlots 共用 */
 function stowOneToInventory(get: () => GameStore, set: StoreSet, slot: NonNullable<Slot>): void {
   let remaining: Slot = slot;
-  if (slot.kind === 'block' || slot.kind === 'material') {
+  if ((slot.kind === 'block' || slot.kind === 'material') && !isBundleSlot(slot)) {
     const item = slot.kind === 'block' ? { kind: 'block' as const, id: slot.id } : { kind: 'material' as const, material: slot.material };
     const hot = addStackToSlots(get().hotbarSlots, item, slot.count);
     if (hot.slots !== get().hotbarSlots) set({ hotbarSlots: hot.slots });
@@ -91,7 +111,7 @@ function stowOneToInventory(get: () => GameStore, set: StoreSet, slot: NonNullab
     }
     remaining = left > 0 ? { ...slot, count: left } : null;
   } else {
-    // 工具/装备：热键栏 → 背包找第一个空槽
+    // 工具/装备/收纳袋：热键栏 → 背包找第一个空槽（整件放置，袋内容物随槽位保留）
     const hi = get().hotbarSlots.indexOf(null);
     if (hi >= 0) {
       set({ hotbarSlots: replaceSlot(get().hotbarSlots, hi, slot) });
@@ -106,10 +126,7 @@ function stowOneToInventory(get: () => GameStore, set: StoreSet, slot: NonNullab
   }
   if (remaining) {
     const { x, y, z } = playerPosition;
-    if (remaining.kind === 'block') spawnBlockDrop(remaining.id, x, y + 0.5, z, remaining.count);
-    else if (remaining.kind === 'material') spawnMaterialDrop(remaining.material, x, y + 0.5, z, remaining.count);
-    else if (remaining.kind === 'tool') spawnToolDrop(remaining.tool, x, y + 0.5, z, remaining.durability, remaining.ench);
-    else spawnArmorDrop(remaining.piece, x, y + 0.5, z, remaining.durability, remaining.material, remaining.ench);
+    spawnSlotDrop(remaining, x, y + 0.5, z);
   }
 }
 
@@ -192,7 +209,8 @@ export const useGameStore = create<GameStore>()((set, get) => ({
   creativeGive: (slot) =>
     set((s) => {
       const hotbarSlots = [...s.hotbarSlots];
-      hotbarSlots[s.selectedSlot] = slot;
+      // 收纳袋不可堆叠：钳回 1 个（创造物品栏按材料注册时默认满叠 64）
+      hotbarSlots[s.selectedSlot] = isBundleSlot(slot) ? { ...slot, count: 1 } : slot;
       return { hotbarSlots };
     }),
   pickBlock: (id) => {
@@ -319,10 +337,7 @@ export const useGameStore = create<GameStore>()((set, get) => ({
         xpTotal = 0;
         for (const slot of [...s.hotbarSlots, ...s.mainSlots, s.enchantItem, s.enchantLapis, ...s.grindSlots]) {
           if (!slot) continue;
-          if (slot.kind === 'block') spawnBlockDrop(slot.id, x, y + 0.5, z, slot.count);
-          else if (slot.kind === 'material') spawnMaterialDrop(slot.material, x, y + 0.5, z, slot.count);
-          else if (slot.kind === 'tool') spawnToolDrop(slot.tool, x, y + 0.5, z, slot.durability, slot.ench);
-          else spawnArmorDrop(slot.piece, x, y + 0.5, z, slot.durability, slot.material, slot.ench);
+          spawnSlotDrop(slot, x, y + 0.5, z);
         }
         for (const piece of ['helmet', 'chestplate', 'leggings', 'boots'] as const) {
           const cur = armorSlots[piece];
@@ -330,12 +345,7 @@ export const useGameStore = create<GameStore>()((set, get) => ({
         }
         // 光标上的物品同样掉落（死亡时光标只可能来自刚关闭的界面，按死亡掉落处理）
         const held = s.cursorSlot;
-        if (held) {
-          if (held.kind === 'block') spawnBlockDrop(held.id, x, y + 0.5, z, held.count);
-          else if (held.kind === 'material') spawnMaterialDrop(held.material, x, y + 0.5, z, held.count);
-          else if (held.kind === 'tool') spawnToolDrop(held.tool, x, y + 0.5, z, held.durability, held.ench);
-          else spawnArmorDrop(held.piece, x, y + 0.5, z, held.durability, held.material, held.ench);
-        }
+        if (held) spawnSlotDrop(held, x, y + 0.5, z);
         hotbarSlots = emptySlots();
         mainSlots = emptyBackpack();
         armorSlots = emptyArmorSlots();
