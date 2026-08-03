@@ -7,10 +7,10 @@ import { BLOCKS, HOTBAR_BLOCKS, type BlockId } from './blocks';
 import { getBrew, INGREDIENTS, POTIONS, shiftIntoBrewing, takePotion } from './brewing';
 import { MATERIAL_INFO } from './materials';
 import { FOODS, getFurnace, shiftIntoFurnace, takeOutput } from './furnace';
-import { hurtState, playerPosition, survivalStats, worldClock } from './game';
+import { cameraRef, hurtState, playerPosition, survivalStats, worldClock } from './game';
 import { effects } from './effects';
 import { beaconTiers } from './beacon';
-import { spawnArmorDrop, spawnBlockDrop, spawnMaterialDrop, spawnToolDrop } from './items';
+import { itemDrops, spawnArmorDrop, spawnBlockDrop, spawnMaterialDrop, spawnToolDrop } from './items';
 import {
   clickItemStack,
   clickSlot,
@@ -22,6 +22,7 @@ import {
   rightClickSlot,
   shiftMove,
   slotToItemKey,
+  swapSlots,
 } from './inventory';
 import { applyCraft, canCraft, hasSpaceFor } from './recipes';
 import { grindResult } from './grindstone';
@@ -95,6 +96,33 @@ function spawnSlotDrop(slot: NonNullable<Slot>, x: number, y: number, z: number)
   else spawnArmorDrop(slot.piece, x, y, z, slot.durability, slot.material, slot.ench);
 }
 
+/** Java 手动丢弃（Q）的拾取延迟 2s；破坏/死亡掉落为 0.5s（items.ts PICKUP_DELAY） */
+const MANUAL_PICKUP_DELAY = 2;
+
+/** Q 丢弃路径：在玩家面前生成槽位掉落实体——位置取眼部高度、沿视线水平分量前移 0.5 格
+ * （ItemDrop 结构无水平速度字段，无法真"抛出"，以落点偏移表达方向）；手动丢弃 2s 拾取延迟
+ * 用 age 负偏移实现（items.ts 结构无独立延迟字段：age ≥ 0.5 才可拾取 → 记 0.5-2 即 2s 后可拾） */
+function spawnManualDrop(slot: NonNullable<Slot>): void {
+  const { x, y, z } = playerPosition;
+  let ox = 0;
+  let oz = 0;
+  const cam = cameraRef.current;
+  if (cam) {
+    // three 相机朝本地 -Z 看：世界矩阵第三列取负即视线前向，只取水平分量（Java 平视抛出）
+    const e = cam.matrixWorld.elements;
+    const fx = -e[8];
+    const fz = -e[10];
+    const len = Math.hypot(fx, fz);
+    if (len > 1e-4) {
+      ox = (fx / len) * 0.5;
+      oz = (fz / len) * 0.5;
+    }
+  }
+  const before = itemDrops.length;
+  spawnSlotDrop(slot, x + ox, y + 1.2, z + oz);
+  for (let i = before; i < itemDrops.length; i++) itemDrops[i].age = 0.5 - MANUAL_PICKUP_DELAY;
+}
+
 /** 把一个槽位物品退回背包（热键栏优先，溢出到主物品栏）；放不下在玩家脚下生成掉落实体（与死亡掉落同路径）。
  *  stowCursor / stowEnchantSlots / stowGrindSlots 共用 */
 function stowOneToInventory(get: () => GameStore, set: StoreSet, slot: NonNullable<Slot>): void {
@@ -153,6 +181,7 @@ export const useGameStore = create<GameStore>()((set, get) => ({
   flying: false,
   paused: false,
   debug: false,
+  hudHidden: false,
   worldReady: false,
   loadError: null,
   worldRetry: 0,
@@ -243,6 +272,56 @@ export const useGameStore = create<GameStore>()((set, get) => ({
   toggleFly: () => set((s) => ({ flying: s.worldMode === 'creative' ? !s.flying : false })),
   setPaused: (paused) => set({ paused }),
   toggleDebug: () => set((s) => ({ debug: !s.debug })),
+  toggleHudHidden: () => set((s) => ({ hudHidden: !s.hudHidden })),
+  closePanels: () => {
+    const s = get();
+    // 走各面板自己的 setter（保留关闭副作用：光标/槽内物品退回背包、箱盖声、互斥清理）
+    if (s.craftingOpen) s.setCraftingOpen(false);
+    else if (s.pickerOpen) s.setPickerOpen(false);
+    else if (s.furnaceOpen) s.setFurnaceOpen(null);
+    else if (s.brewingOpen) s.setBrewingOpen(null);
+    else if (s.enchantOpen) s.setEnchantOpen(null);
+    else if (s.grindstoneOpen) s.setGrindstoneOpen(null);
+    else if (s.tradeMob !== null) s.setTradeMob(null);
+    else if (s.storageOpen) s.setStorageOpen(null);
+  },
+  dropSelected: (all) => {
+    const s = get();
+    s.dropSlot('hotbar', s.selectedSlot, all);
+  },
+  dropSlot: (area, index, all) => {
+    const s = get();
+    const slots = readAreaSlots(s, area);
+    if (index < 0 || index >= slots.length) return;
+    const slot = slots[index];
+    if (!slot) return; // 空手持/空格不丢
+    let dropped: NonNullable<Slot>;
+    let remaining: Slot;
+    if (isStackable(slot)) {
+      const n = all ? slot.count : 1; // Q 丢 1 个，Ctrl+Q 丢整组（Java）
+      dropped = { ...slot, count: n };
+      remaining = slot.count > n ? { ...slot, count: slot.count - n } : null;
+    } else {
+      dropped = slot; // 工具/装备/收纳袋：整件丢出
+      remaining = null;
+    }
+    spawnManualDrop(dropped);
+    set({ ...writeAreaSlots(s, area, replaceSlot(slots, index, remaining)), guiTick: s.guiTick + 1 });
+  },
+  swapWithHotbar: (area, index, hotbarIndex) => {
+    const s = get();
+    if (hotbarIndex < 0 || hotbarIndex >= s.hotbarSlots.length) return;
+    const slots = readAreaSlots(s, area);
+    if (index < 0 || index >= slots.length) return;
+    if (slots[index] === null && s.hotbarSlots[hotbarIndex] === null) return; // 双空不动
+    const r = swapSlots(slots, index, s.hotbarSlots, hotbarIndex);
+    if (r.a === slots && r.b === s.hotbarSlots) return; // 同格/越界：原引用，不动
+    if (area === 'hotbar') {
+      set({ hotbarSlots: r.a, guiTick: s.guiTick + 1 });
+      return;
+    }
+    set({ ...writeAreaSlots(s, area, r.a), hotbarSlots: r.b, guiTick: s.guiTick + 1 });
+  },
   setWorldReady: (worldReady) => set({ worldReady }),
   setLoadError: (loadError) => set({ loadError }),
   retryWorld: () => set((s) => ({ loadError: null, worldReady: false, worldRetry: s.worldRetry + 1 })),

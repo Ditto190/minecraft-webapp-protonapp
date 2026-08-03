@@ -21,7 +21,7 @@ import { arrows, checkEndermanStare, damageMob, mobInReach, mobs, spawnMobAt, ty
 import { crystalInReach, hitCrystal, tickCrystals } from '@/lib/endfight';
 import { tickFishing } from '@/lib/fishing';
 import { SEA_LEVEL, type Biome } from '@/lib/noise';
-import { aabbFree, collideAxis, PLAYER_HALF_W, PLAYER_HEIGHT, type Aabb } from '@/lib/physics';
+import { aabbFree, climbVelY, collideAxis, DoubleTap, PLAYER_HALF_W, PLAYER_HEIGHT, sneakEdgeClip, touchingVine, wSprintNext, type Aabb } from '@/lib/physics';
 import { playSound, splashSound, hurtSound } from '@/lib/sound';
 import { useGameStore } from '@/lib/store';
 import { anyPanelOpen } from '@/lib/store-types';
@@ -137,7 +137,7 @@ const mcDebug: {
 };
 
 /** tickSurvival 参数对象（模块级复用：每帧写字段替代对象字面量分配；tickSurvival 只同步读值不保留引用） */
-const survivalEnv: SurvivalEnv = { dt: 0, flying: false, inWater: false, headInWater: false, onGround: false, velY: 0 };
+const survivalEnv: SurvivalEnv = { dt: 0, flying: false, inWater: false, headInWater: false, onGround: false, velY: 0, climbing: false };
 const survivalSnap: SurvivalSnapshotLite = { worldMode: '', health: 0, hunger: 0, saturation: 0 };
 const survivalActs: SurvivalActions = {
   damagePlayer: () => undefined,
@@ -206,6 +206,11 @@ export function Player() {
   const digWasHeld = useRef(false);
   /** 冲刺击退后的冲刺中断剩余秒数（MC：冲刺命中后中断冲刺；限时恢复，触屏冲刺开关不被卡死） */
   const sprintBreak = useRef(0);
+  /** 双击检测（MC Java ≤0.25s 窗口）：双击 W 冲刺 / 双击空格切飞行（创造） */
+  const wTap = useRef(new DoubleTap(250));
+  const spaceTap = useRef(new DoubleTap(250));
+  /** 双击 W 触发的冲刺态（W 松开/停下即取消；与 Ctrl/触屏冲刺并存，任一激活） */
+  const wSprint = useRef(false);
   /** 创造模式即时破坏的上次时间戳（200ms 冷却，防止按住左键每帧破一块） */
   const lastCreativeBreak = useRef(0);
   const wasDead = useRef(false);
@@ -241,6 +246,10 @@ export function Player() {
       keys.current[e.code] = true;
       if (e.repeat) return;
       if (e.code === 'KeyF') useGameStore.getState().toggleFly();
+      // MC Java 双击 W 冲刺：0.25s 内第二次按下激活（按住即冲刺，松开/停下取消；与 Ctrl 并存）
+      if (e.code === 'KeyW' && wTap.current.press(performance.now())) wSprint.current = true;
+      // MC Java 创造双击空格切飞行：第一次按下是正常跳（连跳），第二击才切换；toggleFly 内部已门禁仅创造
+      if (e.code === 'Space' && spaceTap.current.press(performance.now())) useGameStore.getState().toggleFly();
       if (e.code === 'KeyE') {
         const s = useGameStore.getState();
         if (s.dead) return; // 死亡后不响应交互键
@@ -257,13 +266,20 @@ export function Player() {
         e.preventDefault();
         useGameStore.getState().toggleDebug();
       }
+      // MC Java Q 丢弃：丢手持 1 个、Ctrl+Q 丢整组（GUI 打开时由 McGui 的悬停 Q 处理，世界内不重复丢）
+      if (e.code === 'KeyQ') {
+        const s = useGameStore.getState();
+        if (!s.dead && !anyPanelOpen(s)) s.dropSelected(e.ctrlKey || e.metaKey);
+      }
       if (e.code.startsWith('Digit')) {
         const n = Number(e.code.slice(5));
-        if (n >= 1 && n <= 9) useGameStore.getState().setSlot(n - 1);
+        // GUI 打开时数字键走悬停快移（McGui），不切选中槽（MC Java）
+        if (n >= 1 && n <= 9 && !anyPanelOpen(useGameStore.getState())) useGameStore.getState().setSlot(n - 1);
       }
     };
     const up = (e: KeyboardEvent) => {
       keys.current[e.code] = false;
+      if (e.code === 'KeyW') wSprint.current = false; // 双击 W 冲刺：松开即取消（MC Java）
     };
     window.addEventListener('keydown', down);
     window.addEventListener('keyup', up);
@@ -408,7 +424,7 @@ export function Player() {
     // FOV：设置基准值 + 冲刺时 +10%（MC 冲刺视角），平滑过渡
     {
       const cam = state.camera as PerspectiveCamera;
-      const sprintKey = keys.current['ControlLeft'] || keys.current['ControlRight'] || touchInput.sprint;
+      const sprintKey = keys.current['ControlLeft'] || keys.current['ControlRight'] || touchInput.sprint || wSprint.current;
       const targetFov = fov * (sprintKey ? 1.1 : 1);
       if (Math.abs(cam.fov - targetFov) > 0.05) {
         cam.fov += (targetFov - cam.fov) * Math.min(1, dt * 10);
@@ -522,11 +538,13 @@ export function Player() {
     const shift = keys.current['ShiftLeft'] || keys.current['ShiftRight'] || touchInput.down;
     const f = (keys.current['KeyW'] ? 1 : 0) - (keys.current['KeyS'] ? 1 : 0) + touchInput.moveY;
     const r = (keys.current['KeyD'] ? 1 : 0) - (keys.current['KeyA'] ? 1 : 0) + touchInput.moveX;
+    // 双击 W 冲刺取消：W 已松开（退锁清键兜底）或不再前移（停下），MC Java
+    wSprint.current = wSprintNext(wSprint.current, keys.current['KeyW'] === true, f);
     // MC 潜行：地面按 Shift（水中/飞行时是下降键）；冲刺：Ctrl（MC Java 同款）。触屏对应 touchInput.sneak/sprint 切换开关
     const sneaking = (shift || touchInput.sneak) && !flying && !inFluid;
-    // 冲刺：Ctrl（MC Java 同款）。饥饿 ≤6（3 格）禁止冲刺（MC 门禁）；冲刺命中后的中断期内也不冲刺
+    // 冲刺：Ctrl 或双击 W（MC Java 两种触发并存）。饥饿 ≤6（3 格）禁止冲刺（MC 门禁）；冲刺命中后的中断期内也不冲刺
     const sprinting =
-      (keys.current['ControlLeft'] || keys.current['ControlRight'] || touchInput.sprint) &&
+      (keys.current['ControlLeft'] || keys.current['ControlRight'] || touchInput.sprint || wSprint.current) &&
       !sneaking && !flying && sprintBreak.current <= 0 &&
       (gs.worldMode !== 'survival' || gs.hunger > 6);
     // 前进 = (fx, fz)，右 = 前进 × up = (-fz, fx)
@@ -542,9 +560,12 @@ export function Player() {
     const scale = mLen > 1 ? speed / mLen : speed;
     mx *= scale;
     mz *= scale;
+    // 藤蔓攀爬（MC Java CLIMBABLE）：AABB 与藤蔓同格/相贴即进入攀爬态；飞行/水中不攀爬（水中走游泳，飞行走飞行）
+    const climbing = !flying && !inFluid && touchingVine(world, p, PLAYER_HALF_W, PLAYER_HEIGHT);
     // 鞘翅滑翔（MC）：空中按住跳跃键且胸甲槽为鞘翅 → 朝视线方向推进，缓降（俯仰调制：俯视加速、仰视拉升）
     const gliding =
       !flying &&
+      !climbing &&
       !onGround.current &&
       velY.current <= 0.01 &&
       space &&
@@ -560,14 +581,11 @@ export function Player() {
     }
     let wantX = p.x + mx * dt;
     let wantZ = p.z + mz * dt;
-    // MC 潜行防跌落：着地潜行时，目标轴向前沿脚下无实体支撑则取消该轴移动
-    if (sneaking && onGround.current) {
-      const floorY = Math.floor(p.y) - 1;
-      const hasFloor = (ex: number, ez: number): boolean =>
-        BLOCKS[world.getBlock(Math.floor(ex), floorY, Math.floor(ez))]?.solid === true;
-      if (mx !== 0 && !hasFloor(wantX + Math.sign(mx) * (PLAYER_HALF_W + 0.05), p.z)) wantX = p.x;
-      if (mz !== 0 && !hasFloor(wantX, wantZ + Math.sign(mz) * (PLAYER_HALF_W + 0.05))) wantZ = p.z;
-    }
+    // MC 潜行防跌落：着地潜行时，目标轴向前沿脚下无实体支撑则截停该轴移动（规则在 lib/physics.ts sneakEdgeClip；
+    // 只防水平走出——跳跃/飞行/攀爬/水中 active=false 原样放行，不影响自动跳跃的碰撞检测）
+    const clipped = sneakEdgeClip(world, p, wantX, wantZ, mx, mz, sneaking && onGround.current);
+    wantX = clipped.x;
+    wantZ = clipped.z;
     p.x = wantX;
     const hitX = collideAxis(world, p, 0, mx * dt, PLAYER_HALF_W, PLAYER_HEIGHT);
     p.z = wantZ;
@@ -626,6 +644,10 @@ export function Player() {
     } else if (stepAnim.current) {
       // 上台动画期间：y 由动画驱动，重力/跳跃不干预
       velY.current = 0;
+    } else if (climbing) {
+      // 藤蔓攀爬（MC Java）：按住前进缓慢上升，松开悬停不下坠，Shift 停住不动；无重力/跳跃，摔落距离由 tickSurvival 清零
+      velY.current = climbVelY(shift, f);
+      onGround.current = false;
     } else {
       if (effects.levitation > 0) {
         // 漂浮：匀速上浮（MC 潜影贝弹命中效果；期间跳跃/重力不生效）
@@ -678,6 +700,7 @@ export function Player() {
     survivalEnv.headInWater = headInWater;
     survivalEnv.onGround = onGround.current;
     survivalEnv.velY = velY.current;
+    survivalEnv.climbing = climbing; // 藤蔓攀爬：tickSurvival 按攀爬清零摔落距离（MC Java 攀爬免摔伤）
     survivalSnap.worldMode = gs.worldMode;
     survivalSnap.health = gs.health;
     survivalSnap.hunger = gs.hunger;

@@ -17,6 +17,7 @@ import {
   rightClickSlot,
   shiftMove,
   slotToItemKey,
+  swapSlots,
 } from '../inventory';
 import { emptyBackpack, emptySlots, type Slot } from '../slots';
 import { clearStorages, getStorage } from '../storage';
@@ -308,6 +309,50 @@ describe('字符串栈（熔炉/酿造槽）', () => {
     const r = clickItemStack({ item: 'nether_wart', count: 3 }, { kind: 'material', material: 'nether_wart', count: 2 }, 0, 64, true);
     expect(r.stack).toEqual({ item: 'nether_wart', count: 5 });
     expect(r.cursor).toBeNull();
+  });
+});
+
+describe('swapSlots（数字键快移，Java 悬停 + 1-9）', () => {
+  it('异类两组整组直接交换', () => {
+    const a = slotsWith([0, stone(30)]);
+    const b = slotsWith([0, dirt(5)]);
+    const r = swapSlots(a, 0, b, 0);
+    expect(r.a[0]).toEqual(dirt(5));
+    expect(r.b[0]).toEqual(stone(30));
+  });
+
+  it('同类两组也交换位置（不并堆）', () => {
+    const a = slotsWith([0, stone(10)]);
+    const b = slotsWith([0, stone(30)]);
+    const r = swapSlots(a, 0, b, 0);
+    expect(r.a[0]).toEqual(stone(30));
+    expect(r.b[0]).toEqual(stone(10));
+  });
+
+  it('与空格交换 = 整组移过去；工具/装备整件交换', () => {
+    const a = slotsWith();
+    const b = slotsWith([3, pick()]);
+    const r = swapSlots(a, 1, b, 3);
+    expect(r.a[1]).toEqual(pick());
+    expect(r.b[3]).toBeNull();
+  });
+
+  it('同一数组内互换（热键栏格 ↔ 热键栏格）', () => {
+    const a = slotsWith([2, stone(10)], [5, dirt(4)]);
+    const r = swapSlots(a, 2, a, 5);
+    expect(r.a).toBe(r.b);
+    expect(r.a[2]).toEqual(dirt(4));
+    expect(r.a[5]).toEqual(stone(10));
+  });
+
+  it('越界/同格返回原引用', () => {
+    const a = slotsWith([0, stone(10)]);
+    const b = slotsWith();
+    expect(swapSlots(a, -1, b, 0).a).toBe(a);
+    expect(swapSlots(a, 0, b, 9).b).toBe(b);
+    const same = swapSlots(a, 0, a, 0);
+    expect(same.a).toBe(a);
+    expect(same.b).toBe(a);
   });
 });
 

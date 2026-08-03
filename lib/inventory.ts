@@ -254,6 +254,26 @@ export function shiftMove(slot: Slot, target: Slot[]): { slot: Slot; target: Slo
   return { slot: null, target: next };
 }
 
+/**
+ * 数字键快移（Java 悬停 + 1-9）：两槽整组直接交换——不并堆，同类两组也交换位置；空格照常互换。
+ * a/b 可以是同一数组（热键栏内互换）。越界或同格时原样返回（保持引用，store 可据此跳过 set）。
+ */
+export function swapSlots(a: Slot[], ai: number, b: Slot[], bi: number): { a: Slot[]; b: Slot[] } {
+  if (ai < 0 || ai >= a.length || bi < 0 || bi >= b.length) return { a, b };
+  if (a === b) {
+    if (ai === bi) return { a, b };
+    const next = [...a];
+    next[ai] = a[bi] ?? null;
+    next[bi] = a[ai] ?? null;
+    return { a: next, b: next };
+  }
+  const nextA = [...a];
+  const nextB = [...b];
+  nextA[ai] = b[bi] ?? null;
+  nextB[bi] = a[ai] ?? null;
+  return { a: nextA, b: nextB };
+}
+
 // ——— 字符串栈（熔炉/酿造 { item, count }，item 为 'block:<id>' / 'material:<name>' 或裸材料名） ———
 
 export interface ItemStack {

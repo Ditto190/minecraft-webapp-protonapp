@@ -91,6 +91,8 @@ export interface GameStore {
   paused: boolean;
   /** F3 调试面板 */
   debug: boolean;
+  /** F1 隐藏 HUD（热键栏/血条/准星/调试面板等全隐，Java 截图模式）；会话内状态不持久化，GUI 面板不受影响 */
+  hudHidden: boolean;
   /** 触屏设备（初始化时检测一次）：显示触控层、禁用指针锁流程 */
   touchMode: boolean;
   /** 世界与贴图加载完成（加载中显示覆盖层） */
@@ -165,6 +167,16 @@ export interface GameStore {
   toggleFly: () => void;
   setPaused: (paused: boolean) => void;
   toggleDebug: () => void;
+  /** F1 切换 HUD 显隐（Java 截图模式） */
+  toggleHudHidden: () => void;
+  /** 统一关闭当前打开的界面（E 键；走各面板自己的 setter 保留关闭副作用：光标退回、箱盖声等） */
+  closePanels: () => void;
+  /** Q 丢弃（世界内）：手持槽丢出 1 个（all = 丢整组，Ctrl+Q），在玩家面前生成掉落实体（Java 手动丢弃 2s 拾取延迟） */
+  dropSelected: (all: boolean) => void;
+  /** GUI 悬停 Q：丢某区域某槽 1 个（all = 整组）到玩家面前；空格/越界不动，面板保持打开 */
+  dropSlot: (area: GuiArea, index: number, all: boolean) => void;
+  /** GUI 数字键快移（Java 悬停 + 1-9）：某区域某槽与热键栏 hotbarIndex 整组直接交换（不并堆） */
+  swapWithHotbar: (area: GuiArea, index: number, hotbarIndex: number) => void;
   setWorldReady: (ready: boolean) => void;
   setLoadError: (msg: string | null) => void;
   /** 清错误并触发重新加载（worldRetry +1） */

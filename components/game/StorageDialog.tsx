@@ -3,7 +3,7 @@
 import { getStorage } from '@/lib/storage';
 import { useGameStore } from '@/lib/store';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
-import { GuiSlot, McGuiFrame } from './McGui';
+import { GuiSlot, McGuiFrame, trackSlotHover } from './McGui';
 
 /** 容器界面（箱子/木桶）：27 格容器 + 27 背包 + 9 热键栏。
  *  MC Java 光标拖拽：左键拿放/合并/交换，右键半取/单放，shift 快移（容器↔背包/热键栏），
@@ -40,6 +40,7 @@ export function StorageDialog() {
               onPress={(info) => slotMouseDown('storage', i, info)}
               onDragEnter={() => slotDragEnter('storage', i)}
               onDoubleClick={() => slotDoubleClick('storage', i)}
+              onHoverChange={(h) => trackSlotHover('storage', i, h)}
             />
           ))}
           {mainSlots.map((slot, i) => (
@@ -50,6 +51,7 @@ export function StorageDialog() {
               onPress={(info) => slotMouseDown('main', i, info)}
               onDragEnter={() => slotDragEnter('main', i)}
               onDoubleClick={() => slotDoubleClick('main', i)}
+              onHoverChange={(h) => trackSlotHover('main', i, h)}
             />
           ))}
           {hotbarSlots.map((slot, i) => (
@@ -60,6 +62,7 @@ export function StorageDialog() {
               onPress={(info) => slotMouseDown('hotbar', i, info)}
               onDragEnter={() => slotDragEnter('hotbar', i)}
               onDoubleClick={() => slotDoubleClick('hotbar', i)}
+              onHoverChange={(h) => trackSlotHover('hotbar', i, h)}
             />
           ))}
         </McGuiFrame>

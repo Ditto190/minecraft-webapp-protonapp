@@ -7,7 +7,7 @@ import { BLOCKS } from '@/lib/blocks';
 import { materialTile } from '@/lib/materials';
 import { armorDef, type ArmorPiece } from '@/lib/armor';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
-import { G, GuiSlot, McGuiFrame } from './McGui';
+import { G, GuiSlot, McGuiFrame, trackSlotHover } from './McGui';
 import { TileIcon } from './TileIcon';
 
 function itemTile(item: TradeItem): number {
@@ -126,6 +126,7 @@ export function TradingDialog() {
               onPress={(info) => slotMouseDown('main', i, info)}
               onDragEnter={() => slotDragEnter('main', i)}
               onDoubleClick={() => slotDoubleClick('main', i)}
+              onHoverChange={(h) => trackSlotHover('main', i, h)}
             />
           ))}
           {hotbarSlots.map((s, i) => (
@@ -136,6 +137,7 @@ export function TradingDialog() {
               onPress={(info) => slotMouseDown('hotbar', i, info)}
               onDragEnter={() => slotDragEnter('hotbar', i)}
               onDoubleClick={() => slotDoubleClick('hotbar', i)}
+              onHoverChange={(h) => trackSlotHover('hotbar', i, h)}
             />
           ))}
         </McGuiFrame>

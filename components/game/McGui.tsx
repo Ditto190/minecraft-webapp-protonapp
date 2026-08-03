@@ -8,12 +8,13 @@
 // 触屏（pointerType === 'touch'）走 beginTouchPress 延迟判定：快速点按 = 左键、长按 = 右键单发、
 // 按住移动 = 左键 + 拖动分发（触屏 pointer capture 挡住 pointerenter，用 elementFromPoint hit-test 找格）。
 
-import type { ReactNode } from 'react';
+import { useEffect, type ReactNode } from 'react';
 import { BLOCKS } from '@/lib/blocks';
 import { materialTile } from '@/lib/materials';
 import { withBase } from '@/lib/basepath';
 import { BUNDLE_CAPACITY, BUNDLE_NAME, bundleContents, bundleUsed, isBundleSlot, type Slot } from '@/lib/slots';
 import { useGameStore } from '@/lib/store';
+import type { GuiArea } from '@/lib/store-types';
 import { createTouchPress, LONG_PRESS_MS, pressMove, pressTimeout, pressUp, type TouchButton, type TouchPressState } from '@/lib/touchGestures';
 import { slotDurabilityPct, slotEnchanted, slotName, slotTile } from './slotDisplay';
 import { TileIcon } from './TileIcon';
@@ -121,6 +122,18 @@ function slotPointerDown(e: { pointerType: string; pointerId: number; clientX: n
   else onPress({ button: e.button, shift: e.shiftKey });
 }
 
+// ——— GUI 快捷键（Java）：悬停 Q 丢弃 / 悬停数字键与热键栏交换 / E 关闭界面 ———
+
+/** 当前指针悬停的格子（Q 丢弃 / 数字键快移的目标；模块级 ephemeral，不进 React 状态）。
+ *  由 GuiSlot 的 onHoverChange 维护；McGuiFrame 卸载（面板关闭）时清空 */
+let hoverSlot: { area: GuiArea; index: number } | null = null;
+
+/** 登记/清除悬停格（GuiSlot onHoverChange 回调；直接用 GuiSlot 拼格子的面板可按 area/index 接入） */
+export function trackSlotHover(area: GuiArea, index: number, hovering: boolean): void {
+  if (hovering) hoverSlot = { area, index };
+  else if (hoverSlot?.area === area && hoverSlot.index === index) hoverSlot = null;
+}
+
 /** GUI 框架：container 纹理背景（原始尺寸不拉伸、裁剪面板，mx-auto 屏幕居中），children 放特有槽。
  *  标准面板 352x332（纹理 512x512）；交易台等宽面板用 width/imgW 覆盖（如 villager.png 为 552x332 / 1024x512） */
 export function McGuiFrame({
@@ -141,6 +154,38 @@ export function McGuiFrame({
   /** false 时取消 mx-auto（与配方书等侧栏并排时由外层 flex 控制布局） */
   centered?: boolean;
 }) {
+  // GUI 快捷键（Java）：悬停 Q 丢 1 个（Ctrl+Q 丢整组）、悬停 1-9 该槽与热键栏格整组交换、E 关闭界面。
+  // Esc 由 base-ui Dialog 自身关闭（BlockPicker 自听），不重复接；输入框聚焦不劫持（搜索框可正常打字）。
+  // 面板互斥 → 任一时刻只有一个 McGuiFrame 挂载，监听器不会重复触发
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.target instanceof HTMLElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+      if (e.repeat) return;
+      const s = useGameStore.getState();
+      if (e.code === 'KeyE') {
+        s.closePanels();
+        return;
+      }
+      const h = hoverSlot;
+      if (!h) return;
+      if (e.code === 'KeyQ') {
+        e.preventDefault();
+        s.dropSlot(h.area, h.index, e.ctrlKey || e.metaKey);
+        return;
+      }
+      if (e.code.startsWith('Digit')) {
+        const n = Number(e.code.slice(5));
+        if (n < 1 || n > 9) return;
+        e.preventDefault();
+        s.swapWithHotbar(h.area, h.index, n - 1);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => {
+      window.removeEventListener('keydown', onKey);
+      hoverSlot = null; // 面板关闭后清掉悬停，避免残留指向已关界面
+    };
+  }, []);
   return (
     <div
       className={`relative select-none overflow-hidden ${centered ? 'mx-auto' : ''}`}
@@ -180,6 +225,7 @@ export function GuiSlot({
   onPress,
   onDragEnter,
   onDoubleClick,
+  onHoverChange,
   title,
   disabled,
 }: {
@@ -193,6 +239,8 @@ export function GuiSlot({
   onDragEnter?: () => void;
   /** 双击（光标有物时收集同类） */
   onDoubleClick?: () => void;
+  /** 悬停进出（GUI 快捷键 Q/数字键的悬停跟踪） */
+  onHoverChange?: (hovering: boolean) => void;
   title?: string;
   disabled?: boolean;
 }) {
@@ -207,7 +255,11 @@ export function GuiSlot({
       data-mc-slot={onDragEnter ? '' : undefined}
       onClick={onClick}
       onPointerDown={onPress ? (e) => slotPointerDown(e, onPress) : undefined}
-      onPointerEnter={onDragEnter}
+      onPointerEnter={() => {
+        onDragEnter?.();
+        onHoverChange?.(true);
+      }}
+      onPointerLeave={onHoverChange ? () => onHoverChange(false) : undefined}
       onDoubleClick={onDoubleClick}
       title={title ?? (bundlePct !== null ? bundleTitle(slot) : undefined)}
       disabled={disabled}
@@ -301,6 +353,7 @@ export function GuiMainSlots({
           onPress={onSlotPress ? (info) => onSlotPress(i, info) : undefined}
           onDragEnter={onSlotDragEnter ? () => onSlotDragEnter(i) : undefined}
           onDoubleClick={onSlotDoubleClick ? () => onSlotDoubleClick(i) : undefined}
+          onHoverChange={(h) => trackSlotHover('main', i, h)}
         />
       ))}
     </>
@@ -332,6 +385,7 @@ export function GuiHotbarSlots({
           onPress={onSlotPress ? (info) => onSlotPress(i, info) : undefined}
           onDragEnter={onSlotDragEnter ? () => onSlotDragEnter(i) : undefined}
           onDoubleClick={onSlotDoubleClick ? () => onSlotDoubleClick(i) : undefined}
+          onHoverChange={(h) => trackSlotHover('hotbar', i, h)}
         />
       ))}
     </>

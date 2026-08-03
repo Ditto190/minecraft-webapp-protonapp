@@ -495,6 +495,7 @@ export function Hud() {
   const flying = useGameStore((s) => s.flying);
   const paused = useGameStore((s) => s.paused);
   const debug = useGameStore((s) => s.debug);
+  const hudHidden = useGameStore((s) => s.hudHidden);
   const touchMode = useGameStore((s) => s.touchMode);
   const worldMode = useGameStore((s) => s.worldMode);
   const dead = useGameStore((s) => s.dead);
@@ -503,6 +504,19 @@ export function Hud() {
   const setSlot = useGameStore((s) => s.setSlot);
   const setCraftingOpen = useGameStore((s) => s.setCraftingOpen);
   const panelOpen = useGameStore(anyPanelOpen);
+
+  // F1 切换 HUD 显隐（Java 截图模式：热键栏/血条/准星/调试面板等全隐，GUI 面板不受影响；会话内状态不持久化）
+  // （本文件 KeyboardEvent 已绑定 React 类型供 SurvivalCell 用，此处用 DOM 全局类型）
+  useEffect(() => {
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.code !== 'F1' || e.repeat) return;
+      if (e.target instanceof HTMLElement && ['INPUT', 'TEXTAREA', 'SELECT'].includes(e.target.tagName)) return;
+      e.preventDefault(); // Chrome F1 默认打开帮助页
+      useGameStore.getState().toggleHudHidden();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []);
 
   // 当前选中项名称（创造/生存同一套槽位：方块/材料/工具/装备）
   const heldSlot = hotbarSlots[selectedSlot];
@@ -513,29 +527,32 @@ export function Hud() {
       {/* HUD 动画 keyframes（饥饿抖动 / 心脏白闪） */}
       <style>{HUD_KEYFRAMES}</style>
 
-      {/* 准星 */}
-      <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-2xl font-light text-white mix-blend-difference">
-        +
-      </div>
+      {/* 准星（F1 隐藏 HUD 时同隐，下同） */}
+      {!hudHidden && (
+        <div className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 text-2xl font-light text-white mix-blend-difference">
+          +
+        </div>
+      )}
 
       {/* 攻击冷却蓄力条（MC 1.9，准星下方） */}
-      {!dead && <AttackIndicator />}
+      {!dead && !hudHidden && <AttackIndicator />}
 
       {/* 进食/饮用读条（MC Java，准星上方） */}
-      {!dead && <EatIndicator />}
+      {!dead && !hudHidden && <EatIndicator />}
 
       {/* 吃完打嗝（监听 lastAteAt） */}
       <EatBurp />
 
       {/* Boss 血条 */}
-      <BossBar />
+      {!hudHidden && <BossBar />}
 
       {/* 竖屏触屏提示（建议横屏） */}
-      {touchMode && <PortraitHint />}
+      {touchMode && !hudHidden && <PortraitHint />}
 
-      <Notice />
+      {!hudHidden && <Notice />}
 
       {/* 热键栏（可点选，移动端小屏缩小；创造=固定面板，生存=槽位背包；生存时血量饥饿置顶） */}
+      {!hudHidden && (
       <div className="pointer-events-auto absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 flex-col items-center gap-1">
         {worldMode === 'survival' && <SurvivalBars />}
         <div className="text-center text-sm text-white drop-shadow-md">
@@ -571,6 +588,7 @@ export function Hud() {
           </div>
         )}
       </div>
+      )}
 
       {/* 受击红屏闪烁 */}
       {lastDamageAt > 0 && (
@@ -582,7 +600,7 @@ export function Hud() {
       )}
 
       {/* 触屏控制层 */}
-      {touchMode && !paused && <TouchControls />}
+      {touchMode && !paused && !hudHidden && <TouchControls />}
 
       {/* 暂停遮罩（指针未锁定；有界面打开时不显示，关掉界面即可直接继续） */}
       {paused && !panelOpen && <PauseOverlay />}
@@ -614,8 +632,8 @@ export function Hud() {
       {/* 光标堆叠跟随件（MC Java 光标拖拽；含全局 pointerup 结束拖动） */}
       <CursorItem />
 
-      {/* F3 调试面板 */}
-      {debug && <DebugPanel />}
+      {/* F3 调试面板（F1 隐藏 HUD 时同隐，Java 一致） */}
+      {debug && !hudHidden && <DebugPanel />}
     </div>
   );
 }
