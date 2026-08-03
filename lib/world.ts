@@ -1,27 +1,28 @@
 // 体素世界：chunk 存储、地形与结构生成、方块读写、脏标记
 
-import { AIR, BLOCK_BY_KEY, BLOCKS, LAVA, STONE, WATER } from './blocks';
-import { BADLANDS_BANDS, BIOME_SURFACE } from './biomes';
+import { AIR, BLOCKS } from './blocks';
 import { enqueueFluid } from './fluids';
 import { notifyCropBlockSet } from './crops';
 import { notifyBlockSet } from './saplings';
 import { notifyRedstone } from './redstone';
-import { createTerrain, hash2, hashString, mulberry32, SEA_LEVEL, type Biome, type Terrain } from './noise';
+import { createTerrain, hashString, type Terrain } from './noise';
 import { generateNetherChunk } from './nether';
 import { generateEndChunk } from './end';
-import { applyAirExposure, applyOres } from './oregen';
-import { applyGeodes } from './geodes';
 import { cascadeLight } from './lights';
-import { applyStructures } from './structures';
-import { applyStronghold } from './stronghold';
-import { HUGE_MUSHROOM_MAX_H, TREE_MAX_H, writeHugeMushroom, writeTree } from './trees';
+import { getStorage } from './storage';
+import { generateChunk, type ChestLoot } from './genCore';
+import { getGenPool } from './genPool';
 
 // 网格常量定义在叶子模块 lib/grid.ts（worker 端经 mesher 引用时不会拖入本模块的依赖链）；此处再导出保持既有引用兼容
 export { CHUNK_SIZE, WORLD_HEIGHT, CHUNK_VOLUME, localIndex, chunkKey } from './grid';
 import { CHUNK_SIZE, WORLD_HEIGHT, CHUNK_VOLUME, localIndex, chunkKey } from './grid';
 
-/** 树形/巨蘑菇最大外扩格数（金合欢斜干 1 + 5×5 冠 2；巨蘑菇伞盖 2），跨 chunk 一致所需的环宽 */
-const TREE_RING = 3;
+// 地形生成管线已抽到叶子模块 lib/genCore.ts（生成 Worker 与主线程同步兜底共用，保证逐格一致）；
+// 此处再导出保持既有引用兼容（测试/外部按 '../world' 引入）
+export { generateChunk } from './genCore';
+
+/** worker/注入生成完成后的落地回调（data 为 worker 产物，chests 为生成期登记的结构战利品） */
+export type GenApply = (data: Uint16Array, chests?: ChestLoot[]) => void;
 
 export class Chunk {
   readonly data = new Uint16Array(CHUNK_VOLUME);
@@ -41,409 +42,6 @@ export class Chunk {
   ) {}
 }
 
-/** 用地形填充 chunk（确定性的；树木含 ±TREE_RING 格边缘以跨 chunk 一致）；seedHash 用于村庄结构 */
-export function generateChunk(terrain: Terrain, cx: number, cz: number, data: Uint16Array, seedHash = 0): void {
-  // 列高度/群系缓存：同一列在地形填充、洞穴、灌水、树木、植被多轮中反复查询，每列只算一次。
-  // 缓存覆盖树木环 ±TREE_RING 共 (16+2·TREE_RING)² 列（chunk 内 16×16 是其中子集）
-  const RING = CHUNK_SIZE + TREE_RING * 2;
-  const hCache = new Int16Array(RING * RING).fill(-2); // -2 = 未算过（heightAt 只会返回 -1 或 ≥1）
-  const bCache: (Biome | undefined)[] = new Array(RING * RING);
-  const ringIndex = (wx: number, wz: number) => (wx - cx * CHUNK_SIZE + TREE_RING) * RING + (wz - cz * CHUNK_SIZE + TREE_RING);
-  const cachedHeightAt = (wx: number, wz: number): number => {
-    const i = ringIndex(wx, wz);
-    let h = hCache[i];
-    if (h === -2) {
-      h = terrain.heightAt(wx, wz);
-      hCache[i] = h;
-    }
-    return h;
-  };
-  const cachedBiomeAt = (wx: number, wz: number): Biome => {
-    const i = ringIndex(wx, wz);
-    return (bCache[i] ??= terrain.biomeAt(wx, wz));
-  };
-  const K = (key: string) => BLOCK_BY_KEY[key].id;
-  const SNOW_BLOCK = K('snow_block');
-  const GRASS = K('grass');
-  const DIRT = K('dirt');
-  const SAND = K('sand');
-  const GRAVEL = K('gravel');
-  const PODZOL = K('podzol');
-  const MYCELIUM = K('mycelium');
-  const RED_SAND = K('red_sand');
-
-  for (let x = 0; x < CHUNK_SIZE; x++) {
-    for (let z = 0; z < CHUNK_SIZE; z++) {
-      const wx = cx * CHUNK_SIZE + x;
-      const wz = cz * CHUNK_SIZE + z;
-      const h = cachedHeightAt(wx, wz);
-      if (h < 0) continue;
-      const biome = cachedBiomeAt(wx, wz);
-      const surface = BIOME_SURFACE[biome];
-      const top = Math.min(h, WORLD_HEIGHT - 1);
-      // 群系表层微调：山地按雪线分带（山麓草石 → 裸岩 → 积雪），针叶林灰化土斑块
-      let topBlock = surface.top;
-      let fillerBlock = surface.filler;
-      if (biome === 'mountains') {
-        const sl = terrain.snowlineAt(wx, wz);
-        if (top >= sl) {
-          topBlock = SNOW_BLOCK;
-          fillerBlock = STONE;
-        } else if (top >= sl - 6) {
-          topBlock = STONE;
-          fillerBlock = STONE;
-        } else {
-          topBlock = hash2(seedHash ^ 0x3f7a11, wx, wz) < 0.3 ? GRAVEL : GRASS;
-          fillerBlock = DIRT;
-        }
-      } else if (biome === 'taiga' && hash2(seedHash ^ 0x9d2b4c, wx, wz) < 0.35) {
-        topBlock = PODZOL;
-      }
-      const beach = top <= SEA_LEVEL + 1;
-      // 恶地陶瓦地层：列级色带偏移（MC 侵蚀恶地的彩色地层）
-      const bandOff = biome === 'badlands' ? Math.floor(hash2(seedHash ^ 0x6b1e7a, wx, wz) * BADLANDS_BANDS.length * 3) : 0;
-      for (let y = 0; y <= top; y++) {
-        let id: number = STONE;
-        if (y === top) id = beach ? (surface.beach ?? topBlock) : topBlock;
-        else if (y >= top - 3) id = fillerBlock;
-        else if (biome === 'badlands' && y >= top - 32) {
-          id = BADLANDS_BANDS[Math.abs(Math.floor((y + bandOff) / 3)) % BADLANDS_BANDS.length];
-        }
-        data[localIndex(x, y, z)] = id;
-      }
-      // 水下地表：海床/河床换成群系的水下组成（顶两格，按列哈希取材质）
-      if (top < SEA_LEVEL) {
-        const pick = surface.underwater[Math.floor(hash2(seedHash, wx, wz) * surface.underwater.length)];
-        data[localIndex(x, top, z)] = pick;
-        if (top - 1 >= 0) data[localIndex(x, top - 1, z)] = pick;
-      }
-      // 水面：寒带封冻为冰，其余为水
-      for (let y = top + 1; y <= SEA_LEVEL; y++) {
-        data[localIndex(x, y, z)] = y === SEA_LEVEL && surface.waterTop ? surface.waterTop : WATER;
-      }
-    }
-  }
-  // 基岩层 + 深板岩渐变 + 团簇矿脉（地形填充后、树木/村庄前）
-  applyOres(seedHash, terrain, cx, cz, data);
-  // 紫水晶洞：三层球壳（须在洞穴雕刻前，洞穴可自然破开晶洞）
-  applyGeodes(seedHash, terrain, cx, cz, data);
-  // 洞穴雕刻（3D 噪声：意面隧道 + 奶酪洞腔；矿石填完后刻空，洞壁即现矿脉）
-  for (let x = 0; x < CHUNK_SIZE; x++) {
-    for (let z = 0; z < CHUNK_SIZE; z++) {
-      const wx = cx * CHUNK_SIZE + x;
-      const wz = cz * CHUNK_SIZE + z;
-      const h = cachedHeightAt(wx, wz);
-      if (h < 0) continue;
-      for (let y = 4; y <= h; y++) {
-        if (terrain.caveAt(wx, y, wz, h)) data[localIndex(x, y, z)] = AIR;
-      }
-    }
-  }
-  // 海底洞穴灌水：海平面以下被雕空的洞腔，上方是水的向下灌满（MC 含水层观感，避免出现水下黑色气穴）
-  for (let x = 0; x < CHUNK_SIZE; x++) {
-    for (let z = 0; z < CHUNK_SIZE; z++) {
-      const wx = cx * CHUNK_SIZE + x;
-      const wz = cz * CHUNK_SIZE + z;
-      const h = cachedHeightAt(wx, wz);
-      if (h < 0 || h >= SEA_LEVEL) continue;
-      for (let y = SEA_LEVEL; y >= 4; y--) {
-        const i = localIndex(x, y, z);
-        if (data[i] === AIR && data[localIndex(x, y + 1, z)] === WATER) data[i] = WATER;
-      }
-    }
-  }
-  // 地下含水层：含水层区海平面以下的深洞灌水（MC 1.18 水帘洞；不破地表的洞才灌）
-  for (let x = 0; x < CHUNK_SIZE; x++) {
-    for (let z = 0; z < CHUNK_SIZE; z++) {
-      const wx = cx * CHUNK_SIZE + x;
-      const wz = cz * CHUNK_SIZE + z;
-      if (!terrain.aquiferAt(wx, wz)) continue;
-      const h = cachedHeightAt(wx, wz);
-      if (h < 0) continue;
-      for (let y = Math.min(h - 4, SEA_LEVEL - 2); y >= 5; y--) {
-        const i = localIndex(x, y, z);
-        if (data[i] === AIR) data[i] = WATER;
-      }
-    }
-  }
-  // 深层岩浆湖：y≤10 的雕空洞腔自底向上灌岩浆（下方非空非水才灌，形成平整湖面）
-  const LAVA_LAKE_TOP = 10;
-  for (let x = 0; x < CHUNK_SIZE; x++) {
-    for (let z = 0; z < CHUNK_SIZE; z++) {
-      for (let y = 2; y <= LAVA_LAKE_TOP; y++) {
-        const i = localIndex(x, y, z);
-        if (data[i] !== AIR) continue;
-        const below = data[localIndex(x, y - 1, z)];
-        if (below !== AIR && below !== WATER) data[i] = LAVA;
-      }
-    }
-  }
-  // 矿石空气暴露削减（Java discardChanceOnAirExposure）：洞壁上裸露的埋藏型矿（下层煤/深层金/钻石/青金石）
-  // 按概率回退为母岩。须在洞穴雕刻与灌水/岩浆之后（只认空气格，水/岩浆填充的洞腔不算暴露），且在
-  // 洞穴群系装饰之前（装饰只填空气格与地表地板，不影响矿格邻接关系）
-  applyAirExposure(seedHash, terrain, cx, cz, data);
-  // 洞穴群系装饰（滴水石洞/繁茂洞穴）：洞地板铺滴水石/苔藓并立笋或杜鹃，洞顶倒挂钟乳/洞穴藤蔓
-  for (let x = 0; x < CHUNK_SIZE; x++) {
-    for (let z = 0; z < CHUNK_SIZE; z++) {
-      const wx = cx * CHUNK_SIZE + x;
-      const wz = cz * CHUNK_SIZE + z;
-      const zone = terrain.undergroundAt(wx, wz);
-      if (!zone) continue;
-      const h = cachedHeightAt(wx, wz);
-      if (h < 0) continue;
-      const yMax = Math.min(h - 4, WORLD_HEIGHT - 2); // 只装饰够深的洞，不动地表坑洼
-      for (let y = 5; y <= yMax; y++) {
-        const i = localIndex(x, y, z);
-        if (data[i] !== AIR) continue;
-        const below = data[localIndex(x, y - 1, z)];
-        const above = data[localIndex(x, y + 1, z)];
-        const r = hash2(seedHash ^ Math.imul(y, 0x9e3779b9), wx, wz);
-        if (BLOCKS[below]?.opaque) {
-          if (zone === 'dripstone') {
-            if (r < 0.3) data[localIndex(x, y - 1, z)] = K('dripstone_block');
-            else if (r < 0.42) {
-              data[localIndex(x, y - 1, z)] = K('dripstone_block');
-              data[i] = K('pointed_dripstone');
-            }
-          } else {
-            if (r < 0.35) data[localIndex(x, y - 1, z)] = K('moss_block');
-            else if (r < 0.45) {
-              data[localIndex(x, y - 1, z)] = K('moss_block');
-              data[i] = r < 0.42 ? K('azalea') : K('flowering_azalea');
-            }
-          }
-        } else if (BLOCKS[above]?.opaque) {
-          if (zone === 'dripstone') {
-            if (r < 0.1) data[i] = K('pointed_dripstone_down');
-          } else if (r < 0.08) data[i] = K('cave_vines');
-        }
-      }
-    }
-  }
-  // 树木与巨蘑菇：检查本 chunk 及周围 TREE_RING 格内的列，只写入落在本 chunk 的部分（跨 chunk 一致）
-  const put = (lx: number, y: number, lz: number, id: number, onlyAir: boolean) => {
-    if (lx < 0 || lx >= CHUNK_SIZE || lz < 0 || lz >= CHUNK_SIZE || y < 0 || y >= WORLD_HEIGHT) return;
-    const i = localIndex(lx, y, lz);
-    if (onlyAir && data[i] !== AIR) return;
-    data[i] = id;
-  };
-  for (let tx = -TREE_RING; tx < CHUNK_SIZE + TREE_RING; tx++) {
-    for (let tz = -TREE_RING; tz < CHUNK_SIZE + TREE_RING; tz++) {
-      const wx = cx * CHUNK_SIZE + tx;
-      const wz = cz * CHUNK_SIZE + tz;
-      const h = cachedHeightAt(wx, wz);
-      if (h <= SEA_LEVEL + 1 || h >= WORLD_HEIGHT - 2) continue;
-      const rand = mulberry32((seedHash ^ Math.imul(wx, 374761393) ^ Math.imul(wz, 668265263) ^ 0x7ee5) | 0);
-      const kind = terrain.treeAt(wx, wz);
-      if (kind) {
-        if (h + TREE_MAX_H[kind] >= WORLD_HEIGHT) continue;
-        // 丛林树自带垂藤（trees.ts）；沼泽橡树按群系加垂藤
-        writeTree(put, kind, tx, h, tz, rand, { vines: cachedBiomeAt(wx, wz) === 'swamp' });
-        continue;
-      }
-      const biome = cachedBiomeAt(wx, wz);
-      // 冰刺：冰刺平原标志（浮冰高柱，偶带蓝冰基座）
-      if (biome === 'ice_spikes') {
-        if (rand() < 0.02 && h + 20 < WORLD_HEIGHT) {
-          const H = 8 + Math.floor(rand() * 11); // 8-18
-          const packed = K('packed_ice');
-          for (const [dx, dz] of [[0, 0], [1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
-            put(tx + dx, h + 1, tz + dz, packed, true);
-            put(tx + dx, h + 2, tz + dz, packed, true);
-          }
-          for (let y = h + 3; y <= h + H; y++) put(tx, y, tz, packed, true);
-          if (rand() < 0.5) {
-            for (let dx = -1; dx <= 1; dx++) {
-              for (let dz = -1; dz <= 1; dz++) {
-                if (rand() < 0.6) put(tx + dx, h, tz + dz, K('blue_ice'), false);
-              }
-            }
-          }
-        }
-        continue;
-      }
-      // 巨蘑菇：蘑菇岛成群、黑森林偶见（红/棕各半）
-      const r = rand();
-      const chance = biome === 'mushroom_fields' ? 0.03 : biome === 'dark_forest' ? 0.006 : 0;
-      if (chance > 0 && r < chance && h + HUGE_MUSHROOM_MAX_H < WORLD_HEIGHT) {
-        writeHugeMushroom(put, rand() < 0.5, tx, h, tz, rand);
-      }
-    }
-  }
-  // 村庄结构（确定性，跨 chunk 一致）
-  applyStructures(seedHash, terrain, cx, cz, data);
-  // 要塞（地下石砖结构 + 末地门房间；同样确定性，仅与要塞范围相交的 chunk 有写入）
-  applyStronghold(seedHash, cx, cz, data);
-
-  // 植被：按群系撒花草/仙人掌/甘蔗/蘑菇/睡莲/瓜果（只有支撑且上方为空才放）
-  for (let x = 0; x < CHUNK_SIZE; x++) {
-    for (let z = 0; z < CHUNK_SIZE; z++) {
-      const wx = cx * CHUNK_SIZE + x;
-      const wz = cz * CHUNK_SIZE + z;
-      const biome = cachedBiomeAt(wx, wz);
-      const h = cachedHeightAt(wx, wz);
-      if (h < 0) continue;
-      const surf = data[localIndex(x, h, z)];
-      // 睡莲：仅沼泽未封冻的水面（Java 睡莲为沼泽特产；浮在水面之上的空气格）
-      if (h < SEA_LEVEL) {
-        if (
-          biome === 'swamp' &&
-          data[localIndex(x, SEA_LEVEL, z)] === WATER &&
-          data[localIndex(x, SEA_LEVEL + 1, z)] === AIR &&
-          hash2(seedHash ^ 0x1e7b3d, wx, wz) < 0.08
-        ) {
-          data[localIndex(x, SEA_LEVEL + 1, z)] = K('lily_pad');
-        }
-        continue;
-      }
-      if (h < SEA_LEVEL || h + 1 >= WORLD_HEIGHT) continue;
-      const aboveI = localIndex(x, h + 1, z);
-      if (data[aboveI] !== AIR) continue;
-      // 甘蔗：岸线（脚下即海平面）四邻同高有水，宿主为草/土/沙/灰化土/菌丝（MC 一致）
-      if (h === SEA_LEVEL && (surf === GRASS || surf === DIRT || surf === SAND || surf === PODZOL || surf === MYCELIUM)) {
-        // 邻格是否有水：chunk 内直接读数据；跨界邻格不能读（生成期触发邻 chunk 隐式生成会链式扩散），
-        // 按地形推断——邻列低于海平面且水面未封冻，同高格即是水（消除 chunk 边界的规则空缺线）
-        const waterBeside = (dx: number, dz: number): boolean => {
-          const lx = x + dx;
-          const lz = z + dz;
-          if (lx >= 0 && lx < CHUNK_SIZE && lz >= 0 && lz < CHUNK_SIZE) return data[localIndex(lx, h, lz)] === WATER;
-          const nh = cachedHeightAt(wx + dx, wz + dz);
-          return nh >= 0 && nh < SEA_LEVEL && !BIOME_SURFACE[cachedBiomeAt(wx + dx, wz + dz)].waterTop;
-        };
-        const nearWater = waterBeside(1, 0) || waterBeside(-1, 0) || waterBeside(0, 1) || waterBeside(0, -1);
-        if (nearWater && hash2(seedHash ^ 0xca3e11, wx, wz) < 0.3) {
-          const ch = 1 + Math.floor(hash2(seedHash ^ 0xca3f22, wx, wz) * 3);
-          for (let i = 0; i < ch && h + 1 + i < WORLD_HEIGHT; i++) data[localIndex(x, h + 1 + i, z)] = K('sugar_cane');
-          continue;
-        }
-      }
-      const r = hash2(seedHash ^ 0x51ab3f, wx, wz);
-      const pick = hash2(seedHash ^ 0x7c91e2, wx, wz);
-      switch (biome) {
-        case 'plains':
-        case 'basin': {
-          if (surf !== GRASS) break;
-          if (r < 1 / 256) {
-            data[aboveI] = K('pumpkin');
-            break;
-          }
-          // 高草丛（双格，MC 平原点缀）
-          if (r < 0.003 && h + 2 < WORLD_HEIGHT && data[localIndex(x, h + 2, z)] === AIR) {
-            data[aboveI] = K('tall_grass');
-            data[localIndex(x, h + 2, z)] = K('tall_grass_top');
-            break;
-          }
-          if (r >= 0.012) break;
-          data[aboveI] =
-            pick < 0.45 ? K('short_grass') : pick < 0.6 ? K('dandelion') : pick < 0.75 ? K('poppy') : pick < 0.85 ? K('cornflower') : pick < 0.95 ? K('oxeye_daisy') : K('allium');
-          break;
-        }
-        case 'forest':
-        case 'birch_forest': {
-          if (surf !== GRASS || r >= 0.02) break;
-          // Java 蓝兰花仅沼泽生成，森林不出；末位用滨菊（Java 森林常见花）
-          data[aboveI] =
-            pick < 0.5 ? K('fern') : pick < 0.65 ? K('short_grass') : pick < 0.8 ? K('poppy') : pick < 0.9 ? K('dandelion') : K('oxeye_daisy');
-          break;
-        }
-        case 'taiga': {
-          if (surf !== GRASS && surf !== PODZOL) break;
-          if (r >= 0.05) break;
-          // 大型蕨（双格，针叶林标志）
-          if (pick < 0.2 && h + 2 < WORLD_HEIGHT && data[localIndex(x, h + 2, z)] === AIR) {
-            data[aboveI] = K('large_fern');
-            data[localIndex(x, h + 2, z)] = K('large_fern_top');
-            break;
-          }
-          data[aboveI] = pick < 0.5 ? K('fern') : pick < 0.75 ? K('short_grass') : pick < 0.9 ? K('poppy') : K('brown_mushroom');
-          break;
-        }
-        case 'snowy':
-        case 'ice_spikes': {
-          // 雪层覆盖（MC 雪原招牌）
-          if (hash2(seedHash ^ 0x5e11a2, wx, wz) < 0.65) data[aboveI] = K('snow_layer');
-          break;
-        }
-        case 'mountains': {
-          // 雪顶之上再覆薄雪层，峰面更有层次
-          if (surf === SNOW_BLOCK && hash2(seedHash ^ 0x5e11b3, wx, wz) < 0.4) data[aboveI] = K('snow_layer');
-          break;
-        }
-        case 'dark_forest': {
-          if (surf !== GRASS || r >= 0.03) break;
-          data[aboveI] = pick < 0.3 ? K('fern') : pick < 0.65 ? K('red_mushroom') : K('brown_mushroom');
-          break;
-        }
-        case 'desert': {
-          if (surf !== SAND) break;
-          if (r < 0.02) {
-            // 仙人掌：四邻同高须为空（MC 贴墙不长），高 1-3
-            // 跨界邻格同样按地形推断：邻列地表不高于本列，同高侧格即是空（消除边界规则空缺线）
-            const airBeside = (dx: number, dz: number): boolean => {
-              const lx = x + dx;
-              const lz = z + dz;
-              if (lx >= 0 && lx < CHUNK_SIZE && lz >= 0 && lz < CHUNK_SIZE) return data[localIndex(lx, h + 1, lz)] === AIR;
-              return cachedHeightAt(wx + dx, wz + dz) <= h;
-            };
-            const clear = airBeside(1, 0) && airBeside(-1, 0) && airBeside(0, 1) && airBeside(0, -1);
-            if (!clear) break;
-            const ch = 1 + Math.floor(pick * 3);
-            for (let i = 0; i < ch && h + 1 + i < WORLD_HEIGHT; i++) data[localIndex(x, h + 1 + i, z)] = K('cactus');
-          } else if (r < 0.05) {
-            data[aboveI] = K('dead_bush');
-          }
-          break;
-        }
-        case 'savanna': {
-          if (surf !== GRASS || r >= 0.2) break;
-          // 高草丛（双格，热带草原标志；与短草混生）
-          if (pick < 0.3 && h + 2 < WORLD_HEIGHT && data[localIndex(x, h + 2, z)] === AIR) {
-            data[aboveI] = K('tall_grass');
-            data[localIndex(x, h + 2, z)] = K('tall_grass_top');
-            break;
-          }
-          data[aboveI] = pick < 0.8 ? K('short_grass') : K('dandelion');
-          break;
-        }
-        case 'jungle': {
-          if (surf !== GRASS) break;
-          // 竹子成丛（茎段 + 带叶顶段，高 3-6）
-          if (r < 0.02 && h + 7 < WORLD_HEIGHT) {
-            const bh = 3 + Math.floor(pick * 4);
-            let ok = true;
-            for (let i = 1; i <= bh; i++) if (data[localIndex(x, h + i, z)] !== AIR) { ok = false; break; }
-            if (ok) {
-              for (let i = 1; i < bh; i++) data[localIndex(x, h + i, z)] = K('bamboo');
-              data[localIndex(x, h + bh, z)] = K('bamboo_top');
-            }
-            break;
-          }
-          if (r >= 0.06) break;
-          data[aboveI] = pick < 0.05 ? K('melon') : pick < 0.5 ? K('fern') : K('short_grass');
-          break;
-        }
-        case 'swamp': {
-          if (surf !== GRASS || r >= 0.05) break;
-          data[aboveI] = pick < 0.3 ? K('blue_orchid') : pick < 0.6 ? K('short_grass') : pick < 0.85 ? K('fern') : K('brown_mushroom');
-          break;
-        }
-        case 'badlands': {
-          if (surf !== RED_SAND && !BLOCKS[surf]?.key.endsWith('terracotta')) break;
-          if (r < 0.025) data[aboveI] = K('dead_bush');
-          break;
-        }
-        case 'mushroom_fields': {
-          if (surf !== MYCELIUM || r >= 0.03) break;
-          data[aboveI] = pick < 0.5 ? K('red_mushroom') : K('brown_mushroom');
-          break;
-        }
-        default:
-          break; // snowy / mountains / ocean / river 无地表植被
-      }
-    }
-  }
-}
-
 export class World {
   readonly terrain: Terrain;
   readonly seedHash: number;
@@ -452,11 +50,23 @@ export class World {
   readonly dirtyChunks = new Set<string>();
   /** 待持久化的 chunk key */
   readonly modifiedChunks = new Set<string>();
+  /**
+   * 光照增量编辑队列（flushLight 逐条做除光+播种 BFS）：打包五元组 x,y,z,oldId,newId。
+   * 仅记录不透明度/发光变化的 setBlock；生成/读档 chunk 无旧光照基线，仍走 lightDirty 全量重算
+   */
+  readonly lightEdits: number[] = [];
   /** chunk 集合变化计数（增删时 +1） */
   generation = 0;
   /** chunk 因超出距离被卸载前回调（用于存档） */
   onChunkRemoved: ((chunk: Chunk) => void) | null = null;
   private readonly saved: Map<string, Uint16Array>;
+  /** 已派发给 worker、尚未落地的 chunk key（updateAround 不再重复派发，落地/失败/取消时移除） */
+  readonly pendingGen = new Set<string>();
+  /**
+   * 异步地形生成注入点（测试/自定义调度用；null = 用全局生成 Worker 池）。
+   * 返回 true = 已受理；完成后必须调 apply 落地（apply 幂等保护：chunk 已存在则丢弃）
+   */
+  genDispatch: ((cx: number, cz: number, apply: GenApply) => boolean) | null = null;
 
   constructor(
     public readonly seed: string,
@@ -472,19 +82,25 @@ export class World {
     const key = chunkKey(cx, cz);
     const existing = this.chunks.get(key);
     if (existing) return existing;
+    // 有在途的 worker 生成：同步兜底（传送/珍珠/边缘访问等罕见路径）先出结果，
+    // 取消在途请求（来不及取消的到达后由 applyGeneratedChunk 的存在性检查丢弃）
+    if (this.pendingGen.delete(key)) getGenPool()?.cancel(key);
     const chunk = new Chunk(cx, cz);
     const s = this.saved.get(key);
     if (s && s.length === CHUNK_VOLUME) {
       chunk.data.set(s);
       // 存档恢复的 chunk 光照数组为全 0：标脏交给 flushLight 限流重算（否则世界渲染全黑）
       chunk.lightDirty = true;
+      this.chunks.set(key, chunk);
     } else {
       if (this.terrain.kind === 'nether') generateNetherChunk(this.terrain, cx, cz, chunk.data, this.seedHash);
       else if (this.terrain.kind === 'end') generateEndChunk(this.terrain, cx, cz, chunk.data, this.seedHash);
       else generateChunk(this.terrain, cx, cz, chunk.data, this.seedHash);
+      // 先入册再级联：邻居重算的边界接力要能读到本 chunk（否则新 chunk 的光照
+      // 传不进既有 chunk，边界单侧陈旧直到下次偶然重算——明暗接缝的源头之一）
+      this.chunks.set(key, chunk);
       cascadeLight(this, chunk);
     }
-    this.chunks.set(key, chunk);
     this.dirtyChunks.add(key);
     // 相邻已存在 chunk 需要重网格化，避免共享边界面重复
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
@@ -555,13 +171,14 @@ export class World {
     if ((z & 15) === CHUNK_SIZE - 1) this.markDirty(cx, cz + 1);
     // 水及其邻域进入流体检查队列（生成过程直接写 data 不走这里，不会触发）
     enqueueFluid(x, y, z);
-    // 光照变更打标记（建网前由 flushLight 统一重算，避免批量编辑雪崩）。
+    // 光照变更记入增量队列（建网前由 flushLight 统一做除光+播种 BFS，避免批量编辑雪崩）。
     // 仅当不透明度或发光值变化才需要重算——流水/作物/树叶凋零等非透明变化不影响光照，
-    // 大面积水蔓延时这条能省掉成片的无效重算，避免阻塞主线程
+    // 大面积水蔓延时这条能省掉成片的无效重算，避免阻塞主线程。
+    // chunk 已有全量重算排队（生成/读档无旧光照基线）时无需记录：数据变更会被全量覆盖
     const oldDef = BLOCKS[oldId];
     const newDef = BLOCKS[id];
     if ((oldDef?.opaque ?? false) !== (newDef?.opaque ?? false) || (oldDef?.light ?? 0) !== (newDef?.light ?? 0)) {
-      chunk.lightDirty = true;
+      if (!chunk.lightDirty) this.lightEdits.push(x, y, z, oldId, id);
     }
     // 树苗登记 / 原木断供触发树叶凋零（生成过程直接写 data 不走这里）
     notifyBlockSet(this, x, y, z, oldId, id);
@@ -610,37 +227,119 @@ export class World {
   }
 
   /**
-   * 以 (x, z) 为中心确保半径内 chunk 已生成（毫秒时间片由近及远生成，超时留给下一帧），卸载半径外的 chunk。
-   * budgetMs 为本次调用的生成预算：至少生成 1 个（保证持续推进），此后每生成一个检查一次超时。
-   * 返回本轮后仍缺失的 chunk 数（0 = 周围已铺满，调用方据此判定初始加载完成）
+   * 派发一个 chunk 的 worker 异步生成（updateAround 热路径）。返回 true = 已受理（在途）；
+   * false = 无可用派发通道（池被禁用/Worker 不可用），调用方回退同步 getChunk。
+   * 失败（resolve null）时自动移出 pendingGen，下轮重扫重新派发或同步兜底
+   */
+  private requestGen(cx: number, cz: number): boolean {
+    const key = chunkKey(cx, cz);
+    const apply: GenApply = (data, chests) => {
+      this.pendingGen.delete(key);
+      this.applyGeneratedChunk(cx, cz, data, chests);
+    };
+    // 先标记在途再派发：注入的 dispatcher 可能同步调 apply（会自行摘掉标记）
+    this.pendingGen.add(key);
+    let accepted: boolean;
+    if (this.genDispatch) {
+      accepted = this.genDispatch(cx, cz, apply);
+    } else {
+      const pool = getGenPool();
+      if (!pool) {
+        this.pendingGen.delete(key);
+        return false;
+      }
+      accepted = true;
+      void pool.generate(key, this.seed, this.terrain.kind ?? 'overworld', cx, cz).then((r) => {
+        // worker 失败/被取消：移出在途标记，下轮 updateAround 重扫时重新派发或同步兜底
+        if (r === null) this.pendingGen.delete(key);
+        else apply(r.data, r.chests);
+      });
+    }
+    if (!accepted) this.pendingGen.delete(key);
+    return accepted;
+  }
+
+  /**
+   * worker 生成结果落地：建 chunk、挂 dirty（走既有 dirtyChunks→mesherPool 流程）、
+   * 光照标脏交 flushLight 每帧限流级联（不回同步 cascadeLight 老路——探索期成批落地时
+   * 每个 1-4ms 的级联会叠出长任务；邻居级联正确性由 flushLight 内部 cascadeLight 保证）。
+   * 在途期间存档到达的以存档为准（与 getChunk 读档优先语义一致）；chunk 已存在则丢弃
+   */
+  private applyGeneratedChunk(cx: number, cz: number, data: Uint16Array, chests?: ChestLoot[]): void {
+    const key = chunkKey(cx, cz);
+    if (data.length !== CHUNK_VOLUME) return;
+    if (this.chunks.has(key)) return; // 期间已被同步兜底/读档创建，丢弃
+    const chunk = new Chunk(cx, cz);
+    const s = this.saved.get(key);
+    if (s && s.length === CHUNK_VOLUME) {
+      chunk.data.set(s);
+    } else {
+      // transferable 产物已在主线程（结构化克隆零拷贝转移），这里最后一次落进 chunk 自有数组
+      chunk.data.set(data);
+      // 生成期登记的结构战利品并回主线程 storages（fillChest 幂等语义：已有内容不覆盖——
+      // 内容只取决于 seedHash+坐标，worker 与主线程 roll 出的结果相同，冲突时谁先登记都一样）
+      if (chests) {
+        for (const [pos, slots] of chests) {
+          const st = getStorage(pos);
+          if (st.some((sl) => sl !== null)) continue;
+          for (let i = 0; i < slots.length && i < st.length; i++) st[i] = slots[i];
+        }
+      }
+    }
+    chunk.lightDirty = true;
+    this.chunks.set(key, chunk);
+    this.dirtyChunks.add(key);
+    // 相邻已存在 chunk 需要重网格化，避免共享边界面重复（同 getChunk 加载期标脏逻辑）
+    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
+      const nk = chunkKey(cx + dx, cz + dz);
+      if (this.chunks.has(nk)) this.dirtyChunks.add(nk);
+    }
+    this.generation++;
+  }
+
+  /**
+   * 以 (x, z) 为中心确保半径内 chunk 已生成（由近及远），卸载半径外的 chunk。
+   * 无存档的缺失 chunk 优先派发 worker 异步生成（热路径，主线程零生成尖刺）；
+   * 有存档的、或 worker 不可用/失败的走 getChunk 同步路径（读档/兜底）。
+   * budgetMs 为本次调用的主线程时间预算：异步派发本身极廉价（一次 postMessage），
+   * 预算实际只约束同步生成/读档的个数；至少处理 1 个（保证持续推进），此后每个检查一次超时。
+   * 返回本轮后仍缺失的 chunk 数（含在途异步；0 = 周围已铺满，调用方据此判定初始加载完成）
    */
   updateAround(x: number, z: number, radius: number, budgetMs = 6): number {
     const pcx = x >> 4;
     const pcz = z >> 4;
     // 记忆化早退：上次重扫已铺满，且玩家未跨 chunk 边界、视距未变 → 缺失列表必为空，
     // 跳过 (2r+1)² 次 chunkKey 字符串分配 + sort + 全 Map 卸载扫描（卸载判定只随重扫做）。
-    // 注意：只有缺失全部生成完（返回 0）才写缓存，加载期每帧仍重扫以持续推进时间片生成。
+    // 注意：只有缺失全部生成完（返回 0）才写缓存，加载期每帧仍重扫以持续推进生成。
     const cache = this.aroundCache;
     if (cache && cache.pcx === pcx && cache.pcz === pcz && cache.radius === radius) return 0;
-    // 收集缺失的 chunk，按距离由近及远分批生成，避免单帧卡顿
+    // 收集缺失的 chunk（在途异步生成的不算缺失，不重复派发），按距离由近及远，避免单帧卡顿
     const missing: [number, number, number][] = [];
     for (let dx = -radius; dx <= radius; dx++) {
       for (let dz = -radius; dz <= radius; dz++) {
         const key = chunkKey(pcx + dx, pcz + dz);
-        if (!this.chunks.has(key)) missing.push([Math.max(Math.abs(dx), Math.abs(dz)), pcx + dx, pcz + dz]);
+        if (!this.chunks.has(key) && !this.pendingGen.has(key)) missing.push([Math.max(Math.abs(dx), Math.abs(dz)), pcx + dx, pcz + dz]);
       }
     }
     missing.sort((a, b) => a[0] - b[0]);
     const start = performance.now();
-    let done = 0;
+    let syncDone = 0;
+    let asyncReq = 0;
     for (const [, cx, cz] of missing) {
-      try {
-        this.getChunk(cx, cz);
-      } catch (err) {
-        // 单个 chunk 生成异常不堵死调度：下个周期还会重试，其余 chunk 照常生成
-        console.error(`chunk ${cx},${cz} 生成失败`, err);
+      const key = chunkKey(cx, cz);
+      const s = this.saved.get(key);
+      // 无存档的走 worker 异步生成；有存档的（生成产物会被存档覆盖，白白浪费 worker 算力）走同步读档
+      if ((!s || s.length !== CHUNK_VOLUME) && this.requestGen(cx, cz)) {
+        asyncReq++;
+      } else {
+        try {
+          this.getChunk(cx, cz);
+        } catch (err) {
+          // 单个 chunk 生成异常不堵死调度：下个周期还会重试，其余 chunk 照常生成
+          console.error(`chunk ${cx},${cz} 生成失败`, err);
+        }
+        syncDone++;
       }
-      done++;
       if (performance.now() - start >= budgetMs) break;
     }
 
@@ -661,9 +360,19 @@ export class World {
       if (c && this.lastChunk === c) this.lastChunk = null;
       this.generation++;
     }
-    // 本轮缺失已全部生成（含本就无缺失）：记录坐标/视距，之后同位置同视距的调用直接早退；
-    // 仍有剩余（预算耗尽）则不缓存，下帧重扫继续生成
-    if (done === missing.length) this.aroundCache = { pcx, pcz, radius };
-    return missing.length - done;
+    // 卸载半径外的在途异步请求一并取消（结果必然被丢弃，省 worker 算力）
+    for (const key of this.pendingGen) {
+      const [gx, gz] = key.split(',').map(Number);
+      if (Math.max(Math.abs(gx - pcx), Math.abs(gz - pcz)) > radius + 2) {
+        this.pendingGen.delete(key);
+        getGenPool()?.cancel(key);
+      }
+    }
+    // 本轮缺失全部落地（含本就无缺失、无在途异步）：记录坐标/视距，之后同位置同视距的调用直接早退；
+    // 仍有剩余（预算耗尽/有在途异步未落地）则不缓存，下帧重扫继续推进
+    // 仍缺失 = 本轮未处理的 + 在途未落地的（pendingGen 含本轮新派发的，别重复计数）
+    const remaining = missing.length - syncDone - asyncReq + this.pendingGen.size;
+    if (remaining === 0) this.aroundCache = { pcx, pcz, radius };
+    return remaining;
   }
 }
