@@ -22,13 +22,14 @@ import { crystalInReach, hitCrystal, tickCrystals } from '@/lib/endfight';
 import { tickFishing } from '@/lib/fishing';
 import { SEA_LEVEL, type Biome } from '@/lib/noise';
 import { aabbFree, collideAxis, PLAYER_HALF_W, PLAYER_HEIGHT, type Aabb } from '@/lib/physics';
-import { playSound, splashSound } from '@/lib/sound';
+import { playSound, splashSound, hurtSound } from '@/lib/sound';
 import { useGameStore } from '@/lib/store';
 import { anyPanelOpen } from '@/lib/store-types';
 import { resetSurvivalMem, tickSurvival, type SurvivalActions, type SurvivalEnv, type SurvivalMem, type SurvivalSnapshotLite } from '@/lib/survival';
 import { effects, effectLvls, tickEffects } from '@/lib/effects';
 import { beaconTiers, tickBeacons } from '@/lib/beacon';
 import { attackCooldownScale, TOOLS } from '@/lib/tools';
+import { maceSmashBonus } from '@/lib/xp';
 import { WORLD_HEIGHT, type World } from '@/lib/world';
 
 const EYE = 1.62; // 视点高度
@@ -977,6 +978,11 @@ export function Player() {
           attackCdTotal.current = T;
           // MC 暴击：下落中（velY<0、不着地、非水中/飞行/滑翔）命中伤害 ×1.5
           const crit = velY.current < 0 && !onGround.current && !inFluid && !flying && !gliding;
+          // MC 1.21 重锤 smash：手持重锤且下落 >1.5 格命中生物 → 分段额外伤害（含致密附魔加成，公式在 lib/xp.ts maceSmashBonus）。
+          // 摔落距离用现成的 survivalMem.fallDist（tickSurvival 逐帧累计、着地清零，故 smash 只可能在空中触发）
+          const isMace = held?.kind === 'tool' && held.tool === 'mace';
+          const smashBonus = isMace ? maceSmashBonus(survivalMem.current.fallDist, held?.kind === 'tool' ? (held.ench?.density ?? 0) : 0) : 0;
+          const smash = smashBonus > 0;
           // 击退：MC 近战命中本就有基础击退（怪会后退），击退附魔在此之上增强；原仅附魔才击退导致普通攻击打不动怪
           const kbEnch = held?.kind === 'tool' ? (held.ench?.knockback ?? 0) : 0;
           // MC 冲刺击退：冲刺中命中击退加成（约 3 格量级，≈ MC 击退 I），命中后中断冲刺
@@ -986,10 +992,16 @@ export function Player() {
             sprintBreak.current = 0.3;
           }
           const baseDmg = (tool?.attackDamage ?? 1) + (held?.kind === 'tool' ? ((held.ench?.sharpness ?? 0) * 0.5 + ((held.ench?.sharpness ?? 0) > 0 ? 0.5 : 0)) : 0) + (effects.strength > 0 ? 3 * Math.max(effectLvls.strength, beaconTiers.get('strength') ?? 1) : 0); // 拳头 1 点（半心），锋利 +0.5×级+0.5（MC Java），力量药水 +3/级（MC）
-          damageMob(mob, baseDmg * cdScale * (crit ? 1.5 : 1), playerPosition, held?.kind === 'tool' ? (held.ench?.looting ?? 0) : 0, world, kb); // 抢夺加掉落
-          // 暴击反馈：命中点推一簇亮色星状粒子（breakParticles 共享池；白雪贴图是池内最亮 tile）
-          if (crit) {
+          // smash 加成独立叠加：不吃冷却缩放、与暴击互斥（Java：smash 命中不再结算暴击）
+          damageMob(mob, baseDmg * cdScale * (crit && !smash ? 1.5 : 1) + smashBonus, playerPosition, held?.kind === 'tool' ? (held.ench?.looting ?? 0) : 0, world, kb); // 抢夺加掉落
+          // 暴击/smash 反馈：命中点推一簇亮色星状粒子（breakParticles 共享池；白雪贴图是池内最亮 tile）
+          if (crit || smash) {
             breakParticles.push({ x: mob.x - 0.5, y: mob.y + 0.4, z: mob.z - 0.5, tile: tileOf('snow') });
+          }
+          if (smash) {
+            // MC：smash 命中免除本次摔落伤害——重置摔落距离（Java 还重置下落+小弹跳，从简只做免摔伤）
+            survivalMem.current.fallDist = 0;
+            hurtSound(0.8); // 更沉的命中反馈（克制：仅 smash 叠加，普通命中仍是下方 dig_choppy）
           }
           // MC Java 横扫攻击：剑 + 冷却全满 + 非冲刺命中时，主目标周围 1 格内其他敌对生物各受 1 点横扫伤害
           if (tool?.kind === 'sword' && fullCharge && !sprinting) {
@@ -1006,7 +1018,7 @@ export function Player() {
               });
             }
           }
-          if (tool) gs.damageHeldTool(tool.kind === 'sword' ? 1 : 2); // MC：剑耗 1，工具作武器耗 2
+          if (tool) gs.damageHeldTool(tool.kind === 'sword' || tool.kind === 'mace' ? 1 : 2); // MC：剑/重锤耗 1，工具作武器耗 2
           playSound('dig_choppy', 0.8);
           survivalStats.exhaustion += 0.1; // MC：攻击消耗
           attacked = true;

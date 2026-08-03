@@ -75,7 +75,7 @@ export function subtractLevels(total: number, levels: number): number {
 
 // ——— 附魔 ———
 
-export type EnchKey = 'sharpness' | 'efficiency' | 'fortune' | 'silk_touch' | 'unbreaking' | 'protection' | 'looting' | 'knockback';
+export type EnchKey = 'sharpness' | 'efficiency' | 'fortune' | 'silk_touch' | 'unbreaking' | 'protection' | 'looting' | 'knockback' | 'density';
 
 export type EnchMap = Partial<Record<EnchKey, number>>;
 
@@ -83,8 +83,8 @@ export interface EnchDef {
   key: EnchKey;
   name: string;
   maxLvl: number;
-  /** 适用：sword 剑 / dig 挖掘工具（镐斧锹）/ armor 装备 / hoe 锄 / bow 弓 */
-  applies: ('sword' | 'dig' | 'armor' | 'hoe' | 'bow')[];
+  /** 适用：sword 剑 / dig 挖掘工具（镐斧锹）/ armor 装备 / hoe 锄 / bow 弓 / mace 重锤 */
+  applies: ('sword' | 'dig' | 'armor' | 'hoe' | 'bow' | 'mace')[];
   /** 抽取权重（MC 稀有度：常见 10 / 少见 5 / 稀有 2 / 极稀有 1） */
   weight: number;
 }
@@ -94,10 +94,13 @@ export const ENCHANTS: Record<EnchKey, EnchDef> = {
   efficiency: { key: 'efficiency', name: '效率', maxLvl: 5, applies: ['dig'], weight: 10 },
   fortune: { key: 'fortune', name: '时运', maxLvl: 3, applies: ['dig'], weight: 2 },
   silk_touch: { key: 'silk_touch', name: '精准采集', maxLvl: 1, applies: ['dig'], weight: 1 }, // MC：与时运互斥
-  unbreaking: { key: 'unbreaking', name: '耐久', maxLvl: 3, applies: ['sword', 'dig', 'armor', 'hoe', 'bow'], weight: 5 },
+  unbreaking: { key: 'unbreaking', name: '耐久', maxLvl: 3, applies: ['sword', 'dig', 'armor', 'hoe', 'bow', 'mace'], weight: 5 },
   protection: { key: 'protection', name: '保护', maxLvl: 4, applies: ['armor'], weight: 10 },
   looting: { key: 'looting', name: '抢夺', maxLvl: 3, applies: ['sword'], weight: 2 },
   knockback: { key: 'knockback', name: '击退', maxLvl: 2, applies: ['sword'], weight: 5 },
+  // 致密（Java 1.21 重锤专属）：smash 时每级每格下落 +0.5 伤（见下方 maceSmashBonus）；
+  // Java 稀有度为少见（权重 5），非宝藏附魔——附魔台/铁砧都可出；与 Breach/Smite/Bane 互斥（项目未收录这些附魔，互斥表从缺）
+  density: { key: 'density', name: '致密', maxLvl: 5, applies: ['mace'], weight: 5 },
 };
 
 /** 附魔互斥表（MC；按本项目现有附魔清单：时运/精准互斥，其余如锋利/亡灵/节肢、无限/经验修补暂未收录） */
@@ -123,7 +126,7 @@ export interface EnchOffer {
 }
 
 /** 某物品类的可附魔集合 */
-export function enchantsFor(kind: 'sword' | 'dig' | 'armor' | 'hoe' | 'bow'): EnchDef[] {
+export function enchantsFor(kind: 'sword' | 'dig' | 'armor' | 'hoe' | 'bow' | 'mace'): EnchDef[] {
   return Object.values(ENCHANTS).filter((e) => e.applies.includes(kind));
 }
 
@@ -188,7 +191,7 @@ function rollEnchants(rand: () => number, pool: EnchDef[], level: number): EnchE
 }
 
 /** 为物品生成 3 个附魔选项（选中即定型，不重摇；消耗按槽位固定 1/2/3；MC：精准采集与时运互斥，已有其一则另一个不出现） */
-export function rollOffers(seed: number, kind: 'sword' | 'dig' | 'armor' | 'hoe' | 'bow', playerLevel: number, power: number, current?: EnchMap): EnchOffer[] {
+export function rollOffers(seed: number, kind: 'sword' | 'dig' | 'armor' | 'hoe' | 'bow' | 'mace', playerLevel: number, power: number, current?: EnchMap): EnchOffer[] {
   let pool = enchantsFor(kind);
   if (current?.silk_touch) pool = pool.filter((e) => e.key !== 'fortune');
   if (current?.fortune) pool = pool.filter((e) => e.key !== 'silk_touch');
@@ -200,4 +203,23 @@ export function rollOffers(seed: number, kind: 'sword' | 'dig' | 'armor' | 'hoe'
     offers.push({ enchants: rollEnchants(rand, pool, lvl), ...enchCost(slot) });
   }
   return offers;
+}
+
+// ——— 重锤（mace，Java 1.21）smash 攻击 ———
+
+/** 触发 smash 的最小下落距离（格，MC：>1.5） */
+export const MACE_SMASH_MIN_FALL = 1.5;
+
+/**
+ * 重锤 smash 额外伤害（Java 1.21）：玩家下落超过 1.5 格后用重锤命中生物触发——
+ * 分段加成：前 3 格每格 +4、第 4-8 格每格 +2、之后每格 +1（按实际下落距离，浮点）；
+ * 致密附魔（density）每级每格下落再 +0.5（最高 V 级）。
+ * 返回 0 表示未触发 smash（未达阈值时致密也不生效——Java 中致密加成只随 smash 结算）。
+ * 命中后的免摔伤由调用侧重置摔落距离实现（Player.tsx：survivalMem.fallDist = 0）。
+ */
+export function maceSmashBonus(fallDist: number, densityLvl = 0): number {
+  if (fallDist <= MACE_SMASH_MIN_FALL) return 0;
+  const d = fallDist;
+  const tiered = Math.min(d, 3) * 4 + Math.min(Math.max(d - 3, 0), 5) * 2 + Math.max(d - 8, 0);
+  return tiered + Math.max(0, densityLvl) * 0.5 * d;
 }

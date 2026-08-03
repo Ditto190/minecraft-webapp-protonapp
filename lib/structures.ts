@@ -3,7 +3,11 @@
 import { AIR, BLOCK_BY_KEY, COBBLE, DIRT, GLASS, LOG, PLANKS, WATER, WHEAT_CROP_0, type BlockId } from './blocks';
 import { hash2, mulberry32, SEA_LEVEL, type Terrain } from './noise';
 import { getStorage } from './storage';
+import { TOOLS, type ToolType } from './tools';
 import { CHUNK_SIZE, localIndex, put, WORLD_HEIGHT } from './grid';
+
+/** 重锤稀有战利品概率：Java 不可合成（试炼宝库限定），本项目简化为要塞/埋藏的宝藏箱低概率出（见 stronghold.ts 与下方 TREASURE_LOOT 调用） */
+export const MACE_LOOT_CHANCE = 0.05;
 
 const REGION = 64; // 结构区域边长（格）
 
@@ -474,7 +478,7 @@ const TREASURE_LOOT: LootEntry[] = [
 ];
 
 /** 宝箱战利品预填（只填全空的新箱子；已初始化/被开过的跳过——跨 chunk 生成与重载均幂等） */
-export function fillChest(seedHash: number, x: number, y: number, z: number, table: LootEntry[], blockExtra?: [id: BlockId, min: number, max: number, chance: number]): void {
+export function fillChest(seedHash: number, x: number, y: number, z: number, table: LootEntry[], blockExtra?: [id: BlockId, min: number, max: number, chance: number], toolExtra?: [tool: ToolType, chance: number]): void {
   const key = `${x},${y},${z}`;
   const storage = getStorage(key);
   if (storage.some((s) => s !== null)) return;
@@ -486,7 +490,11 @@ export function fillChest(seedHash: number, x: number, y: number, z: number, tab
     if (slot >= storage.length) return;
   }
   if (blockExtra && rand() < blockExtra[3]) {
-    storage[slot] = { kind: 'block', id: blockExtra[0], count: blockExtra[1] + Math.floor(rand() * (blockExtra[2] - blockExtra[1] + 1)) };
+    storage[slot++] = { kind: 'block', id: blockExtra[0], count: blockExtra[1] + Math.floor(rand() * (blockExtra[2] - blockExtra[1] + 1)) };
+  }
+  // 稀有工具战利品（如重锤）：独立低概率 roll 在最后，不影响既有材料/方块战利品的确定性序列
+  if (toolExtra && slot < storage.length && rand() < toolExtra[1]) {
+    storage[slot] = { kind: 'tool', tool: toolExtra[0], durability: TOOLS[toolExtra[0]]?.durability ?? 1 };
   }
 }
 
@@ -710,11 +718,11 @@ export function buriedTreasureChest(seedHash: number, terrain: Terrain, spot: St
   return { x: spot.x, y: terrain.heightAt(spot.x, spot.z) - depth, z: spot.z };
 }
 
-/** 埋藏的宝藏：海岸带地表下埋 1 个宝箱（战利品见 TREASURE_LOOT，Java 对齐组合） */
+/** 埋藏的宝藏：海岸带地表下埋 1 个宝箱（战利品见 TREASURE_LOOT，Java 对齐组合；重锤为 Java 试炼宝库限定的简化替代来源，低概率） */
 function writeBuriedTreasure(spot: StructureSpot, terrain: Terrain, cx: number, cz: number, data: Uint16Array, seedHash: number): void {
   const c = buriedTreasureChest(seedHash, terrain, spot);
   put(data, cx, cz, c.x, c.y, c.z, K('chest'));
-  fillChest(seedHash, c.x, c.y, c.z, TREASURE_LOOT, [K('tnt'), 1, 2, 0.6]);
+  fillChest(seedHash, c.x, c.y, c.z, TREASURE_LOOT, [K('tnt'), 1, 2, 0.6], ['mace' as ToolType, MACE_LOOT_CHANCE]); // mace 物品定义在 lib/tools.ts（并行任务添加）
 }
 
 // ——— 藏宝图导航（Java 藏宝图是静态地图物品；本项目简化为右键文案指引，见 actions.ts tryUseHeldItem） ———

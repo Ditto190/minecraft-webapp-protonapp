@@ -2,7 +2,7 @@
 // 末影之眼投掷指向最近要塞；12 框架全嵌眼 → 生成末地传送门（MC 规则）
 
 import { AIR, BLOCK_BY_KEY } from './blocks';
-import { fillChest, type LootEntry } from './structures';
+import { fillChest, MACE_LOOT_CHANCE, type LootEntry } from './structures';
 import { type World } from './world';
 import { CHUNK_SIZE, put } from './grid';
 
@@ -119,9 +119,9 @@ export function applyStronghold(seedHash: number, cx: number, cz: number, data: 
         }
       }
     }
-    // 宝箱（房间东北角）与火把照明
+    // 宝箱（房间东北角）与火把照明；重锤为低概率稀有战利品（Java 重锤不可合成、试炼宝库限定——项目无试炼密室，简化放要塞箱）
     put(data, cx, cz, s.x + 3, y + 1, s.z - 3, K('chest'));
-    fillChest(seedHash, s.x + 3, y + 1, s.z - 3, LOOT);
+    fillChest(seedHash, s.x + 3, y + 1, s.z - 3, LOOT, undefined, ['mace', MACE_LOOT_CHANCE]);
     for (const [tx, tz] of [[-3, -3], [3, 3]] as const) {
       put(data, cx, cz, s.x + tx, y + 1, s.z + tz, K('torch'));
     }

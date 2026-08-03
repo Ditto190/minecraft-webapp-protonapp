@@ -12,12 +12,13 @@ import { TileIcon } from './TileIcon';
 
 const LAPIS_TILE = () => materialTile('lapis');
 
-type ItemKind = 'sword' | 'dig' | 'armor' | 'hoe' | 'bow';
+type ItemKind = 'sword' | 'dig' | 'armor' | 'hoe' | 'bow' | 'mace';
 
 function kindOfTool(def: ToolDef): ItemKind {
   if (def.kind === 'sword') return 'sword';
   if (def.kind === 'hoe') return 'hoe';
   if (def.kind === 'bow') return 'bow';
+  if (def.kind === 'mace') return 'mace';
   return 'dig';
 }
 
