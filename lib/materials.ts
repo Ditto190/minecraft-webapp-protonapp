@@ -76,6 +76,8 @@ export const MATERIAL_INFO: Record<string, { name: string; tile: number }> = {
   gold_nugget: { name: '金粒', tile: ICON_TILE_START + 22 },
   // 金苹果：冰屋地下室/沙漠神殿战利品；可食用（数值见 furnace.ts FOODS，附再生 II）
   golden_apple: { name: '金苹果', tile: ICON_TILE_START + 23 },
+  // 收纳袋（1.21.2 bundle）：混装 64 点容量（容量/交互见 lib/slots.ts、lib/inventory.ts）
+  bundle: { name: '收纳袋', tile: ICON_TILE_START + 32 },
   // 藏宝图：沉船地图箱必出战利品；右键指向最近未开启的埋藏宝藏（Java 静态地图物品的简化版，见 actions.ts）
   treasure_map: { name: '藏宝图', tile: ICON_TILE_START + 24 },
   string: { name: '线', tile: tileIcon('item/string') },

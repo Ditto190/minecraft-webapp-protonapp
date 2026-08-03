@@ -7,7 +7,7 @@ import { ENCHANTS, type EnchMap } from './xp';
 
 /** 物品键形式：'block:<id>' 或 'material:<name>'（与配方/扣料管线一致） */
 
-/** 工具修复材料（MC：木→木板、石→圆石、铁→铁锭、钻→钻石、合金→合金锭；弓/钓竿→线，剪刀→铁锭） */
+/** 工具修复材料（MC：木→木板、石→圆石、铁→铁锭、钻→钻石、合金→合金锭、铜→铜锭；弓/钓竿→线，剪刀→铁锭；重锤不可材料修复） */
 export function toolRepairMaterial(tool: ToolType): string | null {
   const def = TOOLS[tool];
   if (!def) return null;
@@ -15,6 +15,10 @@ export function toolRepairMaterial(tool: ToolType): string | null {
   if (tool === 'shears') return 'material:iron_ingot';
   // 金工具 tier 记为 'wood'（采掘层级同木），修复材料须按工具名识别（MC：金→金锭）
   if (tool.startsWith('golden_')) return 'material:gold_ingot';
+  // 铜工具 tier 记为 'stone'（采掘层级同石），修复材料须按工具名识别（MC 1.21.9：铜→铜锭）
+  if (tool.startsWith('copper_')) return 'material:copper_ingot';
+  // 重锤：MC 用旋风棒修复，本项目无旋风棒——不可材料修复（两件合一合并耐久仍可用）
+  if (tool === 'mace') return null;
   switch (def.tier) {
     case 'wood':
       return `block:${BLOCK_BY_KEY.planks.id}`; // 物品键惯例 block:<数字id>（与 anvilUse 扣料/配方一致；原为字符串 key 永不匹配，木/石工具修不了）
@@ -34,6 +38,8 @@ export function armorRepairMaterial(material: ArmorMaterial | undefined): string
   switch (material ?? 'leather') {
     case 'leather':
       return 'material:leather';
+    case 'copper':
+      return 'material:copper_ingot';
     case 'gold':
       return 'material:gold_ingot';
     case 'iron':

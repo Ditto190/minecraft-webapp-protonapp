@@ -1,9 +1,9 @@
-// 装备：部件 × 材质定义、护甲点数（数值对齐 MC：皮革 7、金 11、铁 15、钻/下界合金 20 点）
+// 装备：部件 × 材质定义、护甲点数（数值对齐 MC：皮革 7、铜 10［1.21.9］、金 11、铁 15、钻/下界合金 20 点）
 
 import { ICON_TILE_START, tileIcon } from './blocks';
 
 export type ArmorPiece = 'helmet' | 'chestplate' | 'leggings' | 'boots';
-export type ArmorMaterial = 'leather' | 'gold' | 'iron' | 'diamond' | 'netherite' | 'elytra';
+export type ArmorMaterial = 'leather' | 'copper' | 'gold' | 'iron' | 'diamond' | 'netherite' | 'elytra';
 
 export interface ArmorDef {
   piece: ArmorPiece;
@@ -23,6 +23,7 @@ export interface ArmorDef {
 
 const POINTS: Record<ArmorMaterial, Record<ArmorPiece, number>> = {
   leather: { helmet: 1, chestplate: 3, leggings: 2, boots: 1 },
+  copper: { helmet: 2, chestplate: 4, leggings: 3, boots: 1 }, // 1.21.9：头/腿同金、胸 4＜金 5、靴 1，全套 10
   gold: { helmet: 2, chestplate: 5, leggings: 3, boots: 1 },
   iron: { helmet: 2, chestplate: 6, leggings: 5, boots: 2 },
   diamond: { helmet: 3, chestplate: 8, leggings: 6, boots: 3 },
@@ -32,6 +33,7 @@ const POINTS: Record<ArmorMaterial, Record<ArmorPiece, number>> = {
 
 const DURABILITY: Record<ArmorMaterial, Record<ArmorPiece, number>> = {
   leather: { helmet: 55, chestplate: 80, leggings: 75, boots: 65 },
+  copper: { helmet: 121, chestplate: 176, leggings: 165, boots: 143 }, // 1.21.9：耐久倍率 11（金 7/铁 15 之间）
   gold: { helmet: 77, chestplate: 112, leggings: 105, boots: 91 },
   iron: { helmet: 165, chestplate: 240, leggings: 225, boots: 195 },
   diamond: { helmet: 363, chestplate: 528, leggings: 495, boots: 429 },
@@ -42,6 +44,7 @@ const DURABILITY: Record<ArmorMaterial, Record<ArmorPiece, number>> = {
 /** MC 护甲韧性：钻 2/件（全套 8）、下界合金 3/件（全套 12）、其他 0 */
 const TOUGHNESS: Record<ArmorMaterial, number> = {
   leather: 0,
+  copper: 0,
   gold: 0,
   iron: 0,
   diamond: 2,
@@ -51,6 +54,7 @@ const TOUGHNESS: Record<ArmorMaterial, number> = {
 
 export const MATERIAL_NAME: Record<ArmorMaterial, string> = {
   leather: '皮革',
+  copper: '铜',
   gold: '金',
   iron: '铁',
   diamond: '钻石',
@@ -65,6 +69,14 @@ const LEATHER_ICON: Record<ArmorPiece, number> = {
   chestplate: ICON_TILE_START + 5,
   leggings: ICON_TILE_START + 6,
   boots: ICON_TILE_START + 7,
+};
+/** 铜盔甲图标：贴图包无 1.21.9 铜甲贴图 → canvas 自绘（形同皮革格换铜色，绘制见 textures.ts；
+ * 图标区满（1.21.5 植物占至 +30），格位借用 pack 预留区尾部空格 507..511，说明与护栏见 textures.ts/copper-age 测试） */
+const COPPER_ICON: Record<ArmorPiece, number> = {
+  helmet: ICON_TILE_START - 2,
+  chestplate: ICON_TILE_START - 3,
+  leggings: ICON_TILE_START - 4,
+  boots: ICON_TILE_START - 5,
 };
 
 function buildDefs(): Record<ArmorMaterial, Record<ArmorPiece, ArmorDef>> {
@@ -83,7 +95,9 @@ function buildDefs(): Record<ArmorMaterial, Record<ArmorPiece, ArmorDef>> {
         iconTile:
           material === 'leather'
             ? LEATHER_ICON[piece]
-            : tileIcon(material === 'elytra' ? 'item/elytra' : material === 'gold' ? `item/golden_${piece}` : `item/${material}_${piece}`), // MC 现代命名：金甲为 golden_xxx
+            : material === 'copper'
+              ? COPPER_ICON[piece]
+              : tileIcon(material === 'elytra' ? 'item/elytra' : material === 'gold' ? `item/golden_${piece}` : `item/${material}_${piece}`), // MC 现代命名：金甲为 golden_xxx
       };
     }
   }

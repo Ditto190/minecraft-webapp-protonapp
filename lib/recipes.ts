@@ -184,6 +184,8 @@ export const RECIPES: Recipe[] = [
   // 钓竿：3 木棍 + 2 线（MC 配方）
   { id: 'fishing_rod', name: '钓竿', out: { kind: 'tool', tool: 'fishing_rod' }, cost: [{ item: STICK, count: 3 }, { item: 'material:string', count: 2 }], needsTable: true },
   { id: 'book', name: '书', out: { kind: 'material', material: 'book', count: 1 }, cost: [{ item: 'material:paper', count: 3 }, { item: 'material:leather', count: 1 }], needsTable: false },
+  // 收纳袋：1 线 + 1 皮革（1.21.2 MC 配方；合成结果是空袋，容量规则见 lib/slots.ts）
+  { id: 'bundle', name: '收纳袋', out: { kind: 'material', material: 'bundle', count: 1 }, cost: [{ item: 'material:string', count: 1 }, { item: 'material:leather', count: 1 }], needsTable: false },
   { id: 'enchanting_table', name: '附魔台', out: { kind: 'block', id: KID('enchanting_table'), count: 1 }, cost: [{ item: 'material:book', count: 1 }, { item: 'material:diamond', count: 2 }, { item: K('obsidian'), count: 4 }], needsTable: true },
   // 信标：玻璃×5 + 黑曜石×3 + 下界之星×1（MC 配方）
   { id: 'beacon', name: '信标', out: { kind: 'block', id: KID('beacon'), count: 1 }, cost: [{ item: K('glass'), count: 5 }, { item: K('obsidian'), count: 3 }, { item: 'material:nether_star', count: 1 }], needsTable: true },
@@ -200,9 +202,10 @@ export const RECIPES: Recipe[] = [
   { id: 'wooden_sword', name: '木剑', out: { kind: 'tool', tool: 'wooden_sword' }, cost: [{ item: PLANKS_ITEM, count: 2 }, { item: STICK, count: 1 }], needsTable: true },
   { id: 'stone_sword', name: '石剑', out: { kind: 'tool', tool: 'stone_sword' }, cost: [{ item: COBBLE_ITEM, count: 2 }, { item: STICK, count: 1 }], needsTable: true },
   // —— 皮革装备（MC 配方用量 5/8/7/4） ——
-  // —— 铁/金/钻石装备（用量同皮革 5/8/7/4，MC；下界合金装备不可合成——锻造台升级） ——
+  // —— 铁/铜/金/钻石装备（用量同皮革 5/8/7/4，MC；铜甲为 1.21.9 新增；下界合金装备不可合成——锻造台升级） ——
   ...([
     ['iron', 'material:iron_ingot', '铁'],
+    ['copper', 'material:copper_ingot', '铜'],
     ['gold', 'material:gold_ingot', '金'],
     ['diamond', 'material:diamond', '钻石'],
   ] as const).flatMap(([mat, item, cn]): Recipe[] =>
@@ -218,18 +221,18 @@ export const RECIPES: Recipe[] = [
   { id: 'leather_chestplate', name: '皮革胸甲', out: { kind: 'armor', piece: 'chestplate', material: 'leather' }, cost: [{ item: 'material:leather', count: 8 }], needsTable: true },
   { id: 'leather_leggings', name: '皮革护腿', out: { kind: 'armor', piece: 'leggings', material: 'leather' }, cost: [{ item: 'material:leather', count: 7 }], needsTable: true },
   { id: 'leather_boots', name: '皮革靴子', out: { kind: 'armor', piece: 'boots', material: 'leather' }, cost: [{ item: 'material:leather', count: 4 }], needsTable: true },
-  // —— 铁/钻石工具（配方同木石） ——
-  ...(['iron', 'diamond'] as const).flatMap((tier): Recipe[] => {
-    const mat = tier === 'iron' ? 'material:iron_ingot' : 'material:diamond';
-    const cn = tier === 'iron' ? '铁' : '钻石';
-    return [
-      { id: `${tier}_pickaxe`, name: `${cn}镐`, out: { kind: 'tool', tool: `${tier}_pickaxe` }, cost: [{ item: mat, count: 3 }, { item: STICK, count: 2 }], needsTable: true },
-      { id: `${tier}_axe`, name: `${cn}斧`, out: { kind: 'tool', tool: `${tier}_axe` }, cost: [{ item: mat, count: 3 }, { item: STICK, count: 2 }], needsTable: true },
-      { id: `${tier}_shovel`, name: `${cn}锹`, out: { kind: 'tool', tool: `${tier}_shovel` }, cost: [{ item: mat, count: 1 }, { item: STICK, count: 2 }], needsTable: true },
-      { id: `${tier}_sword`, name: `${cn}剑`, out: { kind: 'tool', tool: `${tier}_sword` }, cost: [{ item: mat, count: 2 }, { item: STICK, count: 1 }], needsTable: true },
-      { id: `${tier}_hoe`, name: `${cn}锄`, out: { kind: 'tool', tool: `${tier}_hoe` }, cost: [{ item: mat, count: 2 }, { item: STICK, count: 2 }], needsTable: true },
-    ];
-  }),
+  // —— 铁/铜/钻石工具（配方同木石；铜工具为 1.21.9 新增：铜锭 + 木棍） ——
+  ...([
+    ['iron', 'material:iron_ingot', '铁'],
+    ['copper', 'material:copper_ingot', '铜'],
+    ['diamond', 'material:diamond', '钻石'],
+  ] as const).flatMap(([tier, mat, cn]): Recipe[] => [
+    { id: `${tier}_pickaxe`, name: `${cn}镐`, out: { kind: 'tool', tool: `${tier}_pickaxe` }, cost: [{ item: mat, count: 3 }, { item: STICK, count: 2 }], needsTable: true },
+    { id: `${tier}_axe`, name: `${cn}斧`, out: { kind: 'tool', tool: `${tier}_axe` }, cost: [{ item: mat, count: 3 }, { item: STICK, count: 2 }], needsTable: true },
+    { id: `${tier}_shovel`, name: `${cn}锹`, out: { kind: 'tool', tool: `${tier}_shovel` }, cost: [{ item: mat, count: 1 }, { item: STICK, count: 2 }], needsTable: true },
+    { id: `${tier}_sword`, name: `${cn}剑`, out: { kind: 'tool', tool: `${tier}_sword` }, cost: [{ item: mat, count: 2 }, { item: STICK, count: 1 }], needsTable: true },
+    { id: `${tier}_hoe`, name: `${cn}锄`, out: { kind: 'tool', tool: `${tier}_hoe` }, cost: [{ item: mat, count: 2 }, { item: STICK, count: 2 }], needsTable: true },
+  ]),
   // —— 金工具（配方同铁钻：金锭 + 木棍；MC 速度最快但耐久仅 32） ——
   { id: 'golden_pickaxe', name: '金镐', out: { kind: 'tool', tool: 'golden_pickaxe' }, cost: [{ item: 'material:gold_ingot', count: 3 }, { item: STICK, count: 2 }], needsTable: true },
   { id: 'golden_axe', name: '金斧', out: { kind: 'tool', tool: 'golden_axe' }, cost: [{ item: 'material:gold_ingot', count: 3 }, { item: STICK, count: 2 }], needsTable: true },
@@ -336,10 +339,11 @@ const PATTERNS: Record<string, (string | null)[]> = {
   fishing_rod: [null, null, STICK, null, STICK, 'material:string', STICK, null, 'material:string'],
   tnt: ['material:gunpowder', K('sand'), 'material:gunpowder', K('sand'), 'material:gunpowder', K('sand'), 'material:gunpowder', K('sand'), 'material:gunpowder'],
 };
-// 四材质工具摆法（镐/斧/锹/剑/锄，MC 形状）
+// 五材质工具摆法（镐/斧/锹/剑/锄，MC 形状；铜为 1.21.9）
 for (const [idPrefix, mat] of [
   ['wooden', PLANKS_ITEM],
   ['stone', COBBLE_ITEM],
+  ['copper', 'material:copper_ingot'],
   ['iron', 'material:iron_ingot'],
   ['diamond', 'material:diamond'],
   ['golden', 'material:gold_ingot'],
