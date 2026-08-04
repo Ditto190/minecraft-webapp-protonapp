@@ -394,3 +394,34 @@ describe('MobInstancePools', () => {
     pools.dispose();
   });
 });
+
+describe('快乐恶魂链（1.21.6 Chase the Skies）', () => {
+  it('小恶魂：小方体 + 4 短触手 + 小脸；baby 标记只作成长计时，不叠 0.55 幼体缩放', () => {
+    const parts = partsForVariant('ghastling');
+    expect(parts.filter((p) => p.geo === 'ghastlingTentacle')).toHaveLength(4);
+    expect(parts.some((p) => p.geo === 'ghastlingBody')).toBe(true);
+    expect(computeMobRenderState(fakeMob({ type: 'ghastling', baby: true, growUp: 100 }), 0, 0, 0).scale).toBe(1);
+  });
+
+  it('快乐恶魂变体键：无鞍 happy_ghast:0 / 有鞍 happy_ghast:1，有鞍加鞍座与护目镜', () => {
+    expect(variantKeyOf(fakeMob({ type: 'happy_ghast' }))).toBe('happy_ghast:0');
+    expect(variantKeyOf(fakeMob({ type: 'happy_ghast', harnessed: true }))).toBe('happy_ghast:1');
+    const bare = partsForVariant('happy_ghast:0');
+    const saddled = partsForVariant('happy_ghast:1');
+    expect(bare.filter((p) => p.geo === 'happyGhastTentacle')).toHaveLength(8);
+    expect(saddled).toHaveLength(bare.length + 2);
+    expect(saddled.some((p) => p.geo === 'harnessSeat')).toBe(true);
+    expect(saddled.some((p) => p.geo === 'harnessGoggles')).toBe(true);
+    expect(bare.some((p) => p.geo === 'harnessSeat')).toBe(false);
+  });
+
+  it('快乐恶魂变体分池：无鞍/有鞍各成一组实例层', () => {
+    const pools = new MobInstancePools(fakeMats());
+    pools.sync([fakeMob({ type: 'happy_ghast' }), fakeMob({ type: 'happy_ghast', harnessed: true })], 0, 0, 0);
+    const bodies = layersOf(pools, 'happyGhastBody');
+    expect(bodies).toHaveLength(2); // 无鞍/有鞍两个变体池各一层
+    expect(bodies.every((m) => m.count === 1)).toBe(true); // 每池各 1 个体
+    expect(layersOf(pools, 'harnessSeat')).toHaveLength(1); // 鞍座层只在有鞍池
+    pools.dispose();
+  });
+});

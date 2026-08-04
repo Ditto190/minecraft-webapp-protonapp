@@ -512,6 +512,40 @@ export const TEXTURE_OVERLAYS: Record<number, (ctx: CanvasRenderingContext2D, dx
     ctx.fillStyle = COPPER_LIGHT;
     ctx.fillRect(dx + 7, dy + 5, 2, 1);
   },
+  // 干恶魂（1.21.6 dried ghast）：干瘪的恶魂小脸——沙棕底色 + 闭眼苦脸（整格自绘含底色，blocks.ts dried_ghast）
+  [ICON_TILE_START + 34]: (ctx, dx, dy) => {
+    speckle(ctx, dx, dy, '#c8a882', '#a8845e', 34); // 沙棕脱水底（种子固定，噪点可复现）
+    ctx.fillStyle = '#8a6844'; // 四边干裂纹路
+    ctx.fillRect(dx, dy, 16, 1);
+    ctx.fillRect(dx, dy + 15, 16, 1);
+    ctx.fillRect(dx, dy, 1, 16);
+    ctx.fillRect(dx + 15, dy, 1, 16);
+    ctx.fillStyle = '#4a3626'; // 闭合双眼（下垂眼线）+ 苦脸小嘴
+    ctx.fillRect(dx + 4, dy + 6, 3, 1);
+    ctx.fillRect(dx + 9, dy + 6, 3, 1);
+    ctx.fillRect(dx + 4, dy + 7, 1, 1);
+    ctx.fillRect(dx + 11, dy + 7, 1, 1);
+    ctx.fillRect(dx + 6, dy + 10, 4, 1);
+    ctx.fillRect(dx + 6, dy + 9, 1, 1);
+    ctx.fillRect(dx + 9, dy + 9, 1, 1);
+  },
+  // 鞍具（1.21.6 harness）：快乐恶魂骑乘鞍——皮质鞍座 + 束带 + 护目镜（recipes.ts 增广的 harness 材料图标）
+  [ICON_TILE_START + 35]: (ctx, dx, dy) => {
+    ctx.fillStyle = LEATHER; // 鞍座主体
+    ctx.fillRect(dx + 3, dy + 7, 10, 5);
+    ctx.fillRect(dx + 4, dy + 5, 8, 2);
+    ctx.fillStyle = LEATHER_DARK; // 鞍座描边与前后鞍桥
+    ctx.fillRect(dx + 3, dy + 11, 10, 1);
+    ctx.fillRect(dx + 2, dy + 6, 2, 4);
+    ctx.fillRect(dx + 12, dy + 6, 2, 4);
+    ctx.fillRect(dx + 3, dy + 12, 3, 3); // 两侧垂带
+    ctx.fillRect(dx + 10, dy + 12, 3, 3);
+    ctx.fillStyle = '#3a2a1a'; // 护目镜（架在鞍前的风镜）
+    ctx.fillRect(dx + 5, dy + 3, 6, 2);
+    ctx.fillStyle = '#7ab8c8'; // 镜片反光
+    ctx.fillRect(dx + 5, dy + 3, 2, 2);
+    ctx.fillRect(dx + 9, dy + 3, 2, 2);
+  },
 };
 
 /** atlas 画布的 dataURL（HUD 图标裁剪用），build 完成后可用。

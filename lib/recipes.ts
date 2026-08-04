@@ -1,9 +1,15 @@
 // 合成配方（与 MC 原版一致）：随身 2×2 + 工作台 3×3
 
-import { BLOCK_BY_KEY, COBBLE, CRAFTING_TABLE, FURNACE, GLASS, LOG, PLANKS, type BlockId } from './blocks';
+import { BLOCK_BY_KEY, COBBLE, CRAFTING_TABLE, FURNACE, GLASS, ICON_TILE_START, LOG, PLANKS, type BlockId } from './blocks';
+import { MATERIAL_INFO } from './materials';
 import { countsOf, type Slot } from './slots';
 import { PIECE_COST, PIECE_NAME, type ArmorMaterial, type ArmorPiece } from './armor';
 import type { ToolType } from './tools';
+
+// 鞍具（1.21.6 harness）：按材料处理（可堆叠、手持右键快乐恶魂装备，交互见 actions.ts tryMobInteract）。
+// materials.ts 本轮不归本特性修改，故在此增广 MATERIAL_INFO——与 materials.ts 内登记等价
+// （materialName/materialTile/背包图标全部走同一张表）；图标为 canvas 格 ICON_TILE_START+35（textures.ts）。
+MATERIAL_INFO.harness = { name: '鞍具', tile: ICON_TILE_START + 35 };
 
 export interface RecipeOutBlock {
   kind: 'block';
@@ -182,6 +188,10 @@ export const RECIPES: Recipe[] = [
   { id: 'paper', name: '纸 ×3', out: { kind: 'material', material: 'paper', count: 3 }, cost: [{ item: K('sugar_cane'), count: 3 }], needsTable: false },
   // 剪刀：铁锭 ×2（MC）
   { id: 'shears', name: '剪刀', out: { kind: 'tool', tool: 'shears' }, cost: [{ item: 'material:iron_ingot', count: 2 }], needsTable: false },
+  // 干恶魂（1.21.6 MC 配方）：灵魂沙居中 + 恶魂之泪 ×8 围一圈（快乐恶魂全链起点，复水孵化见 lib/growth.ts）
+  { id: 'dried_ghast', name: '干恶魂', out: { kind: 'block', id: KID('dried_ghast'), count: 1 }, cost: [{ item: 'material:ghast_tear', count: 8 }, { item: K('soul_sand'), count: 1 }], needsTable: true },
+  // 鞍具（1.21.6 MC 配方）：皮革 ×3（顶行）+ 玻璃 ×2（中行两侧）+ 白色羊毛 ×1（中心）——Java 羊毛任意色，项目从简固定白羊毛
+  { id: 'harness', name: '鞍具', out: { kind: 'material', material: 'harness', count: 1 }, cost: [{ item: 'material:leather', count: 3 }, { item: `block:${GLASS}`, count: 2 }, { item: K('white_wool'), count: 1 }], needsTable: true },
   // 钓竿：3 木棍 + 2 线（MC 配方）
   { id: 'fishing_rod', name: '钓竿', out: { kind: 'tool', tool: 'fishing_rod' }, cost: [{ item: STICK, count: 3 }, { item: 'material:string', count: 2 }], needsTable: true },
   { id: 'book', name: '书', out: { kind: 'material', material: 'book', count: 1 }, cost: [{ item: 'material:paper', count: 3 }, { item: 'material:leather', count: 1 }], needsTable: false },
@@ -341,6 +351,10 @@ const PATTERNS: Record<string, (string | null)[]> = {
   shears: [null, 'material:iron_ingot', null, 'material:iron_ingot', null, null, null, null, null],
   fishing_rod: [null, null, STICK, null, STICK, 'material:string', STICK, null, 'material:string'],
   tnt: ['material:gunpowder', K('sand'), 'material:gunpowder', K('sand'), 'material:gunpowder', K('sand'), 'material:gunpowder', K('sand'), 'material:gunpowder'],
+  // 干恶魂（1.21.6 MC 摆法）：灵魂沙居中，8 恶魂之泪围一圈
+  dried_ghast: ['material:ghast_tear', 'material:ghast_tear', 'material:ghast_tear', 'material:ghast_tear', K('soul_sand'), 'material:ghast_tear', 'material:ghast_tear', 'material:ghast_tear', 'material:ghast_tear'],
+  // 鞍具（1.21.6 MC 摆法）：顶行 3 皮革，中行 玻璃-白羊毛-玻璃
+  harness: ['material:leather', 'material:leather', 'material:leather', `block:${GLASS}`, K('white_wool'), `block:${GLASS}`, null, null, null],
 };
 // 五材质工具摆法（镐/斧/锹/剑/锄，MC 形状；铜为 1.21.9）
 for (const [idPrefix, mat] of [

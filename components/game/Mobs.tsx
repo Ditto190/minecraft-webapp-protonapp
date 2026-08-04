@@ -66,6 +66,11 @@ function buildMobMats(mats: AtlasMaterials): MobMats {
     wither: l('#1a1a1a'), // 凋灵骷髅炭黑
     ghast: l('#f0f0f0'), // 恶魂雪白
     ghastTear: l('#c8b8d8'),
+    // 快乐恶魂链（1.21.6）：小恶魂奶白、面部深色、鞍具皮革棕与护目镜深色
+    ghastling: l('#f5f0e4'),
+    ghastDark: l('#4a4048'),
+    harnessLeather: l('#8a5a2b'),
+    harnessGoggles: l('#3a2a1a'),
     sheepFace: l('#d8b8a0'),
     wolf: l('#c8c8c8'),
     wolfDark: l('#909090'),

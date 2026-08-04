@@ -23,7 +23,7 @@ import { type World } from './world';
 import { registerWorldScope } from './worldScope';
 import { chunkKey, localIndex, WORLD_HEIGHT } from './grid';
 
-export type MobType = 'zombie' | 'skeleton' | 'spider' | 'creeper' | 'pig' | 'cow' | 'chicken' | 'villager' | 'mooshroom' | 'zombified_piglin' | 'piglin' | 'piglin_brute' | 'blaze' | 'wither_skeleton' | 'ghast' | 'sheep' | 'wolf' | 'enderman' | 'wither' | 'ender_dragon' | 'shulker' | 'slime' | 'phantom' | 'iron_golem' | 'copper_golem';
+export type MobType = 'zombie' | 'skeleton' | 'spider' | 'creeper' | 'pig' | 'cow' | 'chicken' | 'villager' | 'mooshroom' | 'zombified_piglin' | 'piglin' | 'piglin_brute' | 'blaze' | 'wither_skeleton' | 'ghast' | 'sheep' | 'wolf' | 'enderman' | 'wither' | 'ender_dragon' | 'shulker' | 'slime' | 'phantom' | 'iron_golem' | 'copper_golem' | 'ghastling' | 'happy_ghast';
 
 /** 农场动物群系变种（1.21.5 Spring to Life：牛/猪/鸡按出生地群系温度分寒带/温带/热带） */
 export type AnimalVariant = 'cold' | 'temperate' | 'warm';
@@ -100,6 +100,13 @@ export const MOB_DEFS: Record<MobType, MobDef> = {
   iron_golem: { name: '铁傀儡', hp: 100, speed: 1.1, hostile: true, burnsAtDay: false, damage: 7, attackRange: 1.8, attackCd: 1, drops: [{ material: 'iron_ingot', count: [3, 5] }] },
   // 铜傀儡（1.21.9 Copper Age）：友好搬运工——从铜箱取货分拣到普通箱子（AI 见 tickCopperGolem）；Java 掉铜锭 2-3（玩家/驯狼击杀）
   copper_golem: { name: '铜傀儡', hp: 12, speed: 1.4, hostile: false, burnsAtDay: false, damage: 0, attackRange: 0, attackCd: 0, drops: [{ material: 'copper_ingot', count: [2, 3] }] },
+  // 小恶魂（1.21.6 Chase the Skies）：干恶魂泡水复水孵出的幼体（lib/growth.ts）——被动飞行，跟随玩家/游荡，
+  // 20 分钟长成快乐恶魂（growUp 沿用幼体模式，喂雪球加速）；不掉落任何东西（Java）
+  ghastling: { name: '小恶魂', hp: 20, speed: 1.2, hostile: false, burnsAtDay: false, damage: 0, attackRange: 0, attackCd: 0, drops: [] },
+  // 快乐恶魂（1.21.6）：被动巨兽——不攻击；可装备鞍具骑乘（mob.harnessed，骑乘控制在 Player 侧，骑乘条件
+  // type==='happy_ghast' && harnessed===true）；被雪球/鞍具引诱；缓慢回血（露天淋雨加倍；Java 另有雪/云层加速，从简只做雨）；
+  // 不掉落攻击物（死亡只掉已装备的鞍具，见 damageMob）
+  happy_ghast: { name: '快乐恶魂', hp: 20, speed: 1.2, hostile: false, burnsAtDay: false, damage: 0, attackRange: 0, attackCd: 0, drops: [] },
 };
 
 export interface Mob {
@@ -198,6 +205,14 @@ export interface Mob {
   /** 铜傀儡：交接冷却（搬运完成 3s / 无目标驻留）与容器扫描节流 */
   golemCd?: number;
   golemScan?: number;
+  /** 快乐恶魂：已装备鞍具（1.21.6；骑乘系统对接字段——骑乘条件 type==='happy_ghast' && harnessed===true；
+   *  装备 = 手持鞍具右键，卸下 = 剪刀右键掉回物品，见 actions.ts tryMobInteract 与 equipHarness/unequipHarness） */
+  harnessed?: boolean;
+  /** 快乐恶魂：回血累计（缓慢自愈的小数累计，攒够整点一次性加血；雨天速率加倍） */
+  healAcc?: number;
+  /** 被玩家骑乘中（骑乘 agent 在 Player 侧写入，physics.ts RideMountLike 对接字段；
+   *  mobs.ts 对该个体跳过 AI 移动/重力/悬浮起伏——位置由 Player 侧骑乘控制驱动；计时/回血照常） */
+  riddenByPlayer?: boolean;
 }
 
 export interface Arrow {
@@ -231,7 +246,7 @@ const BURN_DAMAGE = 1; // 每秒（白天自燃；Java 着火 1 伤/秒）
 /** 铁傀儡猎杀对象（MC：威胁村庄的敌对怪） */
 const GOLEM_TARGETS: readonly MobType[] = ['zombie', 'skeleton', 'spider', 'creeper', 'phantom'];
 /** 摔落免疫（MC：鸡缓降不摔伤；烈焰人/恶魂等飞行者本就走悬浮分支，列名防御） */
-const FALL_IMMUNE: readonly MobType[] = ['chicken', 'phantom', 'blaze', 'ghast', 'wither', 'ender_dragon'];
+const FALL_IMMUNE: readonly MobType[] = ['chicken', 'phantom', 'blaze', 'ghast', 'ghastling', 'happy_ghast', 'wither', 'ender_dragon'];
 
 /** 幻翼失眠状态：连续未睡觉的完整游戏日数（≥3 的夜晚来袭，睡过清零）与来袭间隔计时 */
 export const phantomState = { insomniaDays: 0, timer: 0 };
@@ -426,6 +441,60 @@ export function spawnMobAt(type: MobType, x: number, y: number, z: number): Mob 
   return m;
 }
 
+// ——— 1.21.6（Chase the Skies）快乐恶魂链：小恶魂孵化/成长、鞍具、雪球交互 ———
+
+/** 小恶魂长成快乐恶魂的时长（秒）：Java 为 24000 tick=20 分钟，与项目一昼夜 1200s 同尺度 */
+export const GHASTLING_GROW_SECONDS = 1200;
+/** 喂雪球对小恶魂的成长加速量（秒/颗）：Java 喂雪球加速长大，取总时长 1/10（10 颗喂满即熟） */
+export const SNOWBALL_GROWTH_BOOST = GHASTLING_GROW_SECONDS / 10;
+
+/** 小恶魂：干恶魂复水孵出（lib/growth.ts 调用）；幼体 20 分钟长成快乐恶魂（喂雪球加速，tickMobs growUp 转化） */
+export function spawnGhastling(x: number, y: number, z: number): Mob {
+  const m = makeMob('ghastling', x, y, z);
+  m.baby = true;
+  m.growUp = GHASTLING_GROW_SECONDS;
+  mobs.push(m);
+  return m;
+}
+
+/**
+ * 引诱食物表（1.21.6；MC：快乐恶魂被雪球与鞍具吸引，小恶魂被雪球吸引）。
+ * 不进 BREED_FOOD——快乐恶魂链不可繁殖，喂食走 feedSnowball 而非恋爱（actions.ts tryMobInteract 分支）。
+ */
+export const TEMPT_FOOD: Partial<Record<MobType, readonly string[]>> = {
+  ghastling: ['snowball'],
+  happy_ghast: ['snowball', 'harness'],
+};
+
+/** 鞍具装备（1.21.6）：快乐恶魂专用，返回是否成功装备（已装备/他种返回 false）；消耗由调用方处理 */
+export function equipHarness(mob: Mob): boolean {
+  if (mob.type !== 'happy_ghast' || mob.harnessed) return false;
+  mob.harnessed = true;
+  return true;
+}
+
+/** 鞍具卸下（1.21.6 Java 用剪刀）：鞍具原地掉回物品；返回是否成功卸下 */
+export function unequipHarness(mob: Mob): boolean {
+  if (mob.type !== 'happy_ghast' || !mob.harnessed) return false;
+  mob.harnessed = false;
+  spawnMaterialDrop('harness', mob.x, mob.y + 0.5, mob.z, 1);
+  return true;
+}
+
+/** 喂雪球（1.21.6）：小恶魂加速长大（每次 -1/10 剩余成长，Java）；快乐恶魂回 4 血（MC 喂食回 2 心）。返回是否有效 */
+export function feedSnowball(mob: Mob): boolean {
+  if (mob.type === 'ghastling') {
+    if (mob.growUp === undefined) return false;
+    mob.growUp = Math.max(0, mob.growUp - SNOWBALL_GROWTH_BOOST);
+    return true;
+  }
+  if (mob.type === 'happy_ghast') {
+    mob.hp = Math.min(MOB_DEFS.happy_ghast.hp, mob.hp + 4);
+    return true;
+  }
+  return false;
+}
+
 // ——— 铜傀儡（1.21.9 Copper Age）：建造 + 铜箱 → 箱子的物品分拣搬运 ———
 
 /** 搬运搜索范围：水平 ≤32 格、竖直 ±8（Java 铜傀儡在附近容器间往返的简化） */
@@ -608,16 +677,19 @@ export function wearsGoldArmor(): boolean {
   return [a.helmet, a.chestplate, a.leggings, a.boots].some((p) => p?.material === 'gold');
 }
 
-/** 以物易物表（MC 1.16 权重展开的简化：8 样，权重和 100） */
+/** 以物易物表（MC 1.16 权重展开的简化：9 样，权重和 100）
+ *  1.21.6：干恶魂入易物表（Java 同——除灵魂沙峡谷化石外仅有的两个获取途径之一；本项目无化石结构，
+ *  获取走合成 recipes.ts + 本表两条）。低权重 3，由石英让出（20→17），总和保持 100（bastion.test 护栏） */
 export const BARTER_TABLE: { kind: 'material' | 'block'; key: string; count: [number, number]; weight: number }[] = [
   { kind: 'material', key: 'ender_pearl', count: [2, 4], weight: 10 },
   { kind: 'material', key: 'glowstone_dust', count: [2, 4], weight: 10 },
-  { kind: 'material', key: 'quartz', count: [5, 12], weight: 20 },
+  { kind: 'material', key: 'quartz', count: [5, 12], weight: 17 },
   { kind: 'material', key: 'string', count: [4, 8], weight: 15 },
   { kind: 'material', key: 'leather', count: [2, 4], weight: 15 },
   { kind: 'block', key: 'soul_sand', count: [4, 12], weight: 10 },
   { kind: 'block', key: 'obsidian', count: [1, 1], weight: 10 },
   { kind: 'block', key: 'crying_obsidian', count: [1, 1], weight: 10 },
+  { kind: 'block', key: 'dried_ghast', count: [1, 1], weight: 3 },
 ];
 
 function rollBarter(): { kind: 'material' | 'block'; key: string; count: number } {
@@ -1327,6 +1399,21 @@ export function tickMobs(
       if (m.growUp <= 0) {
         m.baby = false;
         m.growUp = undefined;
+        // 小恶魂长成快乐恶魂（1.21.6；其余幼体只是清幼体标记放大体型）
+        if (m.type === 'ghastling') {
+          m.type = 'happy_ghast';
+          m.hp = Math.min(m.hp, MOB_DEFS.happy_ghast.hp);
+        }
+      }
+    }
+    // 快乐恶魂回血（1.21.6）：缓慢自愈 1 点/20s，露天淋雨加倍（Java 另有降雪/云层高度加速，项目从简只做雨）；
+    // 小数位攒在 healAcc，攒够整点一次性加血（自愈不走 damageMob，与受伤免疫帧无关）
+    if (m.type === 'happy_ghast' && m.hp > 0 && m.hp < def.hp) {
+      m.healAcc = (m.healAcc ?? 0) + (rainingAt(world, m) ? 0.1 : 0.05) * dt;
+      if (m.healAcc >= 1) {
+        const heal = Math.floor(m.healAcc);
+        m.healAcc -= heal;
+        m.hp = Math.min(def.hp, m.hp + heal);
       }
     }
     // 恋爱/繁殖冷却倒数；僵尸猪灵仇恨倒数
@@ -1334,6 +1421,9 @@ export function tickMobs(
     if (m.breedCd !== undefined && m.breedCd > 0) m.breedCd -= dt;
     if (m.aggroTimer !== undefined && m.aggroTimer > 0) m.aggroTimer -= dt;
     if ((m.hurtImmune ?? 0) > 0) m.hurtImmune = (m.hurtImmune ?? 0) - dt; // 受伤免疫帧按游戏刻递减（MC 0.5s）
+    // 被骑乘的快乐恶魂：AI 移动/击退/重力/悬浮起伏全部冻结（位置由 Player 侧骑乘控制驱动，physics.ts RideMountLike 约定）；
+    // 上方幼体成长/回血/各计时照常推进
+    if (m.riddenByPlayer) continue;
     // 末影龙：完全自管理飞行（穿方块、无环境伤害），跳过通用管线
     if (m.type === 'ender_dragon') {
       tickDragon(world, m, dt, targetPos, onAttackPlayer);
@@ -1707,11 +1797,22 @@ export function tickMobs(
           }
         }
       } else if (
-        // 持食引诱：玩家手持该物种食物时跟着走（MC 诱饵）
-        lureFood && BREED_FOOD[m.type] === lureFood && dist < 10 && dist > 1.6
+        // 持食引诱：玩家手持该物种食物时跟着走（MC 诱饵；1.21.6 快乐恶魂链走 TEMPT_FOOD——雪球/鞍具引诱，不繁殖）
+        lureFood && (BREED_FOOD[m.type] === lureFood || TEMPT_FOOD[m.type]?.includes(lureFood) === true) && dist < 10 && dist > 1.6
       ) {
         mx = (dx / dist) * def.speed;
         mz = (dz / dist) * def.speed;
+      } else if (m.type === 'ghastling' && distReal < 16 && distReal > 3) {
+        // 小恶魂跟随玩家（1.21.6 Java：16 格内缀着玩家飞；3 格内悬停不再贴近）
+        const fx2 = playerPos.x - m.x;
+        const fz2 = playerPos.z - m.z;
+        const fd2 = Math.hypot(fx2, fz2);
+        if (fd2 > 0.01) {
+          mx = (fx2 / fd2) * def.speed;
+          mz = (fz2 / fd2) * def.speed;
+          m.wanderDir = Math.atan2(fz2, fx2); // 渲染朝向随飞行方向
+          m.wanderMoving = true;
+        }
       } else if ((m.type === 'villager' || m.type === 'iron_golem') && m.homeX !== undefined && m.homeZ !== undefined) {
         // 村民/铁傀儡锚定村庄：走太远就回家，近处正常游走
         const hx = m.homeX - m.x;
@@ -1769,8 +1870,8 @@ export function tickMobs(
     // 被 1 格障碍挡住时跳起
     if ((hitX || hitZ) && m.onGround) m.velY = 8.5;
 
-    if (m.type === 'blaze' || m.type === 'ghast' || m.type === 'wither') {
-      // 悬浮：相位起伏，不受重力（恶魂/凋灵起伏更慢）
+    if (m.type === 'blaze' || m.type === 'ghast' || m.type === 'ghastling' || m.type === 'happy_ghast' || m.type === 'wither') {
+      // 悬浮：相位起伏，不受重力（恶魂/凋灵起伏更慢；小恶魂/快乐恶魂同为悬浮飞行，1.21.6）
       m.bob = (m.bob ?? Math.random() * 6) + dt * (m.type === 'blaze' ? 2 : 0.8);
       m.y += Math.sin(m.bob) * (m.type === 'blaze' ? 0.5 : 0.3) * dt;
       m.velY = 0;
@@ -1952,6 +2053,11 @@ export function damageMob(mob: Mob, damage: number, attackerPos?: { x: number; z
     else if (c.kind === 'tool') spawnToolDrop(c.tool, mob.x, mob.y + 0.3, mob.z, c.durability, c.ench);
     else spawnArmorDrop(c.piece, mob.x, mob.y + 0.3, mob.z, c.durability, c.material, c.ench);
     mob.carrying = undefined;
+  }
+  // 快乐恶魂：装备的鞍具随死亡掉回物品（1.21.6 Java：鞍具可回收；本体不掉落任何攻击物）
+  if (mob.type === 'happy_ghast' && mob.harnessed) {
+    spawnMaterialDrop('harness', mob.x, mob.y + 0.3, mob.z, 1);
+    mob.harnessed = false;
   }
   // 蜘蛛眼：仅玩家击杀时 1/3 概率掉 1 个（MC 稀有掉落；烧死/摔死等环境击杀不掉）
   if (mob.type === 'spider' && attackerPos && Math.random() < 1 / 3) {

@@ -7,7 +7,7 @@ import { dropBrewingContents, POTIONS } from './brewing';
 import { effects, effectLvls } from './effects';
 import { isFarmlandId, isWheatCropId, popCrop, setCropPopHandler } from './crops';
 import { cameraRef, breakParticles, dayFactorAt, eatFeedback, getActiveWorld, pearlTeleport, playerPosition, touchInput, worldClock } from './game';
-import { setGrowthDropHandler } from './growth';
+import { setGrowthDropHandler, trackDriedGhast, accelerateDriedGhast } from './growth';
 import { spawnBlockDrop, spawnMaterialDrop } from './items';
 import { setSaplingDropHandler, isLeavesId, LEAF_TO_SAPLING, growTree, markPlacedLeaves } from './saplings';
 import { raycastBlock } from './raycast';
@@ -19,7 +19,7 @@ import { trySummonWither } from './wither';
 import { pistonIdFor } from './pistons';
 import { cycleRepeaterDelay, isComparatorId, isRepeaterId, observerIdFor, pressButton, toggleComparatorMode, toggleLever, tuneNoteBlock } from './redstone';
 import { XP_ORE } from './xp';
-import { BREED_FOOD, barterWith, damageMob, feedMob, fireEnderPearl, fireEyeOfEnder, firePlayerArrow, MOB_DEFS, mobInReach, mobs, onSlept, tryBuildCopperGolem, variantForBiome, woolBlockId, type Mob } from './mobs';
+import { BREED_FOOD, barterWith, damageMob, equipHarness, feedMob, feedSnowball, fireEnderPearl, fireEyeOfEnder, firePlayerArrow, MOB_DEFS, mobInReach, mobs, onSlept, tryBuildCopperGolem, unequipHarness, variantForBiome, woolBlockId, type Mob } from './mobs';
 import { fillPortalFrame, nearestStronghold } from './stronghold';
 import { markTreasureOpened, nearestBuriedTreasure } from './structures';
 import { bobber, castBobber, reelIn } from './fishing';
@@ -459,6 +459,28 @@ function tryMobInteract(world: World, s: ReturnType<typeof useGameStore.getState
     lastPlace = now;
     return true;
   }
+  // 鞍具装备（1.21.6）：手持鞍具右键未装备的快乐恶魂（骑乘条件 harnessed===true，骑乘控制在 Player 侧）
+  if (mob.type === 'happy_ghast' && !mob.harnessed && has('harness') && spend('harness') && equipHarness(mob)) {
+    s.setNotice('快乐恶魂戴上了鞍具');
+    playSound('place');
+    lastPlace = now;
+    return true;
+  }
+  // 剪刀卸鞍具（1.21.6 Java）：鞍具原地掉回物品
+  if (mob.type === 'happy_ghast' && mob.harnessed && (creative || (held?.kind === 'tool' && held.tool === 'shears'))) {
+    unequipHarness(mob);
+    if (!creative) s.damageHeldTool(1);
+    playSound('place');
+    lastPlace = now;
+    return true;
+  }
+  // 喂雪球（1.21.6）：小恶魂加速长大 / 快乐恶魂回血（feedSnowball 语义；不繁殖——快乐恶魂链不进 BREED_FOOD）
+  if ((mob.type === 'ghastling' || mob.type === 'happy_ghast') && has('snowball') && spend('snowball') && feedSnowball(mob)) {
+    s.setNotice(mob.type === 'ghastling' ? '小恶魂开心地转圈…' : '快乐恶魂恢复了精神');
+    playSound('place');
+    lastPlace = now;
+    return true;
+  }
   // 金锭与猪灵易物：端详 3s 后丢出随机易物（MC；蛮兵不谈判）
   // 金锭与猪灵易物：端详 3s 后丢出随机易物（MC；蛮兵不谈判）。冷却检查前置：端详期内重复右键不白扣金锭
   if (mob.type === 'piglin' && (mob.barterTimer ?? 0) <= 0 && has('gold_ingot') && spend('gold_ingot') && barterWith(mob)) {
@@ -724,6 +746,17 @@ export function tryPlace(): boolean {
         lastPlace = now;
         return true;
       }
+    }
+  }
+  // 雪球喂干恶魂（1.21.6）：加速复水（Java 复水不可加速——本项目把喂雪球交互延伸到方块阶段，growth.ts 约定每颗 -60s）
+  if (heldSlot?.kind === 'material' && heldSlot.material === 'snowball' && hitId === BLOCK_BY_KEY.dried_ghast.id) {
+    trackDriedGhast(bx, by, bz); // 未登记时补登记（读档后首喂/老存档）
+    if (accelerateDriedGhast(bx, by, bz)) {
+      s.consumeMaterial('snowball', 1);
+      breakParticles.push({ x: bx, y: by, z: bz, tile: BLOCKS[hitId].side });
+      playSound('place');
+      lastPlace = now;
+      return true;
     }
   }
   if (!sneakPlace) {
@@ -1068,6 +1101,8 @@ export function tryPlace(): boolean {
   if (id === BLOCK_BY_KEY.wither_skeleton_skull.id) trySummonWither(world, px, py, pz, (d) => s.damagePlayer(d));
   // 南瓜放到铜块旁：铜傀儡建造（1.21.9 简化——Java 需雕刻南瓜；铜块原位转化为铜箱，见 mobs.ts）
   if (id === BLOCK_BY_KEY.pumpkin.id) tryBuildCopperGolem(world, px, py, pz);
+  // 干恶魂放下：登记复水计时（1.21.6——泡水约 20 分钟孵出小恶魂，见 growth.ts）
+  if (id === BLOCK_BY_KEY.dried_ghast.id) trackDriedGhast(px, py, pz);
   playSound(BLOCKS[id]?.placeSound ?? 'place');
   lastPlace = now;
   return true;

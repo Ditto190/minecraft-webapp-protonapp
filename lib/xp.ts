@@ -27,6 +27,8 @@ export const XP_MOB: Record<MobType, number> = {
   phantom: 5,
   iron_golem: 0, // MC：铁傀儡不掉经验
   copper_golem: 0, // MC：铜傀儡同为傀儡类，不掉经验（1.21.9）
+  ghastling: 0, // 1.21.6：幼体动物不掉经验（Java 幼体规则）
+  happy_ghast: 2, // 1.21.6：被动生物 1-3 取中（同猪/牛）
   pig: 2,
   cow: 2,
   chicken: 2,

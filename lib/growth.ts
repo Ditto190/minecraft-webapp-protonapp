@@ -11,8 +11,9 @@
 //   旧模型 12 抽样+命中即长 → 单格 5461s/节 ≈ 91 分钟/节，远慢于 Java）
 // - 竹子：期望 3 次随机刻/节 → ≈ 205s ≈ 3.4 分钟/节（Java 同）
 
-import { AIR, BLOCK_BY_KEY, BLOCKS, type BlockId } from './blocks';
+import { AIR, BLOCK_BY_KEY, BLOCKS, isWaterId, type BlockId } from './blocks';
 import { CHUNK_SIZE, WORLD_HEIGHT } from './grid';
+import { spawnGhastling } from './mobs';
 import { mulberry32 } from './noise';
 import { type World } from './world';
 import { registerWorldScope } from './worldScope';
@@ -68,6 +69,7 @@ function tryGrow(world: World, x: number, y: number, z: number, key: 'cactus' | 
  * 也只作用于顶段，下方茎段被抽中无效；命中贴实心的仙人掌则整列塌落破坏
  */
 export function tickGrowth(world: World, dt: number): void {
+  tickRehydration(world, dt); // 干恶魂复水是连续计时（非随机刻），每拍推进
   sampleDebt += (SAMPLES_PER_CHUNK * dt) / 2;
   const n = Math.floor(sampleDebt);
   if (n <= 0) return;
@@ -112,9 +114,80 @@ export function columnGrowthAge(x: number, z: number): number {
   return columnAges.get(columnKey(x, z)) ?? 0;
 }
 
-/** 清空柱作物 age 计数（切换世界/测试隔离） */
+// ——— 1.21.6（Chase the Skies）干恶魂复水 ———
+// Java：干恶魂方块水浸（waterlogged）后约 20 分钟（24000 tick）孵出小恶魂（ghastling），期间贴图分 4 阶段渐变。
+// 项目从简：无水浸机制——任一正交邻格为水即视为「泡在水中」；时间尺度取真实秒 1200s（与一昼夜 1200s 同长，
+// 恰合 Java 20 分钟）；4 阶段贴图未做（单贴图，见 blocks.ts 注释）；进度只在泡水时推进、离水暂停；
+// 方块被挖/炸即除名（掉落走挖掘路径的方块自身掉落，blocks.ts 未设 dropBlock/nonSilkDrop）。
+
+/** 复水总时长（秒，Java 20 分钟同尺度） */
+export const DRIED_GHAST_REHYDRATE_SECONDS = 1200;
+/** 喂雪球的复水加速量（秒/颗）：Java 复水不可加速——本项目把「喂雪球加速长大」的交互延伸到方块阶段（约定每颗 -60s=5%） */
+export const SNOWBALL_REHYDRATE_BOOST = 60;
+
+/** 复水进度表（按方块坐标 → 剩余秒数；内存态不持久化，与柱作物 age 同策略；读档后由放置/首喂重新登记） */
+const rehydration = new Map<string, number>();
+const rehydrationKey = (x: number, y: number, z: number): string => `${x},${y},${z}`;
+
+/** 登记一个干恶魂方块开始复水计时（放置时由 actions.ts 调用；重复登记不重置已有进度） */
+export function trackDriedGhast(x: number, y: number, z: number): void {
+  const k = rehydrationKey(x, y, z);
+  if (!rehydration.has(k)) rehydration.set(k, DRIED_GHAST_REHYDRATE_SECONDS);
+}
+
+/** 复水剩余秒数（测试内省用；未登记返回 undefined） */
+export function rehydrationLeft(x: number, y: number, z: number): number | undefined {
+  return rehydration.get(rehydrationKey(x, y, z));
+}
+
+/** 喂雪球加速复水（actions.ts 右键交互；未登记返回 false——调用方先 trackDriedGhast 补登记） */
+export function accelerateDriedGhast(x: number, y: number, z: number): boolean {
+  const k = rehydrationKey(x, y, z);
+  const left = rehydration.get(k);
+  if (left === undefined) return false;
+  rehydration.set(k, Math.max(0, left - SNOWBALL_REHYDRATE_BOOST));
+  return true;
+}
+
+/** 六邻是否有水（泡水判定；isWaterId 含流水各级） */
+function soakedByWater(world: World, x: number, y: number, z: number): boolean {
+  return (
+    isWaterId(world.getBlock(x + 1, y, z)) ||
+    isWaterId(world.getBlock(x - 1, y, z)) ||
+    isWaterId(world.getBlock(x, y + 1, z)) ||
+    isWaterId(world.getBlock(x, y - 1, z)) ||
+    isWaterId(world.getBlock(x, y, z + 1)) ||
+    isWaterId(world.getBlock(x, y, z - 1))
+  );
+}
+
+/** 复水推进：泡水倒计时，归零孵出小恶魂并消耗方块；方块消失（挖/炸）则除名，未加载 chunk 跳过（读块会触发隐式生成） */
+function tickRehydration(world: World, dt: number): void {
+  if (rehydration.size === 0) return;
+  const driedId = BLOCK_BY_KEY.dried_ghast.id;
+  for (const [k, left] of rehydration) {
+    const [x, y, z] = k.split(',').map(Number);
+    if (!world.chunks.has(`${x >> 4},${z >> 4}`)) continue;
+    if (world.getBlock(x, y, z) !== driedId) {
+      rehydration.delete(k);
+      continue;
+    }
+    if (!soakedByWater(world, x, y, z)) continue; // 离水暂停（Java 无水浸不推进）
+    const next = left - dt;
+    if (next <= 0) {
+      rehydration.delete(k);
+      world.setBlock(x, y, z, AIR); // 消耗方块
+      spawnGhastling(x + 0.5, y + 0.1, z + 0.5); // 孵出小恶魂（baby + growUp，mobs.ts）
+    } else {
+      rehydration.set(k, next);
+    }
+  }
+}
+
+/** 清空柱作物 age 计数与干恶魂复水进度（切换世界/测试隔离） */
 export function clearGrowthAges(): void {
   columnAges.clear();
+  rehydration.clear();
 }
 
 // 世界作用域自注册（lib/worldScope.ts）：age 计数随世界清理

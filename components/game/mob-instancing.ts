@@ -50,6 +50,15 @@ export const MOB_GEOS: Record<string, BoxGeometry> = {
   blazeRod: geo(0.09, 0.9, 0.09),
   ghastBody: geo(2.2, 2.2, 2.2),
   ghastTentacle: geo(0.22, 1.1, 0.22),
+  // 快乐恶魂链（1.21.6）：小恶魂小方体 + 快乐恶魂巨体（比恶魂更大）+ 鞍具（鞍座与护目镜）
+  ghastlingBody: geo(0.9, 0.9, 0.9),
+  ghastlingTentacle: geo(0.12, 0.5, 0.12),
+  happyGhastBody: geo(3.0, 3.0, 3.0),
+  happyGhastTentacle: geo(0.3, 1.4, 0.3),
+  ghastEye: geo(0.3, 0.3, 0.06),
+  ghastMouth: geo(0.5, 0.12, 0.06),
+  harnessSeat: geo(1.6, 0.35, 1.6),
+  harnessGoggles: geo(1.6, 0.5, 0.25),
   sheepWool: geo(1.0, 0.62, 0.62),
   sheepSlim: geo(0.7, 0.42, 0.42),
   sheepHead: geo(0.36, 0.3, 0.3),
@@ -300,6 +309,14 @@ const BASE_PARTS: Record<string, PartDef[]> = {
       [0.7, 0], [-0.7, 0.7], [0, 0.7], [0.7, 0.7],
     ] as const).map(([tx, tz]) => pt('ghastTentacle', 'ghastTear', tx, -0.15, tz)),
   ],
+  ghastling: [
+    // 小恶魂（1.21.6）：雪白小方体 + 短触手 + 闭眼小脸（脸朝 +z，与整体朝向约定一致）
+    pt('ghastlingBody', 'ghastling', 0, 0.6, 0),
+    ...([[-0.25, -0.25], [0.25, -0.25], [-0.25, 0.25], [0.25, 0.25]] as const).map(([tx, tz]) => pt('ghastlingTentacle', 'ghastling', tx, 0.15, tz)),
+    pt('slimeEye', 'ghastDark', -0.18, 0.72, 0.46),
+    pt('slimeEye', 'ghastDark', 0.18, 0.72, 0.46),
+    pt('slimeMouth', 'ghastDark', 0, 0.48, 0.46),
+  ],
   chicken: [
     pt('chickenBody', 'chicken', 0, 0.35, 0),
     pt('chickenHead', 'chicken', 0, 0.62, 0.2),
@@ -345,6 +362,7 @@ const BASE_PARTS: Record<string, PartDef[]> = {
  * 变体键：同键共享一组实例池。
  * 羊按毛色×剪毛、狼按驯服（项圈有无）、村民按职业（袍色）分变体；
  * 牛/猪/鸡按群系变种（1.21.5：cold/temperate/warm，部件同色不同料）；
+ * 快乐恶魂按鞍具有无（1.21.6：有鞍加鞍座/护目镜部件）；
  * 史莱姆体型/幼体/苦力怕引爆膨胀是逐生物根矩阵缩放，不占变体。
  */
 export function variantKeyOf(m: Mob): string {
@@ -355,6 +373,9 @@ export function variantKeyOf(m: Mob): string {
       return `wolf:${m.tamed ? 1 : 0}`;
     case 'villager':
       return `villager:${professionOf(m.id)}`;
+    case 'happy_ghast':
+      // 快乐恶魂（1.21.6）：无鞍 / 有鞍两变体——有鞍加鞍座与护目镜部件（Java 被骑时护目镜放下，从简有鞍即显示）
+      return `happy_ghast:${m.harnessed ? 1 : 0}`;
     case 'cow':
     case 'pig':
     case 'chicken':
@@ -409,6 +430,24 @@ export function partsForVariant(vkey: string): PartDef[] {
         // 抱臂横袖（MC 村民双手交叠于袍前）
         pt('villagerArms', robe, 0, 1.12, 0.2),
       ];
+    }
+    case 'happy_ghast': {
+      // 快乐恶魂（1.21.6）：雪白巨体（比恶魂更大）+ 长触手 + 小脸；有鞍变体加鞍座与放下的护目镜
+      const parts = [
+        pt('happyGhastBody', 'ghast', 0, 1.7, 0),
+        ...([
+          [-0.9, -0.9], [0, -0.9], [0.9, -0.9], [-0.9, 0],
+          [0.9, 0], [-0.9, 0.9], [0, 0.9], [0.9, 0.9],
+        ] as const).map(([tx, tz]) => pt('happyGhastTentacle', 'ghast', tx, 0, tz)),
+        pt('ghastEye', 'ghastDark', -0.6, 2.3, 1.51),
+        pt('ghastEye', 'ghastDark', 0.6, 2.3, 1.51),
+        pt('ghastMouth', 'ghastDark', 0, 1.8, 1.51),
+      ];
+      if (a === '1') {
+        parts.push(pt('harnessSeat', 'harnessLeather', 0, 3.3, 0)); // 鞍座（体顶 3.2 之上）
+        parts.push(pt('harnessGoggles', 'harnessGoggles', 0, 2.4, 1.6)); // 护目镜放下（Java 被骑时放下；从简有鞍即显示）
+      }
+      return parts;
     }
     case 'cow':
     case 'pig':
@@ -467,7 +506,8 @@ export function computeMobRenderState(m: Mob, px: number, pz: number, now: numbe
   } else if (m.type === 'slime') {
     scale = (m.slimeSize ?? 4) * 0.35;
   } else {
-    scale = m.baby ? 0.55 : 1;
+    // 小恶魂的 baby 标记只用于成长计时（growUp 长成快乐恶魂），几何体本身已按小型建模，不再叠 0.55 幼体缩放
+    scale = m.baby && m.type !== 'ghastling' ? 0.55 : 1;
   }
   const dying = m.deathTimer !== undefined;
   const flash = dying || (m.hurtImmune ?? 0) > HURT_FLASH_LEFT;

@@ -24,7 +24,7 @@ export const ATLAS_COLS = 8;
 export const TILE_PX = 32;
 /** canvas 绘制图标（工作台/熔炉/装备/食物）的 atlas 起始格号；pack 贴图格数须小于它 */
 export const ICON_TILE_START = 512;
-/** canvas 图标格数量（0-1 工作台、2 熔炉、3-15 装备/食物、16 箱子侧、17 凋灵骷髅头、18 末地星空、19 鸡蛋、20 河豚、21 蜘蛛眼、22 金粒、23 金苹果、24 藏宝图、25 落叶层、26 野花簇、27 萤火虫灌木、28 仙人掌花、29 矮干草丛、30 高干草丛、31 铜镐、32 收纳袋、33 铜箱侧；预留到 40） */
+/** canvas 图标格数量（0-1 工作台、2 熔炉、3-15 装备/食物、16 箱子侧、17 凋灵骷髅头、18 末地星空、19 鸡蛋、20 河豚、21 蜘蛛眼、22 金粒、23 金苹果、24 藏宝图、25 落叶层、26 野花簇、27 萤火虫灌木、28 仙人掌花、29 矮干草丛、30 高干草丛、31 铜镐、32 收纳袋、33 铜箱侧、34 干恶魂、35 鞍具；预留到 40） */
 export const ICON_TILE_COUNT = 40;
 /** atlas 总行数（pack 格 + 图标格） */
 export const ATLAS_ROWS = Math.ceil((ICON_TILE_START + ICON_TILE_COUNT) / ATLAS_COLS);
@@ -881,6 +881,18 @@ defs.push({
   id: defs.length, key: 'copper_chest', name: '铜箱',
   top: tileOf('copper_block'), bottom: tileOf('copper_block'), side: ICON_TILE_START + 33,
   opaque: true, solid: true, tool: 'pickaxe', needsPick: true, pickTier: 1, digTime: 15, cat: 'utility', ...STONE_SND,
+});
+
+// ——— 1.21.6（Chase the Skies）———
+// 干恶魂（dried ghast）：快乐恶魂全链的起点方块。Java 自然生成于下界灵魂沙峡谷的化石结构旁——
+// 本项目无化石结构，获取走两条：合成（灵魂沙×1 + 恶魂之泪×8，recipes.ts）与猪灵以物易物（mobs.ts BARTER_TABLE 低权重，Java 同源）。
+// 泡水约 20 分钟复水孵出小恶魂（ghastling，计时见 lib/growth.ts）；挖掘掉落自身（默认方块掉落，无 dropBlock/nonSilkDrop）。
+// Java 复水有 4 阶段贴图渐变（含水程度），本项目从简单贴图（差异见 growth.ts 注释）。
+// 贴图：atlas 无 dried_ghast 专用 tile（Faithful 包未收录），canvas 图标格 +34 自绘（干瘪小脸，textures.ts）。
+defs.push({
+  id: defs.length, key: 'dried_ghast', name: '干恶魂',
+  top: ICON_TILE_START + 34, bottom: ICON_TILE_START + 34, side: ICON_TILE_START + 34,
+  opaque: true, solid: true, digTime: 0.8, cat: 'utility', ...STONE_SND,
 });
 
 /** 以方块 id 为下标 */
