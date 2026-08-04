@@ -10,7 +10,7 @@ import { FOODS, getFurnace, shiftIntoFurnace, takeOutput } from './furnace';
 import { cameraRef, hurtState, playerPosition, survivalStats, worldClock } from './game';
 import { effects } from './effects';
 import { beaconTiers } from './beacon';
-import { itemDrops, spawnArmorDrop, spawnBlockDrop, spawnMaterialDrop, spawnToolDrop } from './items';
+import { itemDrops, MANUAL_DROP_THROW_SPEED, spawnArmorDrop, spawnBlockDrop, spawnMaterialDrop, spawnToolDrop } from './items';
 import {
   clickItemStack,
   clickSlot,
@@ -99,9 +99,9 @@ function spawnSlotDrop(slot: NonNullable<Slot>, x: number, y: number, z: number)
 /** Java 手动丢弃（Q）的拾取延迟 2s；破坏/死亡掉落为 0.5s（items.ts PICKUP_DELAY） */
 const MANUAL_PICKUP_DELAY = 2;
 
-/** Q 丢弃路径：在玩家面前生成槽位掉落实体——位置取眼部高度、沿视线水平分量前移 0.5 格
- * （ItemDrop 结构无水平速度字段，无法真"抛出"，以落点偏移表达方向）；手动丢弃 2s 拾取延迟
- * 用 age 负偏移实现（items.ts 结构无独立延迟字段：age ≥ 0.5 才可拾取 → 记 0.5-2 即 2s 后可拾） */
+/** Q 丢弃路径：在玩家面前生成槽位掉落实体——位置取眼部高度、沿视线水平分量前移 0.5 格，
+ * 并给 3 格/s 的视线方向水平初速（Java 丢出物品向前抛出；初速由 items.ts 阻尼积分）；
+ * 手动丢弃 2s 拾取延迟用 age 负偏移实现（items.ts 结构无独立延迟字段：age ≥ 0.5 才可拾取 → 记 0.5-2 即 2s 后可拾） */
 function spawnManualDrop(slot: NonNullable<Slot>): void {
   const { x, y, z } = playerPosition;
   let ox = 0;
@@ -120,7 +120,11 @@ function spawnManualDrop(slot: NonNullable<Slot>): void {
   }
   const before = itemDrops.length;
   spawnSlotDrop(slot, x + ox, y + 1.2, z + oz);
-  for (let i = before; i < itemDrops.length; i++) itemDrops[i].age = 0.5 - MANUAL_PICKUP_DELAY;
+  for (let i = before; i < itemDrops.length; i++) {
+    itemDrops[i].age = 0.5 - MANUAL_PICKUP_DELAY;
+    itemDrops[i].velX = ox * (MANUAL_DROP_THROW_SPEED / 0.5); // Java：沿视线水平抛出 ~3 格/s
+    itemDrops[i].velZ = oz * (MANUAL_DROP_THROW_SPEED / 0.5);
+  }
 }
 
 /** 把一个槽位物品退回背包（热键栏优先，溢出到主物品栏）；放不下在玩家脚下生成掉落实体（与死亡掉落同路径）。

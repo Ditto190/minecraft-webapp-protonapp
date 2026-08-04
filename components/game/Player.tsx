@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import { Euler, PerspectiveCamera, Vector3 } from 'three';
 import { BLOCK_BY_KEY, BLOCKS, isLavaId, isWaterId, tileOf } from '@/lib/blocks';
@@ -21,7 +21,7 @@ import { arrows, checkEndermanStare, damageMob, mobInReach, mobs, spawnMobAt, ty
 import { crystalInReach, hitCrystal, tickCrystals } from '@/lib/endfight';
 import { tickFishing } from '@/lib/fishing';
 import { SEA_LEVEL, type Biome } from '@/lib/noise';
-import { aabbFree, climbVelY, collideAxis, DoubleTap, PLAYER_HALF_W, PLAYER_HEIGHT, sneakEdgeClip, touchingVine, wSprintNext, type Aabb } from '@/lib/physics';
+import { aabbFree, canRide, climbVelY, collideAxis, dismountRide, DoubleTap, isHappyGhast, mountRide, PLAYER_HALF_W, PLAYER_HEIGHT, rideControl, rideSnap, sneakEdgeClip, sprintSwimNext, stanceSpeedMult, SWIM_EYE, SWIM_HEIGHT, touchingVine, wSprintNext, type Aabb } from '@/lib/physics';
 import { playSound, splashSound, hurtSound } from '@/lib/sound';
 import { useGameStore } from '@/lib/store';
 import { anyPanelOpen } from '@/lib/store-types';
@@ -220,6 +220,10 @@ export function Player() {
   const stareAcc = useRef(0);
   /** 末影龙缓存：存活期内免每帧 mobs.find（被移除时 includes 失效重扫；龙只存在于末地维度） */
   const cachedDragon = useRef<Mob | null>(null);
+  /** 冲刺游泳姿态（MC Java 1.13+ 俯泳：水中冲刺进入，碰撞箱降到 0.6 可过 1 格缝；进出条件在 lib/physics.ts） */
+  const sprintSwim = useRef(false);
+  /** 骑乘中的快乐恶魂（mob 引用；骑乘状态不进存档——重载后玩家就地落回地面，坐骑留在原处） */
+  const riding = useRef<Mob | null>(null);
 
   // 维度切换：重置位置状态（落点由 WorldRenderer 经 spawnPoint 下发）
   const dimension = useGameStore((s) => s.dimension);
@@ -228,6 +232,12 @@ export function Player() {
     velY.current = 0;
     portalAcc.current = 0;
     portalState.charge = 0; // 跨维度后门内读秒归零（屏幕紫色渐进 overlay 消费）
+    // 骑乘不跨维度：mobs 作用域切维度整体 clear（不暂存，见 mobs.ts registerWorldScope），旧坐骑对象随之销毁，无需解标记
+    if (riding.current) {
+      dismountRide(riding.current);
+      riding.current = null;
+    }
+    sprintSwim.current = false; // 俯泳姿态重置（落点未必在水中）
   }, [dimension]);
 
   // 相机共享给触屏挖/放动作（lib/actions.ts）
@@ -371,6 +381,48 @@ export function Player() {
     });
   }, [panelOpen, gl, touchMode]);
 
+  // —— 骑乘（快乐恶魂）交互闭包：右键上马 / 下马（规则纯函数在 lib/physics.ts，可单测） ——
+
+  /** 下马（Shift+右键 / 触屏潜行开关 / 死亡 / 坐骑失效自动）：解标记、从坐骑头顶就地落回普通物理 */
+  const doDismount = useCallback(() => {
+    dismountRide(riding.current);
+    riding.current = null;
+    velY.current = 0;
+  }, []);
+
+  /**
+   * 右键快乐恶魂上马（MC 1.21.6）：空手或任意手持均可——已装鞍（harnessed，防御读取，约定见 physics.ts）即骑乘。
+   * 未装鞍：空手 → 提示「需要鞍具」并吞掉右键；手持物品 → 放行（装鞍/喂雪球交互在 actions.ts 的 mob 右键路径）。
+   * 返回 true = 已消费这次右键（上马成功或已提示），不再走 tryPlace。
+   */
+  const tryMountGhast = useCallback((): boolean => {
+    const world = getActiveWorld();
+    const cam = cameraRef.current;
+    if (!world || !cam) return false;
+    cam.getWorldDirection(rayDir);
+    const mob = mobInReach(world, cam.position.x, cam.position.y, cam.position.z, rayDir.x, rayDir.y, rayDir.z, REACH);
+    if (!isHappyGhast(mob)) return false; // 不是快乐恶魂：走正常右键（交易/喂食/放置等）
+    const s = useGameStore.getState();
+    if (!canRide(mob)) {
+      if (s.hotbarSlots[s.selectedSlot]) return false; // 手持物品放行给装鞍/喂食路径
+      s.setNotice('需要鞍具');
+      return true;
+    }
+    if (!mountRide(mob)) return false; // 防御：同帧死亡等竞态
+    riding.current = mob;
+    stepAnim.current = null; // 上马瞬间打断台阶辅助动画（避免与吸附抢 y）
+    if (eatState.active) cancelEating(); // 上马打断进食/饮用读条（MC：上马取消使用动作）
+    return true;
+  }, [rayDir]);
+
+  // 鼠标：左键按住挖掘，右键放置（触屏走 TouchControls）
+  useEffect(() => {
+    touchInput.mountGhast = tryMountGhast; // 触屏上马桥（TouchControls 在 tryPlace 前消费）
+    return () => {
+      touchInput.mountGhast = null;
+    };
+  }, [tryMountGhast]);
+
   // 鼠标：左键按住挖掘，右键放置（触屏走 TouchControls）
   useEffect(() => {
     const onMouseDown = (e: MouseEvent) => {
@@ -378,7 +430,12 @@ export function Player() {
       if (e.button === 0) digHeld.current = true;
       else if (e.button === 2) {
         useButton.held = true; // 进食读条等的「按住使用」状态（lib/actions.ts）
-        if (tryPlace()) handSwing.at = performance.now(); // 放置成功：播一次手部挥动（触屏放置走 TouchControls 直调 tryPlace，不经此处）
+        if (riding.current) {
+          // 骑乘中：Shift+右键下马（Java 潜行下马——桌面 Shift 已兼下降键，故加右键组合）；其余右键不触发放置/使用
+          if (keys.current['ShiftLeft'] || keys.current['ShiftRight']) doDismount();
+        } else if (tryMountGhast()) {
+          // 上马成功（或空手提示需要鞍具）：这次右键已消费
+        } else if (tryPlace()) handSwing.at = performance.now(); // 放置成功：播一次手部挥动（触屏放置走 TouchControls 直调 tryPlace，不经此处）
       } else if (e.button === 1) {
         // 中键选块（MC pick block）：取准星方块到手上
         e.preventDefault(); // 阻止浏览器中键自动滚动
@@ -398,7 +455,7 @@ export function Player() {
       document.removeEventListener('mousedown', onMouseDown);
       document.removeEventListener('mouseup', onMouseUp);
     };
-  }, [gl]);
+  }, [gl, tryMountGhast, doDismount]);
 
   // 物理与移动
   useFrame((state, delta) => {
@@ -418,13 +475,14 @@ export function Player() {
       mcDebug.fps = debugInfo.fps;
       mcDebug.world = world;
       mcDebug.yawPitch = yawPitch.current; // 触屏视角（可写：自动化对准）
+      mcDebug.riding = riding.current; // 骑乘中的坐骑（只读排查用；happy_ghast 骑乘系统）
       (window as unknown as { __mc?: unknown }).__mc = mcDebug;
     }
 
-    // FOV：设置基准值 + 冲刺时 +10%（MC 冲刺视角），平滑过渡
+    // FOV：设置基准值 + 冲刺时 +10%（MC 冲刺视角；俯泳冲刺同样按键故同样放大），平滑过渡。骑乘中不放大（MC 骑乘无冲刺视角）
     {
       const cam = state.camera as PerspectiveCamera;
-      const sprintKey = keys.current['ControlLeft'] || keys.current['ControlRight'] || touchInput.sprint || wSprint.current;
+      const sprintKey = !riding.current && (keys.current['ControlLeft'] || keys.current['ControlRight'] || touchInput.sprint || wSprint.current);
       const targetFov = fov * (sprintKey ? 1.1 : 1);
       if (Math.abs(cam.fov - targetFov) > 0.05) {
         cam.fov += (targetFov - cam.fov) * Math.min(1, dt * 10);
@@ -493,6 +551,7 @@ export function Player() {
     wasDead.current = gs.dead;
     // 死亡：冻结等待重生界面操作
     if (gs.dead) {
+      if (riding.current) doDismount(); // 死亡落马（MC：死亡脱离载具）
       useButton.held = false;
       if (eatState.active) cancelEating(); // 死亡打断进食/饮用读条（MC：死亡取消使用动作）
       bowState.draw = 0; // 死亡松弦（HeldItem 拉弦动画消费）
@@ -502,14 +561,20 @@ export function Player() {
     // Esc 暂停（指针解锁）：物理/挖掘/生存 tick 全部冻结；触屏 paused 恒 false 不受影响
     if (gs.paused) return;
 
+    // 骑乘校验：坐骑死亡/被移除（含卸鞍 harnessed 变 false）→ 自动下马，落回普通物理（骑乘不进存档，重载即落地）
+    if (riding.current && (!mobs.includes(riding.current) || !canRide(riding.current))) doDismount();
+    const ridingNow = riding.current !== null;
+
+    // 视点高度：俯泳 0.4（MC Java），其余 1.62（潜行 -0.12 在相机段处理）
+    const eyeH = sprintSwim.current ? SWIM_EYE : EYE;
     // 水体检测：脚或头在水中（飞行时忽略）
     const inWater =
       isWaterId(world.getBlock(Math.floor(p.x), Math.floor(p.y + 0.1), Math.floor(p.z))) ||
-      isWaterId(world.getBlock(Math.floor(p.x), Math.floor(p.y + EYE), Math.floor(p.z)));
+      isWaterId(world.getBlock(Math.floor(p.x), Math.floor(p.y + eyeH), Math.floor(p.z)));
     // 岩浆检测：接触即受伤，泳动比水更粘滞
     const inLava =
       isLavaId(world.getBlock(Math.floor(p.x), Math.floor(p.y + 0.1), Math.floor(p.z))) ||
-      isLavaId(world.getBlock(Math.floor(p.x), Math.floor(p.y + EYE), Math.floor(p.z)));
+      isLavaId(world.getBlock(Math.floor(p.x), Math.floor(p.y + eyeH), Math.floor(p.z)));
     const inFluid = inWater || inLava;
     // 入水/出水水花：水中状态边沿触发（入水重、出水轻）；0.5s 冷却，水面小幅波动/上下浮动不反复响
     splashCd.current = Math.max(0, splashCd.current - dt);
@@ -540,13 +605,19 @@ export function Player() {
     const r = (keys.current['KeyD'] ? 1 : 0) - (keys.current['KeyA'] ? 1 : 0) + touchInput.moveX;
     // 双击 W 冲刺取消：W 已松开（退锁清键兜底）或不再前移（停下），MC Java
     wSprint.current = wSprintNext(wSprint.current, keys.current['KeyW'] === true, f);
-    // MC 潜行：地面按 Shift（水中/飞行时是下降键）；冲刺：Ctrl（MC Java 同款）。触屏对应 touchInput.sneak/sprint 切换开关
-    const sneaking = (shift || touchInput.sneak) && !flying && !inFluid;
-    // 冲刺：Ctrl 或双击 W（MC Java 两种触发并存）。饥饿 ≤6（3 格）禁止冲刺（MC 门禁）；冲刺命中后的中断期内也不冲刺
+    // MC 潜行：地面按 Shift（水中/飞行时是下降键）；冲刺：Ctrl（MC Java 同款）。触屏对应 touchInput.sneak/sprint 切换开关。骑乘中 Shift 是坐骑下降键，不算潜行
+    const sneaking = !ridingNow && (shift || touchInput.sneak) && !flying && !inFluid;
+    // 冲刺：Ctrl 或双击 W（MC Java 两种触发并存）。饥饿 ≤6（3 格）禁止冲刺（MC 门禁）；冲刺命中后的中断期内也不冲刺。骑乘中无冲刺（坐骑速度固定）
     const sprinting =
+      !ridingNow &&
       (keys.current['ControlLeft'] || keys.current['ControlRight'] || touchInput.sprint || wSprint.current) &&
       !sneaking && !flying && sprintBreak.current <= 0 &&
       (gs.worldMode !== 'survival' || gs.hunger > 6);
+    // 冲刺游泳（MC Java 1.13+ 俯泳）：水中冲刺进入；出水/松冲刺/站底退出；头顶容不下站姿时保持低姿态（1 格缝不卡天花板）
+    const swimHeadroom = aabbFree(world, p.x, p.y, p.z, PLAYER_HALF_W, PLAYER_HEIGHT);
+    sprintSwim.current = !ridingNow && sprintSwimNext(sprintSwim.current, inWater, sprinting, onGround.current, swimHeadroom);
+    /** 本帧碰撞箱高度：俯泳 0.6（可过 1 格缝，MC Java），其余 1.8 */
+    const hitH = sprintSwim.current ? SWIM_HEIGHT : PLAYER_HEIGHT;
     // 前进 = (fx, fz)，右 = 前进 × up = (-fz, fx)
     let mx = fx * f - fz * r;
     let mz = fz * f + fx * r;
@@ -554,16 +625,22 @@ export function Player() {
     const speed =
       (flying ? FLY_SPEED : inFluid ? WALK_SPEED * (inLava ? 0.4 : 0.6) : WALK_SPEED) *
       (effects.speed > 0 ? 1 + 0.2 * Math.max(effectLvls.speed, beaconTiers.get('speed') ?? 1) : 1) * // 迅捷药水 +20%/级（II 级 +40%）
-      (sneaking ? 0.3 : sprinting ? 1.3 : 1) * // MC 潜行 ~30%、冲刺 ~130% 走速
+      stanceSpeedMult(sneaking, sprinting, sprintSwim.current && inWater) * // MC 潜行 ~0.3、冲刺 ~1.3、俯泳 ~1.35（仅水中；lib/physics.ts）
       (eatState.active ? 0.3 : 1); // MC Java：进食/饮用中移动速度大减（≈潜行速度）
     // 摇杆为模拟量：mLen ≤ 1 时保留力度，超过 1（键盘对角线）才归一化
     const scale = mLen > 1 ? speed / mLen : speed;
     mx *= scale;
     mz *= scale;
-    // 藤蔓攀爬（MC Java CLIMBABLE）：AABB 与藤蔓同格/相贴即进入攀爬态；飞行/水中不攀爬（水中走游泳，飞行走飞行）
-    const climbing = !flying && !inFluid && touchingVine(world, p, PLAYER_HALF_W, PLAYER_HEIGHT);
-    // 鞘翅滑翔（MC）：空中按住跳跃键且胸甲槽为鞘翅 → 朝视线方向推进，缓降（俯仰调制：俯视加速、仰视拉升）
+    // 骑乘中：水平输入转交坐骑（下方骑乘块移动坐骑），玩家自身不位移、不做碰撞
+    if (ridingNow) {
+      mx = 0;
+      mz = 0;
+    }
+    // 藤蔓攀爬（MC Java CLIMBABLE）：AABB 与藤蔓同格/相贴即进入攀爬态；飞行/水中不攀爬（水中走游泳，飞行走飞行）；骑乘中不攀爬
+    const climbing = !ridingNow && !flying && !inFluid && touchingVine(world, p, PLAYER_HALF_W, hitH);
+    // 鞘翅滑翔（MC）：空中按住跳跃键且胸甲槽为鞘翅 → 朝视线方向推进，缓降（俯仰调制：俯视加速、仰视拉升）。骑乘中空格是坐骑上升键，不滑翔
     const gliding =
+      !ridingNow &&
       !flying &&
       !climbing &&
       !onGround.current &&
@@ -587,9 +664,9 @@ export function Player() {
     wantX = clipped.x;
     wantZ = clipped.z;
     p.x = wantX;
-    const hitX = collideAxis(world, p, 0, mx * dt, PLAYER_HALF_W, PLAYER_HEIGHT);
+    const hitX = collideAxis(world, p, 0, mx * dt, PLAYER_HALF_W, hitH);
     p.z = wantZ;
-    const hitZ = collideAxis(world, p, 2, mz * dt, PLAYER_HALF_W, PLAYER_HEIGHT);
+    const hitZ = collideAxis(world, p, 2, mz * dt, PLAYER_HALF_W, hitH);
 
     // 台阶辅助（设置「自动跳跃」，MC 辅助功能）：着地行走被 1 格高障碍挡住时启动 150ms 上台动画
     //（平滑升起 + 前冲，观感是快速小跳——不是瞬移闪现，也不会像起跳那样弹回）
@@ -601,7 +678,7 @@ export function Player() {
         const groundLevel = Math.floor(p.y + 1) - 1; // 台阶顶面所在方块层
         if (!BLOCKS[world.getBlock(bx, groundLevel, bz)]?.solid) return false;
         // 台阶顶上方需容得下玩家（天花板下不触发）
-        if (!aabbFree(world, p.x + ax * 0.4, p.y + 1, p.z + az * 0.4, PLAYER_HALF_W, PLAYER_HEIGHT)) return false;
+        if (!aabbFree(world, p.x + ax * 0.4, p.y + 1, p.z + az * 0.4, PLAYER_HALF_W, hitH)) return false;
         stepAnim.current = { from: p.y, to: p.y + 1, t: 0 };
         onGround.current = false;
         return true;
@@ -628,7 +705,11 @@ export function Player() {
     }
 
     // 垂直方向
-    if (flying) {
+    if (ridingNow) {
+      // 骑乘中：自身无重力/无跳跃（位置由坐骑吸附驱动，见下方骑乘块；空格/Shift 是坐骑升/降键）
+      velY.current = 0;
+      onGround.current = false;
+    } else if (flying) {
       const up = (space ? 1 : 0) - (shift ? 1 : 0);
       velY.current = up * FLY_SPEED;
       onGround.current = false;
@@ -664,7 +745,7 @@ export function Player() {
     }
     const dy = velY.current * dt;
     p.y += dy;
-    const hitY = collideAxis(world, p, 1, dy, PLAYER_HALF_W, PLAYER_HEIGHT);
+    const hitY = collideAxis(world, p, 1, dy, PLAYER_HALF_W, hitH);
     if (hitY) {
       if (dy < 0) {
         onGround.current = true;
@@ -688,11 +769,28 @@ export function Player() {
       onGround.current = false;
     }
 
+    // —— 骑乘（快乐恶魂）：WASD 沿视线水平控制坐骑、空格上升 / Shift 下降；玩家吸附坐骑头顶（y+2.2） ——
+    //（垂直从简用空格/Shift——Java 是视线俯仰控制上下，按键方案与触屏（跳=升/下=降）统一、实现更干净；规则在 lib/physics.ts rideControl）
+    if (riding.current) {
+      const mount = riding.current;
+      rideControl(world, mount, fx, fz, f, r, (space ? 1 : 0) - (shift ? 1 : 0), dt);
+      mount.velY = 0; // 双保险：约定 mobs.ts 对 riddenByPlayer 个体跳过 AI/物理，这里仍清 velY 防积分漂移
+      rideSnap(p, mount);
+      velY.current = 0;
+      onGround.current = false;
+      survivalMem.current.fallDist = 0; // 骑乘不累计摔落距离（下马后才恢复正常物理结算）
+      if (touchInput.sneak) {
+        // 触屏下马：潜行开关（桌面 Shift 已兼下降键，下马用 Shift+右键，见 mousedown）
+        touchInput.sneak = false;
+        doDismount();
+      }
+    }
+
     // —— 生存模式数值（掉落/溺水/消耗度/回血，逻辑在 lib/survival.ts） ——
     // 鞘翅滑翔中不累计摔落高度（MC：滑翔着陆无摔落伤害）
     if (gliding) survivalMem.current.fallDist = 0;
     const headInWater = isWaterId(
-      world.getBlock(Math.floor(p.x), Math.floor(p.y + EYE), Math.floor(p.z)),
+      world.getBlock(Math.floor(p.x), Math.floor(p.y + eyeH), Math.floor(p.z)),
     );
     survivalEnv.dt = dt;
     survivalEnv.flying = flying;
@@ -826,7 +924,8 @@ export function Player() {
     prevStep.current.z = p.z;
     // MC 消耗度：步行不消耗（MC Java），冲刺 0.1/格，游泳 0.01/格
     if (gs.worldMode === 'survival') {
-      survivalStats.exhaustion += hDist * (inFluid ? 0.01 : sprinting ? 0.1 : 0);
+      // 骑乘中不消耗（MC：骑乘移动不累加 exhaustion；hDist 此时是坐骑位移）
+      survivalStats.exhaustion += hDist * (ridingNow ? 0 : inFluid ? 0.01 : sprinting ? 0.1 : 0);
     }
     if (!flying && !inFluid && onGround.current && hDist > 0.001) {
       stepAcc.current += hDist;
@@ -843,7 +942,8 @@ export function Player() {
     // 掉出世界底部不再传送回重生点：由上方虚空伤害致死（MC Java），死亡走正常死亡流程
 
     // 下界传送门：MC Java 生存站门内 4 秒（80 tick）触发跨维度传送，创造模式进立传（无读秒）
-    {
+    // 骑乘中不触发传送门（坐骑不跨维度——mobs 切维度即销毁，传送会让骑乘引用悬空；也符合 MC 坐骑不进门的直觉）
+    if (!ridingNow) {
       const feet = world.getBlock(Math.floor(p.x), Math.floor(p.y), Math.floor(p.z));
       const eye = world.getBlock(Math.floor(p.x), Math.floor(p.y) + 1, Math.floor(p.z));
       // 折跃门：末地内接触即传送到外岛（MC；判定优先于返回门——折跃门中心也是 end_portal 方块）
@@ -899,7 +999,7 @@ export function Player() {
 
     // —— 相机反馈（MC Java 手感）：视角摆动 / 落地下顿 / 受伤倾斜 / 爆炸震动。帧循环零分配，全部直接改相机 ——
     const camPos = state.camera.position;
-    camPos.set(p.x, p.y + (sneaking ? EYE - 0.12 : EYE), p.z); // MC 潜行视点略降
+    camPos.set(p.x, p.y + (sprintSwim.current ? SWIM_EYE : sneaking ? EYE - 0.12 : EYE), p.z); // MC 潜行视点略降；俯泳视点 0.4（Java）
     // 视角摆动（view bobbing）：着地行走时相机周期上下+左右微晃；相位由水平位移驱动（每 1.6 格一周期），
     // 幅度随速度缩放（冲刺更明显、潜行减弱），空中/游泳/飞行时渐停
     const bobTarget =
@@ -1060,13 +1160,13 @@ export function Player() {
         }
       }
       if (attacked) {
-        handSwing.at = performance.now(); // 攻击出手（命中生物/水晶/打回爆裂球）：播一次手部挥动
+        if (!ridingNow) handSwing.at = performance.now(); // 攻击出手（命中生物/水晶/打回爆裂球）：播一次手部挥动（骑乘中抑制挥臂）
         digState.target = null;
         digState.progress = 0;
       } else {
         const hit = targetBlock.hit;
         if (hit) {
-          if (clickEdge) handSwing.at = performance.now(); // 点按到方块先挥一次；持续挖掘的往复挥动由 HeldItem 随 digState 驱动
+          if (clickEdge && !ridingNow) handSwing.at = performance.now(); // 点按到方块先挥一次（骑乘中抑制挥臂）；持续挖掘的往复挥动由 HeldItem 随 digState 驱动
           const [bx, by, bz] = hit.block;
           const t = digState.target;
           if (!t || t[0] !== bx || t[1] !== by || t[2] !== bz) {
@@ -1085,7 +1185,7 @@ export function Player() {
             if (now - lastCreativeBreak.current >= 200) {
               lastCreativeBreak.current = now;
               breakBlock(world, bx, by, bz);
-              handSwing.at = now; // 创造即时破坏：按住连破按 200ms 冷却节奏持续挥动
+              if (!ridingNow) handSwing.at = now; // 创造即时破坏：按住连破按 200ms 冷却节奏持续挥动（骑乘中抑制挥臂）
             }
             digState.target = null;
             digState.progress = 0;
@@ -1118,8 +1218,8 @@ export function Player() {
         } else {
           digState.target = null;
           digState.progress = 0;
-          // 挥空（准星无方块/生物）：MC 点击空气即挥臂；按住不动则按挥动动画时长（与 HeldItem SWING_MS 一致）节奏持续挥臂
-          if (clickEdge || nowMs - handSwing.at >= 250) handSwing.at = nowMs;
+          // 挥空（准星无方块/生物）：MC 点击空气即挥臂；按住不动则按挥动动画时长（与 HeldItem SWING_MS 一致）节奏持续挥臂。骑乘中抑制挥臂
+          if (!ridingNow && (clickEdge || nowMs - handSwing.at >= 250)) handSwing.at = nowMs;
         }
       }
     } else if (digState.target) {

@@ -9,9 +9,13 @@ import {
   DoubleTap,
   PLAYER_HALF_W,
   PLAYER_HEIGHT,
+  SPRINT_SWIM_MULT,
+  SWIM_HEIGHT,
   climbVelY,
   isVineId,
   sneakEdgeClip,
+  sprintSwimNext,
+  stanceSpeedMult,
   touchingVine,
   wSprintNext,
 } from '../physics';
@@ -170,5 +174,41 @@ describe('藤蔓攀爬（touchingVine / climbVelY，MC Java）', () => {
     expect(climbVelY(false, 0)).toBe(0); // 松开悬停不下坠
     expect(climbVelY(true, 1)).toBe(0); // Shift 停住不动
     expect(climbVelY(true, 0)).toBe(0);
+  });
+});
+
+describe('冲刺游泳（sprintSwimNext / stanceSpeedMult，MC Java 1.13+ 俯泳）', () => {
+  it('水中按住冲刺且未站底：进入俯泳姿态', () => {
+    expect(sprintSwimNext(false, true, true, false, true)).toBe(true);
+    // 已在姿态中保持
+    expect(sprintSwimNext(true, true, true, false, true)).toBe(true);
+  });
+
+  it('未冲刺 / 不在水中 / 站着：不进入', () => {
+    expect(sprintSwimNext(false, true, false, false, true)).toBe(false); // 水中但没按冲刺
+    expect(sprintSwimNext(false, false, true, false, true)).toBe(false); // 岸上冲刺不算
+    expect(sprintSwimNext(false, true, true, true, true)).toBe(false); // 站在水底冲刺不进入（站立即非俯泳）
+  });
+
+  it('出水 / 松开冲刺 / 站到底面：退出姿态', () => {
+    expect(sprintSwimNext(true, false, true, false, true)).toBe(false); // 出水退出
+    expect(sprintSwimNext(true, true, false, false, true)).toBe(false); // 松开冲刺退出
+    expect(sprintSwimNext(true, true, true, true, true)).toBe(false); // 站到底面退出
+  });
+
+  it('1 格缝里松开冲刺：头顶没空间则保持低姿态（Java 同款，不弹回站姿卡天花板）', () => {
+    expect(sprintSwimNext(true, true, false, false, false)).toBe(true); // 保持姿态（但无加速，见下行倍率）
+    expect(stanceSpeedMult(false, false, true)).toBe(1); // 仅姿态无冲刺：缝隙爬行不加速
+    // 有空间后正常退出
+    expect(sprintSwimNext(true, true, false, false, true)).toBe(false);
+  });
+
+  it('速度倍率：俯泳 ≈ 普通游泳 1.3-1.4 倍（1.35）；冲刺 1.3；潜行 0.3', () => {
+    expect(SPRINT_SWIM_MULT).toBe(1.35);
+    expect(stanceSpeedMult(false, true, true)).toBe(SPRINT_SWIM_MULT); // 俯泳冲刺
+    expect(stanceSpeedMult(false, true, false)).toBe(1.3); // 陆地冲刺
+    expect(stanceSpeedMult(true, true, true)).toBe(0.3); // 潜行优先
+    expect(stanceSpeedMult(false, false, false)).toBe(1); // 普通
+    expect(SWIM_HEIGHT).toBe(0.6); // 俯泳碰撞箱（Java 0.6，可过 1 格缝）
   });
 });

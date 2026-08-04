@@ -133,6 +133,11 @@ export function TouchControls() {
   // tryPlace 为 true（放置成功或右键使用成功，含 mob 交互/投掷/扳拉杆等）时写 handSwing 时间戳，
   // 触发第一人称手持物挥动——与桌面右键同一判定（Player.tsx 的 `if (tryPlace()) handSwing.at = ...`）
   const tryPlaceSwing = () => {
+    // 触屏上马桥：命中快乐恶魂时 Player 的骑乘判定先消费（桌面右键同款路径），否则走放置/使用
+    if (touchInput.mountGhast?.()) {
+      handSwing.at = performance.now();
+      return;
+    }
     if (tryPlace()) handSwing.at = performance.now();
   };
   const stopPlace = () => {

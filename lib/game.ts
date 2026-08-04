@@ -45,6 +45,8 @@ export const touchInput = {
   sneak: false,
   /** 冲刺开关（TouchControls 切换按钮；Player 与桌面 Ctrl 合并消费） */
   sprint: false,
+  /** 触屏上马桥：Player 挂载时注册（右键快乐恶魂骑乘判定，返回 true = 已消费这次交互）；卸载置 null */
+  mountGhast: null as (() => boolean) | null,
 };
 
 /** 长按挖掘进度，Player 每帧写入，CrackOverlay 读取 */

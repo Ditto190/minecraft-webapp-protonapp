@@ -186,3 +186,109 @@ export function climbVelY(sneak: boolean, forward: number): number {
   if (sneak) return 0;
   return forward > 0 ? CLIMB_SPEED : 0;
 }
+
+// ——— 冲刺游泳（MC Java 1.13+ 俯泳，Player.tsx 帧循环调用） ———
+
+/** 俯泳速度倍率：Java 冲刺游泳约为普通游泳 1.3-1.4 倍（取 1.35；海豚的恩惠另算，未做） */
+export const SPRINT_SWIM_MULT = 1.35;
+/** 俯泳碰撞箱高度（Java 0.6，可过 1 格缝）。项目碰撞按高度参数化（collideAxis），直接换低碰撞箱 */
+export const SWIM_HEIGHT = 0.6;
+/** 俯泳视点高度（Java 0.4） */
+export const SWIM_EYE = 0.4;
+
+/**
+ * 俯泳姿态进出条件（MC Java）：水中按住冲刺且未站底 → 进入/保持；出水 / 松开冲刺 / 站到底面 → 退出。
+ * 退出需头顶容得下站立碰撞箱（hasHeadroom）：1 格缝里松冲刺仍保持低姿态，否则弹回站姿卡进天花板（Java 同款）。
+ * 注意：姿态保持 ≠ 加速——速度倍率由 stanceSpeedMult 按 sprinting 现况结算，无冲刺只是低姿态爬行。
+ */
+export function sprintSwimNext(active: boolean, inWater: boolean, sprinting: boolean, standing: boolean, hasHeadroom: boolean): boolean {
+  if (inWater && sprinting && !standing) return true;
+  return active && !hasHeadroom;
+}
+
+/** 姿态速度倍率（MC）：潜行 ~0.3、冲刺 ~1.3、俯泳 SPRINT_SWIM_MULT；仅俯泳姿态但无冲刺（缝隙里爬行）不加速 */
+export function stanceSpeedMult(sneaking: boolean, sprinting: boolean, swimPose: boolean): number {
+  if (sneaking) return 0.3;
+  if (sprinting) return swimPose ? SPRINT_SWIM_MULT : 1.3;
+  return 1;
+}
+
+// ——— 骑乘（快乐恶魂坐骑，Player.tsx 帧循环调用） ———
+// 接口约定（快乐恶魂由 lib/mobs.ts 定义，此处只做防御性结构读取，不 import mobs 避免耦合）：
+//   type === 'happy_ghast'、harnessed === true（已装鞍）→ 可骑；riddenByPlayer 由 Player 标记（mobs.ts AI/物理据此跳过）。
+// 字段缺失/类型不符一律视为不可骑——对面接口未就绪时不崩不误判。
+
+/** 骑乘目标的最小结构（mobs.ts 的 Mob 天然可赋值；测试可直接 mock 字面量） */
+export interface RideMountLike {
+  type: string;
+  x: number;
+  y: number;
+  z: number;
+  hp?: number;
+  deathTimer?: number;
+  /** 已装鞍（快乐恶魂 agent 提供；防御读取 (m as any).harnessed 的等价物——缺失即 false） */
+  harnessed?: boolean;
+  /** 被玩家骑乘中（Player 侧写入；约定 mobs.ts 的 AI/物理 tick 跳过该个体） */
+  riddenByPlayer?: boolean;
+}
+
+/** 是否快乐恶魂（不管装鞍——右键提示「需要鞍具」与装鞍交互分流用） */
+export function isHappyGhast(m: { type: string } | null | undefined): boolean {
+  // m.type 在 MobType 并入 'happy_ghast' 前是联合类型外的字符串，故按 string 比较（防御）
+  return !!m && (m.type as string) === 'happy_ghast';
+}
+
+/** 是否可骑：快乐恶魂 + 已装鞍 + 存活（死亡倒地动画中的尸体不可骑，与 mobInReach 跳过尸体一致） */
+export function canRide(m: RideMountLike | null | undefined): boolean {
+  return isHappyGhast(m) && m!.harnessed === true && (m!.hp ?? 1) > 0 && m!.deathTimer === undefined;
+}
+
+/** 上马：标记坐骑被骑（约定 mobs.ts 对 riddenByPlayer 个体跳过 AI 移动/重力/攻击），返回是否成功 */
+export function mountRide(m: RideMountLike | null | undefined): boolean {
+  if (!canRide(m)) return false;
+  m!.riddenByPlayer = true;
+  return true;
+}
+
+/** 下马/自动下马：解除被骑标记（骑乘状态不进存档——重载后玩家就地落回，坐骑留在原处） */
+export function dismountRide(m: RideMountLike | null | undefined): void {
+  if (m) m.riddenByPlayer = false;
+}
+
+/** 骑手吸附高度偏移：坐骑头顶骑乘位（快乐恶魂体型约 4 格高，头顶 ~2.2） */
+export const RIDE_OFFSET_Y = 2.2;
+/** 骑乘水平速度（格/秒）：MC 快乐恶魂飞行 ~9.8 格/s 量级 */
+export const RIDE_SPEED = 9.8;
+/** 骑乘垂直速度（格/秒）：空格上升 / Shift 下降（Java 是视线俯仰控制上下，从简用按键——项目触屏同理，更直观） */
+export const RIDE_VERT_SPEED = 7;
+/** 骑乘碰撞箱（MC 快乐恶魂约 4×4×4；若 mobs.ts 实际体型不同，改这两个常量对齐即可） */
+export const RIDE_HALF_W = 2;
+export const RIDE_HEIGHT = 4;
+
+/**
+ * 骑乘控制一帧：WASD 水平（沿相机水平朝向 fx/fz，模拟量保留力度）、up（空格+1 / Shift-1）垂直。
+ * 逐轴 AABB 碰撞（与玩家同一套 collideAxis，坐骑不穿透方块；撞墙截停该轴）。
+ */
+export function rideControl(world: World, m: Aabb, fx: number, fz: number, f: number, r: number, up: number, dt: number): void {
+  let mx = fx * f - fz * r;
+  let mz = fz * f + fx * r;
+  const len = Math.hypot(mx, mz);
+  // 摇杆为模拟量：len ≤ 1 保留力度，超过 1（键盘对角线）才归一化（与 Player 行走同款处理）
+  const scale = len > 1 ? RIDE_SPEED / len : RIDE_SPEED;
+  mx *= scale;
+  mz *= scale;
+  m.x += mx * dt;
+  collideAxis(world, m, 0, mx * dt, RIDE_HALF_W, RIDE_HEIGHT);
+  m.z += mz * dt;
+  collideAxis(world, m, 2, mz * dt, RIDE_HALF_W, RIDE_HEIGHT);
+  const dy = up * RIDE_VERT_SPEED * dt;
+  m.y += dy;
+  collideAxis(world, m, 1, dy, RIDE_HALF_W, RIDE_HEIGHT);
+}
+
+/** 骑手吸附：玩家位置原地改写到坐骑头顶（帧循环零分配；y + RIDE_OFFSET_Y） */
+export function rideSnap(p: Aabb, m: Aabb): void {
+  p.x = m.x;
+  p.y = m.y + RIDE_OFFSET_Y;
+  p.z = m.z;
+}

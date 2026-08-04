@@ -26,9 +26,18 @@ export interface ItemDrop {
   x: number;
   y: number;
   z: number;
+  /** 水平速度（Java 手动丢弃向前抛出，格/秒；挖掘/死亡掉落为 0）。旧数据缺省视为 0（tnt.ts vx/vz 同款模式） */
+  velX?: number;
+  velZ?: number;
   velY: number;
   /** 已存在秒数（>0.5 才可拾取，>300 消失） */
   age: number;
+}
+
+/** 水平初速（目前只有 Java 手动丢弃的向前抛出；挖掘/生物掉落不传 = 无初速） */
+export interface DropVel {
+  x: number;
+  z: number;
 }
 
 export const itemDrops: ItemDrop[] = [];
@@ -42,6 +51,12 @@ const MAX_DROPS = 256;
 const MERGE_RADIUS = 1;
 /** 合并堆叠上限（与背包一致） */
 const MAX_STACK = 64;
+/** Java 手动丢弃（Q）的抛出速度（格/秒）：沿视线水平分量抛出（store.ts spawnManualDrop 传入） */
+export const MANUAL_DROP_THROW_SPEED = 3;
+/** 水平速度阻尼（1/秒）：约 0.23s 减半——抛出抛物线短促，落地即停，不会无限滑行 */
+const DROP_DRAG = 3;
+/** 掉落物水平半径（撞墙判定余量；渲染缩放 0.25 ≈ 半宽 0.125） */
+const DROP_HALF = 0.15;
 
 let nextId = 1;
 
@@ -52,7 +67,7 @@ function mergeKeyOf(drop: DropKind): string | null {
   return null;
 }
 
-function spawn(drop: DropKind, x: number, y: number, z: number, count: number, durability?: number, ench?: EnchMap): void {
+function spawn(drop: DropKind, x: number, y: number, z: number, count: number, durability?: number, ench?: EnchMap, vel?: DropVel): void {
   const mk = mergeKeyOf(drop);
   if (mk) {
     // 附近同种掉落并入现存堆（不超过 64）；Java：合并保留被并入堆的原年龄，不刷新消失计时
@@ -70,23 +85,23 @@ function spawn(drop: DropKind, x: number, y: number, z: number, count: number, d
     if (count <= 0) return;
   }
   if (itemDrops.length >= MAX_DROPS) itemDrops.shift(); // 超上限丢弃最旧的
-  itemDrops.push({ id: nextId++, drop, count, mergeKey: mk, durability, ench, x, y, z, velY: 2, age: 0 });
+  itemDrops.push({ id: nextId++, drop, count, mergeKey: mk, durability, ench, x, y, z, velX: vel?.x ?? 0, velZ: vel?.z ?? 0, velY: 2, age: 0 });
 }
 
-export function spawnBlockDrop(blockId: BlockId, x: number, y: number, z: number, count = 1): void {
-  spawn({ kind: 'block', blockId }, x, y, z, count);
+export function spawnBlockDrop(blockId: BlockId, x: number, y: number, z: number, count = 1, vel?: DropVel): void {
+  spawn({ kind: 'block', blockId }, x, y, z, count, undefined, undefined, vel);
 }
 
-export function spawnMaterialDrop(material: string, x: number, y: number, z: number, count = 1): void {
-  spawn({ kind: 'material', material }, x, y, z, count);
+export function spawnMaterialDrop(material: string, x: number, y: number, z: number, count = 1, vel?: DropVel): void {
+  spawn({ kind: 'material', material }, x, y, z, count, undefined, undefined, vel);
 }
 
-export function spawnToolDrop(tool: ToolType, x: number, y: number, z: number, durability?: number, ench?: EnchMap): void {
-  spawn({ kind: 'tool', tool }, x, y, z, 1, durability, ench);
+export function spawnToolDrop(tool: ToolType, x: number, y: number, z: number, durability?: number, ench?: EnchMap, vel?: DropVel): void {
+  spawn({ kind: 'tool', tool }, x, y, z, 1, durability, ench, vel);
 }
 
-export function spawnArmorDrop(piece: ArmorPiece, x: number, y: number, z: number, durability: number, material?: ArmorMaterial, ench?: EnchMap): void {
-  spawn({ kind: 'armor', piece, material }, x, y, z, 1, durability, ench);
+export function spawnArmorDrop(piece: ArmorPiece, x: number, y: number, z: number, durability: number, material?: ArmorMaterial, ench?: EnchMap, vel?: DropVel): void {
+  spawn({ kind: 'armor', piece, material }, x, y, z, 1, durability, ench, vel);
 }
 
 export function clearDrops(): void {
@@ -109,6 +124,21 @@ export function tickDrops(
     if (d.age >= LIFETIME) {
       itemDrops.splice(i, 1);
       continue;
+    }
+
+    // 水平初速（Java 手动丢弃向前抛出）：阻尼衰减 + 逐轴积分，撞实心方块清零（tnt.ts 击退同款最小速度模型，非完整物理）
+    const drag = Math.max(0, 1 - DROP_DRAG * dt);
+    d.velX = (d.velX ?? 0) * drag;
+    d.velZ = (d.velZ ?? 0) * drag;
+    if (d.velX !== 0) {
+      const nx = d.x + d.velX * dt;
+      if (BLOCKS[world.getBlock(Math.floor(nx + Math.sign(d.velX) * DROP_HALF), Math.floor(d.y), Math.floor(d.z))]?.solid) d.velX = 0;
+      else d.x = nx;
+    }
+    if (d.velZ !== 0) {
+      const nz = d.z + d.velZ * dt;
+      if (BLOCKS[world.getBlock(Math.floor(d.x), Math.floor(d.y), Math.floor(nz + Math.sign(d.velZ) * DROP_HALF))]?.solid) d.velZ = 0;
+      else d.z = nz;
     }
 
     // 重力与落地（中心点下方半格处为底面；单帧最多下落 1 格防穿透）
