@@ -365,7 +365,7 @@ const BASE_PARTS: Record<string, PartDef[]> = {
  * 快乐恶魂按鞍具有无（1.21.6：有鞍加鞍座/护目镜部件）；
  * 史莱姆体型/幼体/苦力怕引爆膨胀是逐生物根矩阵缩放，不占变体。
  */
-export function variantKeyOf(m: Mob): string {
+function computeVariantKey(m: Mob): string {
   switch (m.type) {
     case 'sheep':
       return `sheep:${m.woolColor ?? 'white'}:${m.sheared ? 1 : 0}`;
@@ -380,6 +380,49 @@ export function variantKeyOf(m: Mob): string {
     case 'pig':
     case 'chicken':
       return `${m.type}:${m.variant ?? 'temperate'}`;
+    default:
+      return m.type;
+  }
+}
+
+/** 变体键的逐生物缓存：同步每帧每生物调用，仅在影响键的字段变化时重拼模板串（羊剪毛/狼驯服/装备鞍具/变种均罕见） */
+const variantKeyCache = new WeakMap<
+  Mob,
+  {
+    key: string;
+    woolColor: Mob['woolColor'];
+    sheared: Mob['sheared'];
+    tamed: Mob['tamed'];
+    harnessed: Mob['harnessed'];
+    variant: Mob['variant'];
+  }
+>();
+
+export function variantKeyOf(m: Mob): string {
+  switch (m.type) {
+    case 'sheep':
+    case 'wolf':
+    case 'villager':
+    case 'happy_ghast':
+    case 'cow':
+    case 'pig':
+    case 'chicken': {
+      // 职业是 id 的纯函数（不可变）、type 终生不变，缓存无需覆盖；其余字段逐帧比较，变了才重拼
+      const c = variantKeyCache.get(m);
+      if (
+        c &&
+        c.woolColor === m.woolColor &&
+        c.sheared === m.sheared &&
+        c.tamed === m.tamed &&
+        c.harnessed === m.harnessed &&
+        c.variant === m.variant
+      ) {
+        return c.key;
+      }
+      const key = computeVariantKey(m);
+      variantKeyCache.set(m, { key, woolColor: m.woolColor, sheared: m.sheared, tamed: m.tamed, harnessed: m.harnessed, variant: m.variant });
+      return key;
+    }
     default:
       return m.type;
   }
@@ -494,8 +537,9 @@ export interface MobRenderState {
  * 由生物状态算渲染位姿（与原 useFrame 内联逻辑逐项一致）：
  * 朝向（敌对朝玩家/被动朝移动方向）、苦力怕引爆膨胀、幼体 0.55、史莱姆体型档、
  * 受击红闪（死亡态全程红）与死亡倒地（绕 z 倒 90° + 缓沉）。
+ * out 传入时原地写字段并复用返回（sync 的 stateCache 逐生物复用），缺省分配新对象。
  */
-export function computeMobRenderState(m: Mob, px: number, pz: number, now: number): MobRenderState {
+export function computeMobRenderState(m: Mob, px: number, pz: number, now: number, out?: MobRenderState): MobRenderState {
   const def = m.fleeTimer > 0 || !HOSTILE_TYPES.has(m.type);
   const yaw = def && m.wanderMoving
     ? Math.atan2(Math.cos(m.wanderDir), Math.sin(m.wanderDir))
@@ -518,7 +562,13 @@ export function computeMobRenderState(m: Mob, px: number, pz: number, now: numbe
     rotZ = -(Math.PI / 2) * Math.min(1, p * 1.5); // 前 2/3 时间倒完，余下躺地
     sink = p * 0.3; // 缓沉，配合结束白烟掩盖消失
   }
-  return { yaw, scale, rotZ, sink, flash };
+  const st = out ?? { yaw: 0, scale: 1, rotZ: 0, sink: 0, flash: false };
+  st.yaw = yaw;
+  st.scale = scale;
+  st.rotZ = rotZ;
+  st.sink = sink;
+  st.flash = flash;
+  return st;
 }
 
 /** 部件局部矩阵 = T(x,y,z)·Rz(rz)（对应原 Mesh.position + rotation.z，Object3D 默认 T·R·S 且 S=1） */
@@ -640,8 +690,13 @@ export class MobInstancePools {
         st.flash = c?.flash ?? false;
         st.sink = 0;
       } else {
-        st = computeMobRenderState(m, px, pz, now);
-        this.stateCache.set(m.id, st);
+        // 近距：重算位姿并原地写回该生物的缓存对象（远距冻结读同一对象），避免每帧 stateCache.set 新对象
+        let c = this.stateCache.get(m.id);
+        if (!c) {
+          c = { yaw: 0, scale: 1, rotZ: 0, sink: 0, flash: false };
+          this.stateCache.set(m.id, c);
+        }
+        st = computeMobRenderState(m, px, pz, now, c);
       }
       this.writeInstance(this.poolFor(variantKeyOf(m)), m, st);
     }
@@ -650,13 +705,19 @@ export class MobInstancePools {
     }
     for (const pool of this.pools.values()) {
       for (const l of pool.layers) {
-        l.mesh.count = pool.cursor * l.locals.length;
+        const count = pool.cursor * l.locals.length;
+        // needsUpdate 触发整块 instanceMatrix buffer GPU 上传：空层连续帧无内容可传（生物死光后不再白传），
+        // count 由非 0 变 0 的那一帧仍打一次标记（CPU 侧 count=0 已截断绘制，上传仅保持缓冲一致）
+        if (count === 0 && l.mesh.count === 0) continue;
+        l.mesh.count = count;
         l.mesh.instanceMatrix.needsUpdate = true;
       }
     }
     const fm = this.flashMesh!;
-    fm.count = this.flashCursor;
-    fm.instanceMatrix.needsUpdate = true;
+    if (this.flashCursor > 0 || fm.count > 0) {
+      fm.count = this.flashCursor;
+      fm.instanceMatrix.needsUpdate = true;
+    }
   }
 
   /** 释放实例缓冲（几何/材质为模块级共享，不在此 dispose） */

@@ -10,7 +10,8 @@ import { BufferAttribute, BufferGeometry, LineBasicMaterial, type LineSegments }
 import { BLOCKS, isLavaId, isWaterId, tileOf } from '@/lib/blocks';
 import { breakParticles, getActiveWorld } from '@/lib/game';
 import { startRain, stopRain } from '@/lib/sound';
-import { weather, precipAt } from '@/lib/weather';
+import { weather, precipForBiome, type Precip } from '@/lib/weather';
+import type { Biome } from '@/lib/noise';
 import type { World } from '@/lib/world';
 
 const MAX_DROPS = 900; // 雷暴密度
@@ -33,6 +34,23 @@ const rainState = { seeded: false };
 const SPLASH_RADIUS = 12; // 溅射水平散布半径（比雨丝小，只在近处出，少占粒子池）
 /** 溅射节流：acc 累计 dt，到 next 推一朵；next 每次取 0.3-0.7s 随机（~2 朵/秒，克制） */
 const splashState = { acc: 0, next: 0.5 };
+
+/** 本地降水列缓存：biomeAt/snowlineAt 是多次噪声求值，按 (floor(x), floor(z), terrain) 缓存；
+ *  雪线判断（y）与天气种类每帧现算（precipForBiome 是纯 switch，零噪声），与逐帧 precipAt 语义一致 */
+const precipCache = { x: NaN, z: NaN, terrain: null as object | null, biome: 'plains' as Biome, snowline: Infinity };
+
+/** 本地降水（MC：干旱群系无降水、寒冷群系与雪线以上下雪）；等价 precipAt(world.terrain, weather.kind, ...) 的缓存版 */
+function localPrecip(world: World, bx: number, by: number, bz: number): Precip {
+  const t = world.terrain;
+  if (precipCache.terrain !== t || precipCache.x !== bx || precipCache.z !== bz) {
+    precipCache.terrain = t;
+    precipCache.x = bx;
+    precipCache.z = bz;
+    precipCache.biome = t.biomeAt(bx, bz);
+    precipCache.snowline = t.snowlineAt(bx, bz);
+  }
+  return precipForBiome(precipCache.biome, by, precipCache.snowline);
+}
 
 /** 推一朵雨点落地溅射：相机周围随机水平位置，自上而下找首个裸露表面（实心块或水面——屋檐下/洞穴内的位置
  *  会先扫到其顶面，等价于跳过遮挡），y 取表面上方一格，碎块散布后受重力落回表面弹跳。
@@ -83,8 +101,8 @@ export function Rain() {
     const cx = camera.position.x;
     const cy = camera.position.y;
     const cz = camera.position.z;
-    // 本地降水（MC：干旱群系无降水、寒冷群系与雪线以上下雪）
-    const precip = world ? precipAt(world.terrain, weather.kind, Math.floor(cx), Math.floor(cy), Math.floor(cz)) : 'none';
+    // 本地降水（晴天已在上面 return，等价 precipAt 的 kind!=='clear' 分支）
+    const precip = world ? localPrecip(world, Math.floor(cx), Math.floor(cy), Math.floor(cz)) : 'none';
     if (precip === 'none') {
       lines.visible = false;
       rainState.seeded = false;
@@ -137,23 +155,21 @@ export function Rain() {
       }
     }
     const t = performance.now() / 1000;
-    for (let i = 0; i < MAX_DROPS; i++) {
+    // 只推进/写当前密度的滴（普通雨 450，雷暴 900）；其余滴由 drawRange 截断不绘制，也不再逐帧写顶点
+    for (let i = 0; i < count; i++) {
       const di = i * 4;
-      if (i < count) {
-        drops[di + 1] -= drops[di + 3] * dt;
-        if (snow) drops[di] += Math.sin(t * 1.5 + i) * 0.35 * dt; // 雪片横向飘移
-        // 回收：落出下界或偏离相机过远
-        const dx = drops[di] - cx;
-        const dz = drops[di + 2] - cz;
-        if (drops[di + 1] < cy - BOTTOM || dx * dx + dz * dz > RADIUS * RADIUS * 1.4) {
-          drops[di] = cx + (Math.random() * 2 - 1) * RADIUS;
-          drops[di + 1] = cy + TOP * (0.7 + Math.random() * 0.3);
-          drops[di + 2] = cz + (Math.random() * 2 - 1) * RADIUS;
-        }
+      drops[di + 1] -= drops[di + 3] * dt;
+      if (snow) drops[di] += Math.sin(t * 1.5 + i) * 0.35 * dt; // 雪片横向飘移
+      // 回收：落出下界或偏离相机过远
+      const dx = drops[di] - cx;
+      const dz = drops[di + 2] - cz;
+      if (drops[di + 1] < cy - BOTTOM || dx * dx + dz * dz > RADIUS * RADIUS * 1.4) {
+        drops[di] = cx + (Math.random() * 2 - 1) * RADIUS;
+        drops[di + 1] = cy + TOP * (0.7 + Math.random() * 0.3);
+        drops[di + 2] = cz + (Math.random() * 2 - 1) * RADIUS;
       }
-      // 未启用的滴藏到远处（顶点写到地下，画面上不可见）
       const pi = i * 6;
-      const vy = i < count ? drops[di + 1] : -1000;
+      const vy = drops[di + 1];
       rainPos[pi] = drops[di];
       rainPos[pi + 1] = vy;
       rainPos[pi + 2] = drops[di + 2];
@@ -161,6 +177,8 @@ export function Rain() {
       rainPos[pi + 4] = vy + streak;
       rainPos[pi + 5] = drops[di + 2];
     }
+    rainGeo.setDrawRange(0, count * 2); // 顶点数（每滴 2 端点）
+    rainAttr.addUpdateRange(0, count * 6); // 只上传实际写入的 float 区间（渲染器上传后自动清范围）
     rainAttr.needsUpdate = true;
   });
 

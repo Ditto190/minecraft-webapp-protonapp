@@ -118,8 +118,8 @@ const tiersScratch = new Map<keyof Effects, 1 | 2>();
 
 /** 每 tick：校验激活信标的金字塔仍在（损坏则失效），范围内玩家刷新所选效果（MC 每 4s 施加 11s，简化为持续刷新 5s）；
  *  4 层金字塔的主效果登记为 II 级（beaconTiers；生命恢复恒 I 级，MC 副效果二选一）。
- *  金字塔层数不做跨帧缓存：信标失效须在下一次 tick 立即可见（setBlock 无同步通知渠道可订阅），
- *  有激活信标时每帧 scanPyramid 是正确性底线；无信标（绝大多数帧）走早退零开销 */
+ *  金字塔层数不做跨调用缓存：信标失效须在下一次扫描立即可见（setBlock 无同步通知渠道可订阅）；
+ *  每帧调用点经 tickBeaconsThrottled 节流到 0.5s（MC Java 4s 重算的低成本版）；无信标（绝大多数帧）走早退零开销 */
 export function tickBeacons(world: World, px: number, py: number, pz: number): void {
   // 无激活信标直接返回：此时 beaconTiers 必已空（失效/清空路径都会重建），防御性 clear 兜底
   if (activeBeacons.size === 0) {
@@ -152,6 +152,20 @@ export function clearBeacons(): void {
   activeBeacons.clear();
   beaconTiers.clear();
   beaconVersion.v++;
+  lastBeaconTickAt = -Infinity; // 复位节流：下次 tickBeaconsThrottled 立即重扫
+}
+
+/** tickBeacons 节流间隔（秒）：MC Java 本体 80 tick（4s）才重算一次；取 0.5s 兼顾失效响应——
+ *  效果一次刷新 5s 远长于间隔，范围内玩家无感知（金字塔损坏最多晚 0.5s 失效） */
+export const BEACON_TICK_INTERVAL = 0.5;
+/** 上次全量重扫的时间戳（秒；-Infinity = 尚未扫过，首帧必扫） */
+let lastBeaconTickAt = -Infinity;
+
+/** 节流版 tickBeacons：间隔内复用上次校验结果（激活信标时每帧全量扫 = 每信标 hasSkyAccess 列扫描 + scanPyramid 164 次 getBlock） */
+export function tickBeaconsThrottled(world: World, px: number, py: number, pz: number, nowSec: number): void {
+  if (nowSec - lastBeaconTickAt < BEACON_TICK_INTERVAL) return;
+  lastBeaconTickAt = nowSec;
+  tickBeacons(world, px, py, pz);
 }
 
 // 世界作用域自注册（lib/worldScope.ts）：激活的信标随维度暂存/恢复（防跨维度误删），并经 persistence dims.beacons 落盘

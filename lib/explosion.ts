@@ -44,10 +44,21 @@ function pathAbsorption(world: World, x: number, y: number, z: number, bx: numbe
   const origin = world.isChunkLoaded(Math.floor(x), Math.floor(z)) ? world.getBlock(Math.floor(x), Math.floor(y), Math.floor(z)) : AIR;
   let sum = isWaterId(origin) || isLavaId(origin) ? 100 : 0;
   // 采样到目标格边界为止（回溯半格，避免把目标格自身算进途经；目标格抗性由调用方单独计入）
+  // 已加载判定按 chunk 缓存：isChunkLoaded 每次分配 chunkKey 字符串，射线逐样本调用时同 chunk 复用
+  let scx = NaN;
+  let scz = NaN;
+  let sLoaded = false;
   for (let s = 0.3; s < dist - 0.5; s += 0.3) {
     const sx = Math.floor(x + ux * s);
     const sz = Math.floor(z + uz * s);
-    if (!world.isChunkLoaded(sx, sz)) continue; // 未加载方向不衰减（按空气），不隐式生成
+    const kx = sx >> 4;
+    const kz = sz >> 4;
+    if (kx !== scx || kz !== scz) {
+      scx = kx;
+      scz = kz;
+      sLoaded = world.isChunkLoaded(sx, sz);
+    }
+    if (!sLoaded) continue; // 未加载方向不衰减（按空气），不隐式生成
     const id = world.getBlock(sx, Math.floor(y + uy * s), sz);
     if (id === AIR || isWaterId(id) || isLavaId(id)) continue;
     const res = blastResistanceOf(id);
@@ -116,11 +127,22 @@ export function explodeAt(
   const cy = Math.floor(y);
   const cz = Math.floor(z);
   const strength = R + 2; // 爆心强度（与旧 1-d/(R+2) 同尺度：中心必碎、边缘渐稀）
+  // 已加载判定缓存：isChunkLoaded 每次分配 chunkKey 字符串，逐格调用太贵；bz 变化最快，跨格复用同 chunk 结果
+  let loadedCx = NaN;
+  let loadedCz = NaN;
+  let loaded = false;
   for (let bx = cx - R; bx <= cx + R; bx++) {
     for (let by = cy - R; by <= cy + R; by++) {
       for (let bz = cz - R; bz <= cz + R; bz++) {
         // 未加载 chunk 跳过且不读块：getBlock 会隐式触发全量生成（边缘 TNT 把整圈 chunk 同步生成，冻结数百 ms）
-        if (!world.isChunkLoaded(bx, bz)) continue;
+        const kcx = bx >> 4;
+        const kcz = bz >> 4;
+        if (kcx !== loadedCx || kcz !== loadedCz) {
+          loadedCx = kcx;
+          loadedCz = kcz;
+          loaded = world.isChunkLoaded(bx, bz);
+        }
+        if (!loaded) continue;
         const id = world.getBlock(bx, by, bz);
         if (id === AIR) continue;
         const ownRes = blastResistanceOf(id);
@@ -128,6 +150,9 @@ export function explodeAt(
         if (isWaterId(id) || isLavaId(id)) continue; // 流体免疫爆炸（MC 一致）
         const d = Math.hypot(bx + 0.5 - x, by + 0.5 - y, bz + 0.5 - z);
         if (d > R + 0.5) continue;
+        // 早退：距离 + 自身抗性已吃光强度时破坏概率 ≤ 0（途经抗性 absorb ≥ 0 只会更低，Math.random() ∈ [0,1) 恒不命中），
+        // 跳过整条射线采样——与旧逐格结果严格一致（该格本就必不毁）
+        if (d + ownRes >= strength) continue;
         // MC 逐方块爆炸抗性：途经格抗性 + 自身抗性折成等效距离，削弱破坏概率（黑曜石墙后概率≈0）
         const absorb = pathAbsorption(world, x, y, z, bx, by, bz);
         if (absorb === Infinity) continue;

@@ -1,7 +1,7 @@
 // 爆炸机制（MC 1.20+ 对齐）：逐方块爆炸抗性（射线衰减/防爆特例免疫/圆石优于泥土）+ 伤害遮挡（隔墙免伤）
 
 import { describe, expect, it, vi } from 'vitest';
-import { AIR, BLOCK_BY_KEY, COBBLE, DIRT, STONE, WATER } from '../blocks';
+import { AIR, BLOCK_BY_KEY, COBBLE, DIRT, STONE, WATER, blastResistanceOf, isLavaId, isWaterId } from '../blocks';
 import { explodeAt, explosionExposure } from '../explosion';
 import { clearDrops } from '../items';
 import { VOID_TERRAIN } from '../noise';
@@ -171,5 +171,100 @@ describe('加载半径边缘爆炸', () => {
       rand.mockRestore();
     }
     expect(w.getBlock(14, 10, 15)).toBe(AIR);
+  });
+});
+
+describe('射线早退/chunk 缓存对拍（性能改造前后破坏集合逐格一致）', () => {
+  /** 改造前算法复刻：每格无条件发射线、逐样本查 isChunkLoaded（无早退、无 chunk 缓存），只读世界算破坏集合 */
+  // dead：改造前实现边破坏边置 AIR，后续射线途经已毁格按空气读——复刻须叠加同一已毁集合
+  function legacyPathAbsorption(w: World, dead: Set<string>, x: number, y: number, z: number, bx: number, by: number, bz: number): number {
+    const dx = bx + 0.5 - x;
+    const dy = by + 0.5 - y;
+    const dz = bz + 0.5 - z;
+    const dist = Math.hypot(dx, dy, dz);
+    if (dist === 0) return 0;
+    const ux = dx / dist;
+    const uy = dy / dist;
+    const uz = dz / dist;
+    const okey = `${Math.floor(x)},${Math.floor(y)},${Math.floor(z)}`;
+    const origin = w.isChunkLoaded(Math.floor(x), Math.floor(z)) && !dead.has(okey) ? w.getBlock(Math.floor(x), Math.floor(y), Math.floor(z)) : AIR;
+    let sum = isWaterId(origin) || isLavaId(origin) ? 100 : 0;
+    for (let s = 0.3; s < dist - 0.5; s += 0.3) {
+      const sx = Math.floor(x + ux * s);
+      const sz = Math.floor(z + uz * s);
+      if (!w.isChunkLoaded(sx, sz)) continue;
+      const sy = Math.floor(y + uy * s);
+      const id = dead.has(`${sx},${sy},${sz}`) ? AIR : w.getBlock(sx, sy, sz);
+      if (id === AIR || isWaterId(id) || isLavaId(id)) continue;
+      const res = blastResistanceOf(id);
+      if (res === Infinity) return Infinity;
+      sum += res;
+    }
+    return sum;
+  }
+
+  function legacyDestroyedSet(w: World, x: number, y: number, z: number, R: number): Set<string> {
+    const strength = R + 2;
+    const out = new Set<string>();
+    const cx = Math.floor(x);
+    const cy = Math.floor(y);
+    const cz = Math.floor(z);
+    for (let bx = cx - R; bx <= cx + R; bx++) {
+      for (let by = cy - R; by <= cy + R; by++) {
+        for (let bz = cz - R; bz <= cz + R; bz++) {
+          if (!w.isChunkLoaded(bx, bz)) continue;
+          const id = w.getBlock(bx, by, bz);
+          if (id === AIR) continue;
+          const ownRes = blastResistanceOf(id);
+          if (ownRes === Infinity) continue;
+          if (isWaterId(id) || isLavaId(id)) continue;
+          const d = Math.hypot(bx + 0.5 - x, by + 0.5 - y, bz + 0.5 - z);
+          if (d > R + 0.5) continue;
+          const absorb = legacyPathAbsorption(w, out, x, y, z, bx, by, bz);
+          if (absorb === Infinity) continue;
+          if (Math.random() < 1 - (d + absorb + ownRes) / strength) out.add(`${bx},${by},${bz}`); // out 即已毁集合
+        }
+      }
+    }
+    return out;
+  }
+
+  it('混合抗性场景（石/土/圆石/黑曜石/水 + 防爆墙），钉死随机数下新旧破坏集合完全一致', () => {
+    const IDS = [STONE, DIRT, COBBLE, BLOCK_BY_KEY.obsidian.id, WATER];
+    for (const pinned of [0.05, 0.42, 0.9]) {
+      const w = newWorld(`exp-parity-${pinned}`);
+      // 预加载爆炸覆盖的全部 chunk（两实现都以 isChunkLoaded 跳过未加载列，保持前提一致）
+      for (let ccx = -1; ccx <= 1; ccx++) for (let ccz = -1; ccz <= 1; ccz++) w.getChunk(ccx, ccz);
+      // 爆心 (0.5,10.5,0.5)，R=4 立方体内按位置哈希铺确定性图案（含黑曜石防爆/吞射线、水体免疫）
+      const placed = new Map<string, number>();
+      for (let bx = -4; bx <= 4; bx++) {
+        for (let by = 6; by <= 14; by++) {
+          for (let bz = -4; bz <= 4; bz++) {
+            const h = bx * 31 + by * 17 + bz * 7;
+            const id = bx === 0 && by === 10 && bz === 0 ? STONE : IDS[((h % 5) + 5) % 5];
+            w.setBlock(bx, by, bz, id);
+            placed.set(`${bx},${by},${bz}`, id);
+          }
+        }
+      }
+      const rand = vi.spyOn(Math, 'random').mockReturnValue(pinned);
+      let legacy: Set<string>;
+      try {
+        legacy = legacyDestroyedSet(w, 0.5, 10.5, 0.5, 4); // 只读参照（改造前语义）
+        explodeAt(w, 0.5, 10.5, 0.5, FAR_PLAYER, () => {}, TNT_OPTS); // 改造后实现
+      } finally {
+        rand.mockRestore();
+      }
+      const actual = new Set<string>();
+      for (const [key, id] of placed) {
+        const [bx, by, bz] = key.split(',').map(Number);
+        if (w.getBlock(bx, by, bz) !== id) actual.add(key);
+      }
+      expect(actual, `pinned=${pinned}`).toEqual(legacy);
+      // 对拍有效性：集合非平凡（低随机数明显有破坏，高随机数近乎不破坏；黑曜石占比高吞掉大量射线）
+      if (pinned === 0.05) expect(legacy.size).toBeGreaterThan(20);
+      if (pinned === 0.9) expect(legacy.size).toBeLessThan(40);
+      clearDrops(); // TNT 100% 掉落，清掉避免影响其他用例
+    }
   });
 });

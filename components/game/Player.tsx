@@ -27,7 +27,7 @@ import { useGameStore } from '@/lib/store';
 import { anyPanelOpen } from '@/lib/store-types';
 import { resetSurvivalMem, tickSurvival, type SurvivalActions, type SurvivalEnv, type SurvivalMem, type SurvivalSnapshotLite } from '@/lib/survival';
 import { effects, effectLvls, tickEffects } from '@/lib/effects';
-import { beaconTiers, tickBeacons } from '@/lib/beacon';
+import { beaconTiers, tickBeaconsThrottled } from '@/lib/beacon';
 import { attackCooldownScale, TOOLS } from '@/lib/tools';
 import { maceSmashBonus } from '@/lib/xp';
 import { WORLD_HEIGHT, type World } from '@/lib/world';
@@ -882,8 +882,8 @@ export function Player() {
     } else {
       eatCrumbAcc.current = 0;
     }
-    // 信标：校验金字塔并给范围内玩家刷新所选效果（MC）
-    tickBeacons(world, p.x, p.y, p.z);
+    // 信标：校验金字塔并给范围内玩家刷新所选效果（MC）；节流到 0.5s 一次（lib/beacon.ts，MC Java 4s 重算）
+    tickBeaconsThrottled(world, p.x, p.y, p.z, state.clock.elapsedTime);
     // 末影水晶：龙在存活水晶附近时缓慢回血（MC 治疗光束）。
     // 龙只存在于末地（mobs 按维度隔离，非末地 find 恒为 null）：非末地跳过查找；
     // 末地内缓存命中（includes 校验，O(n) 引用比较无闭包分配），被移除/重生成才重扫
@@ -900,9 +900,8 @@ export function Player() {
       stareAcc.current = 0;
       const cam = cameraRef.current;
       if (cam) {
-        const d = new Vector3();
-        cam.getWorldDirection(d);
-        checkEndermanStare(world, cam.position.x, cam.position.y, cam.position.z, d.x, d.y, d.z);
+        // 视线方向复用本帧上方已算好的 rayDir（:591 camera.getWorldDirection），不再每帧分配 Vector3
+        checkEndermanStare(world, cam.position.x, cam.position.y, cam.position.z, rayDir.x, rayDir.y, rayDir.z);
       }
     }
 

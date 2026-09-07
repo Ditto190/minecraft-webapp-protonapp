@@ -31,17 +31,25 @@ const MAX_AGE = 300;
 /** 合并距离（MC：相邻约 0.5 格内的经验球合并为大球） */
 const MERGE_RANGE = 0.5;
 
+/** 合并扫描的死球暂存集（模块级复用，避免每次扫描 new Set） */
+const deadScratch = new Set<number>();
+
 /** 经验球合并（MC）：邻近球两两合并，value 相加（单球值无上限）；较老那颗存活——年龄/消失计时取老 */
 export function mergeXpOrbs(range = MERGE_RANGE): void {
-  if (xpOrbs.length < 2) return; // 单球/空场每帧都有：省掉 new Set 与 O(n²) 扫描
-  const dead = new Set<number>();
+  if (xpOrbs.length < 2) return; // 单球/空场每帧都有：省掉 O(n²) 扫描
+  const dead = deadScratch;
+  dead.clear();
+  const r2 = range * range;
   for (let i = 0; i < xpOrbs.length; i++) {
     if (dead.has(i)) continue;
     for (let j = i + 1; j < xpOrbs.length; j++) {
       if (dead.has(j)) continue;
       const a = xpOrbs[i];
       const b = xpOrbs[j];
-      if (Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z) >= range) continue;
+      const dx = a.x - b.x;
+      const dy = a.y - b.y;
+      const dz = a.z - b.z;
+      if (dx * dx + dy * dy + dz * dz >= r2) continue; // 平方距离比较，省掉每对 Math.hypot
       // 较老者存活并吸收对方（其 age 本就更大，消失计时自然取老）
       if (a.age >= b.age) {
         a.value += b.value;
@@ -84,7 +92,12 @@ export function spawnXpOrbs(x: number, y: number, z: number, total: number): voi
   }
 }
 
-/** 每帧推进：邻近合并 + 重力 + 落地停 + 吸附 + 拾取（onPickup 回调加经验）；超龄消失 */
+/** 合并节流（秒）：合并只是视觉级事件（小球并大球），每 ~0.5s 扫一次足够；拾取/吸附/重力主循环仍逐帧 */
+const MERGE_INTERVAL = 0.5;
+/** 合并节流累计；初值=间隔保证首帧立即合并（spawn 即并堆的旧观感），clearXpOrbs 同步复位 */
+let mergeAcc = MERGE_INTERVAL;
+
+/** 每帧推进：邻近合并（节流）+ 重力 + 落地停 + 吸附 + 拾取（onPickup 回调加经验）；超龄消失 */
 export function tickXpOrbs(
   world: World,
   dt: number,
@@ -92,7 +105,11 @@ export function tickXpOrbs(
   onPickup: (value: number) => void,
   isSolid: (x: number, y: number, z: number) => boolean,
 ): void {
-  mergeXpOrbs();
+  mergeAcc += dt;
+  if (mergeAcc >= MERGE_INTERVAL) {
+    mergeAcc = 0;
+    mergeXpOrbs();
+  }
   for (let i = xpOrbs.length - 1; i >= 0; i--) {
     const o = xpOrbs[i];
     o.age += dt;
@@ -138,6 +155,7 @@ export function tickXpOrbs(
 /** 清空（测试/维度切换用） */
 export function clearXpOrbs(): void {
   xpOrbs.length = 0;
+  mergeAcc = MERGE_INTERVAL; // 复位节流：下个世界/下个用例的首帧 tick 立即合并
 }
 
 // 世界作用域自注册（lib/worldScope.ts）：经验球随世界清理

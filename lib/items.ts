@@ -60,32 +60,70 @@ const DROP_HALF = 0.15;
 
 let nextId = 1;
 
-/** 可合并掉落的身份键：仅方块/材料（工具/装备有耐久/附魔个体差异，一律不合并） */
+/** 可合并身份键：仅方块/材料（工具/装备有耐久/附魔个体差异，一律不合并） */
 function mergeKeyOf(drop: DropKind): string | null {
   if (drop.kind === 'block') return `b:${drop.blockId}`;
   if (drop.kind === 'material') return `m:${drop.material}`;
   return null;
 }
 
+/**
+ * 可合并堆索引：mergeKey → 未满（count<64）堆的引用集合（插入序 = itemDrops 顺序，合并扫描顺序与原线性扫一致）。
+ * spawn 合并写满 / tickDrops 移除 / MAX_DROPS 挤出时同步维护，杜绝失效引用——爆炸一帧上百次 spawn 从 O(n²) 降到 O(n)
+ */
+const mergeIndex = new Map<string, Set<ItemDrop>>();
+
+function indexDrop(d: ItemDrop): void {
+  if (d.mergeKey === null || d.count >= MAX_STACK) return;
+  let set = mergeIndex.get(d.mergeKey);
+  if (!set) {
+    set = new Set();
+    mergeIndex.set(d.mergeKey, set);
+  }
+  set.add(d);
+}
+
+function unindexDrop(d: ItemDrop): void {
+  if (d.mergeKey === null) return;
+  const set = mergeIndex.get(d.mergeKey);
+  if (set && set.delete(d) && set.size === 0) mergeIndex.delete(d.mergeKey);
+}
+
+/** 移除 itemDrops[i]（splice + 索引剔除）；tickDrops 倒序遍历内使用安全 */
+function removeDropAt(i: number): void {
+  unindexDrop(itemDrops[i]);
+  itemDrops.splice(i, 1);
+}
+
 function spawn(drop: DropKind, x: number, y: number, z: number, count: number, durability?: number, ench?: EnchMap, vel?: DropVel): void {
   const mk = mergeKeyOf(drop);
   if (mk) {
     // 附近同种掉落并入现存堆（不超过 64）；Java：合并保留被并入堆的原年龄，不刷新消失计时
-    for (const d of itemDrops) {
-      if (count <= 0) break;
-      if (d.count >= MAX_STACK || d.mergeKey !== mk) continue;
-      const dx = d.x - x;
-      const dy = d.y - y;
-      const dz = d.z - z;
-      if (dx * dx + dy * dy + dz * dz > MERGE_RADIUS * MERGE_RADIUS) continue;
-      const take = Math.min(MAX_STACK - d.count, count);
-      d.count += take;
-      count -= take;
+    const set = mergeIndex.get(mk);
+    if (set) {
+      for (const d of set) {
+        if (count <= 0) break;
+        const dx = d.x - x;
+        const dy = d.y - y;
+        const dz = d.z - z;
+        if (dx * dx + dy * dy + dz * dz > MERGE_RADIUS * MERGE_RADIUS) continue;
+        const take = Math.min(MAX_STACK - d.count, count);
+        d.count += take;
+        count -= take;
+        if (d.count >= MAX_STACK) set.delete(d); // 写满出索引（Set 迭代中删除当前项安全）
+      }
+      if (set.size === 0) mergeIndex.delete(mk);
     }
     if (count <= 0) return;
   }
-  if (itemDrops.length >= MAX_DROPS) itemDrops.shift(); // 超上限丢弃最旧的
-  itemDrops.push({ id: nextId++, drop, count, mergeKey: mk, durability, ench, x, y, z, velX: vel?.x ?? 0, velZ: vel?.z ?? 0, velY: 2, age: 0 });
+  if (itemDrops.length >= MAX_DROPS) {
+    // 超上限丢弃最旧的：shift 是 O(n) 但仅在满 256 时触发（罕见），换来索引/遍历语义与数组顺序严格一致，值得保留
+    unindexDrop(itemDrops[0]);
+    itemDrops.shift();
+  }
+  const d: ItemDrop = { id: nextId++, drop, count, mergeKey: mk, durability, ench, x, y, z, velX: vel?.x ?? 0, velZ: vel?.z ?? 0, velY: 2, age: 0 };
+  itemDrops.push(d);
+  indexDrop(d);
 }
 
 export function spawnBlockDrop(blockId: BlockId, x: number, y: number, z: number, count = 1, vel?: DropVel): void {
@@ -106,6 +144,7 @@ export function spawnArmorDrop(piece: ArmorPiece, x: number, y: number, z: numbe
 
 export function clearDrops(): void {
   itemDrops.length = 0;
+  mergeIndex.clear();
 }
 
 /**
@@ -122,7 +161,7 @@ export function tickDrops(
     const d = itemDrops[i];
     d.age += dt;
     if (d.age >= LIFETIME) {
-      itemDrops.splice(i, 1);
+      removeDropAt(i);
       continue;
     }
 
@@ -152,7 +191,7 @@ export function tickDrops(
       d.velY = 0;
     }
     if (d.y < -10) {
-      itemDrops.splice(i, 1);
+      removeDropAt(i);
       continue;
     }
 
@@ -162,7 +201,7 @@ export function tickDrops(
       const dy = playerPos.y + 0.5 - d.y;
       const dz = playerPos.z - d.z;
       if (dx * dx + dy * dy + dz * dz < PICKUP_RANGE * PICKUP_RANGE && onPickup(d)) {
-        itemDrops.splice(i, 1);
+        removeDropAt(i);
       }
     }
   }
