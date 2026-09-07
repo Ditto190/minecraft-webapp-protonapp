@@ -649,9 +649,12 @@ const FLUSH_BUDGET = 3;
 
 export function flushLight(world: World): void {
   let budget = FLUSH_BUDGET;
-  for (const c of world.chunks.values()) {
+  // 直接消费 lightDirty 集合（world.markLightDirty 登记），不再每帧全扫 world.chunks
+  for (const key of world.lightDirtyChunks) {
     if (budget <= 0) break;
-    if (!c.lightDirty) continue;
+    world.lightDirtyChunks.delete(key); // 迭代中删除当前元素是安全的；已卸载的 chunk 一并清出集合
+    const c = world.chunks.get(key);
+    if (!c || !c.lightDirty) continue;
     c.lightDirty = false;
     budget--;
     cascadeLight(world, c);

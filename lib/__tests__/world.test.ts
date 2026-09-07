@@ -161,9 +161,11 @@ describe('地形生成', () => {
     w.applySavedChunk('0,0', saved);
     const c = w.getChunk(0, 0);
     expect(c.lightDirty).toBe(true); // 改走 flushLight 每帧限流（读档风暴优化）
+    expect(w.lightDirtyChunks.has('0,0')).toBe(true); // 标脏同步登记进消费集合
     expect(c.light[localIndex(8, 10, 8)]).toBe(0); // 冲刷前不重算
     flushLight(w);
     expect(c.lightDirty).toBe(false);
+    expect(w.lightDirtyChunks.size).toBe(0); // 冲刷后集合消费干净
     expect(c.light[localIndex(8, 10, 8)]).toBe(14); // 冲刷后与同步级联结果一致
     expect(c.light[localIndex(9, 10, 8)]).toBe(13);
   });

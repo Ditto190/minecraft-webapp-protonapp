@@ -155,6 +155,21 @@ describe('柱状植物（仙人掌/甘蔗/竹子）', () => {
     expect(w.getBlock(4, 32, 4)).toBe(K('cactus'));
   });
 
+  it('Chunk.growables 计数：setBlock 增减维护，为 0 的 chunk 被 tickGrowth 整 chunk 跳过', () => {
+    const w = setup();
+    const c = w.getChunk(0, 0);
+    expect(c.growables).toBe(0); // VOID_TERRAIN 生成扫面：无可生长方块
+    w.setBlock(4, 31, 4, K('cactus'));
+    w.setBlock(6, 31, 4, K('sugar_cane'));
+    expect(c.growables).toBe(2);
+    w.setBlock(4, 31, 4, K('cactus')); // 同 id 重写：减一又加一，计数不变
+    expect(c.growables).toBe(2);
+    w.setBlock(4, 31, 4, AIR);
+    expect(c.growables).toBe(1);
+    w.setBlock(6, 31, 4, STONE);
+    expect(c.growables).toBe(0);
+  });
+
   it('竹子：每次随机刻 1/3 概率拔节（统计：约 1 次命中期望后 ~28% 已拔节）', () => {
     const w = setup();
     // 8×8 竹阵（格距 2，便于逐列判定；竹子无邻贴限制）

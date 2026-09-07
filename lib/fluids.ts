@@ -40,13 +40,48 @@ export function lavaLevel(id: BlockId): number {
   return -1;
 }
 
-const pending = new Set<string>();
-/** 本拍内新生成的流水/流动岩浆格：留到下一拍才结算（新生格可能已被地面 setBlock 预入队，仅靠拍快照挡不住同拍级联） */
-const created = new Set<string>();
+/**
+ * 队列键数字打包：x,y,z 三轴平铺需 26+26+8=60 位，超出安全整数位宽（2^53），
+ * 故用「列键 → y 集合」两层结构：列键 = (x+2^25)·2^26 + (z+2^25) < 2^52（安全整数内，精确可还原），
+ * y∈[0,WORLD_HEIGHT) 作内层 Set 元素。坐标范围 |x|,|z| < 2^25（±3355 万格，覆盖 MC 3000 万世界边界）
+ */
+const XZ_OFF = 1 << 25;
+const XZ_SPAN = 1 << 26;
+const colKeyOf = (x: number, z: number): number => (x + XZ_OFF) * XZ_SPAN + (z + XZ_OFF);
+
+type CellMap = Map<number, Set<number>>;
+
+function addCell(m: CellMap, x: number, y: number, z: number): void {
+  const col = colKeyOf(x, z);
+  let ys = m.get(col);
+  if (!ys) m.set(col, (ys = new Set()));
+  ys.add(y);
+}
+
+function hasCell(m: CellMap, x: number, y: number, z: number): boolean {
+  return m.get(colKeyOf(x, z))?.has(y) ?? false;
+}
+
+function deleteCell(m: CellMap, x: number, y: number, z: number): void {
+  const col = colKeyOf(x, z);
+  const ys = m.get(col);
+  if (!ys) return;
+  ys.delete(y);
+  if (ys.size === 0) m.delete(col);
+}
+
+/** 流体检查队列（数字打包键，见上；tickFluids 拍快照整体换出，故用 let） */
+let pending: CellMap = new Map();
+/** 本拍内新生成的流水/流动岩浆格：留到下一拍才结算（新生格可能已在拍开始时的队列快照里，仅靠换出快照挡不住同拍级联） */
+const created: CellMap = new Map();
 /** 下落流体格（MC falling）：源垂直下流形成、强度等同源；格内存 1 级流 id，靠本集合识别。
  *  falling 不是源（无限水判定只认 WATER id，天然排除）、也不能转源（tickWater 跳过成源）。
  *  仅存内存：读档后旧水柱退化为普通 1 级流，再次扩散少 1 格（已有水潭靠消退链自维持，观感无损）。 */
-const falling = new Set<string>();
+const falling: CellMap = new Map();
+
+/** 水平四邻 / 六邻方向表（模块常量：tickWater/tickLava 热循环内不再建数组字面量） */
+const DIRS4 = [[1, 0], [-1, 0], [0, 1], [0, -1]] as const;
+const DIRS6 = [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0], [0, 1, 0]] as const;
 
 /**
  * 可被流体冲毁的非实心方块（对齐 Java 流体破坏表）：水流入破坏并按挖掘规则掉落，岩浆流入只销毁（MC）。
@@ -82,22 +117,43 @@ let lavaAcc = 0;
 
 /** 方块变动时把自身与邻居加入流体检查队列（world.setBlock 统一调用） */
 export function enqueueFluid(x: number, y: number, z: number): void {
-  pending.add(`${x},${y},${z}`);
-  pending.add(`${x + 1},${y},${z}`);
-  pending.add(`${x - 1},${y},${z}`);
-  pending.add(`${x},${y},${z + 1}`);
-  pending.add(`${x},${y},${z - 1}`);
-  pending.add(`${x},${y - 1},${z}`);
-  pending.add(`${x},${y + 1},${z}`); // 上方格：挖掉水下的方块，上方水才能流下补坑
+  addCell(pending, x, y, z);
+  addCell(pending, x + 1, y, z);
+  addCell(pending, x - 1, y, z);
+  addCell(pending, x, y, z + 1);
+  addCell(pending, x, y, z - 1);
+  addCell(pending, x, y - 1, z);
+  addCell(pending, x, y + 1, z); // 上方格：挖掉水下的方块，上方水才能流下补坑
+}
+
+const isFluidId = (id: BlockId): boolean => isWaterId(id) || isLavaId(id);
+
+/**
+ * setBlock 入队门控：自身（新/旧值）或 6 邻任一格是流体才有流体结算的需要——
+ * 非流体邻域的编辑占绝大多数，7 格判定（getBlock 有 lastChunk 缓存，便宜）省掉每次编辑 7 次入队操作。
+ * 判定在数据写入后调用：6 邻不受本次写入影响，自身用新/旧 id 显式覆盖。
+ * 水平邻格跨进未加载 chunk 时不读块（getBlock 会隐式触发全量生成），保守入队——与旧的无条件入队同语义
+ */
+export function needsFluidCheck(world: World, x: number, y: number, z: number, oldId: BlockId, newId: BlockId): boolean {
+  if (isFluidId(oldId) || isFluidId(newId)) return true;
+  // 垂直邻格必在同 chunk（越界返回 AIR），直接读
+  if (isFluidId(world.getBlock(x, y - 1, z)) || isFluidId(world.getBlock(x, y + 1, z))) return true;
+  for (const [dx, dz] of DIRS4) {
+    if (!world.isChunkLoaded(x + dx, z + dz)) return true;
+    if (isFluidId(world.getBlock(x + dx, y, z + dz))) return true;
+  }
+  return false;
 }
 
 export function fluidQueueSize(): number {
-  return pending.size;
+  let n = 0;
+  for (const ys of pending.values()) n += ys.size;
+  return n;
 }
 
 /** 清空流体队列与岩浆计时（切换世界时调用，防止旧坐标/旧累计带进新世界） */
 export function clearFluids(): void {
-  pending.clear();
+  pending = new Map();
   created.clear();
   falling.clear();
   lavaAcc = 0;
@@ -107,11 +163,10 @@ export function clearFluids(): void {
  *  fall=true 时登记为下落流体（falling 集合是流体格 falling 状态的权威写入点） */
 function spawnFlow(world: World, x: number, y: number, z: number, id: BlockId, fall = false): void {
   world.setBlock(x, y, z, id);
-  const key = `${x},${y},${z}`;
-  if (fall) falling.add(key);
-  else falling.delete(key);
-  created.add(key);
-  pending.add(key);
+  if (fall) addCell(falling, x, y, z);
+  else deleteCell(falling, x, y, z);
+  addCell(created, x, y, z);
+  addCell(pending, x, y, z);
 }
 
 const OBSIDIAN_ID = BLOCK_BY_KEY.obsidian.id;
@@ -171,19 +226,19 @@ function breakWashable(world: World, x: number, y: number, z: number, id: BlockI
 }
 
 /** 水格处理：水火接触反应 + 消退 + 无限水源 + 向下流 + 落地扩散 + 冲毁非实心方块 */
-function tickWater(world: World, x: number, y: number, z: number, level: number, cellKey: string, loaded: (nx: number, nz: number) => boolean): void {
+function tickWater(world: World, x: number, y: number, z: number, level: number): void {
   // 下落水（MC falling）：源/下落格垂直下流形成，强度等同源——落地从 1 级起扩满；不是源、不能转源
-  let fall = falling.has(cellKey);
-  if (fall && level !== 1) { falling.delete(cellKey); fall = false; } // 陈旧标记：格内容已非 1 级流
+  let fall = hasCell(falling, x, y, z);
+  if (fall && level !== 1) { deleteCell(falling, x, y, z); fall = false; } // 陈旧标记：格内容已非 1 级流
   // 水火接触（MC）：侧向邻居或正下方是岩浆源（含水从上方浇到源上）→ 一律黑曜石
-  for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
-    if (!loaded(x + dx, z + dz)) continue;
+  for (const [dx, dz] of DIRS4) {
+    if (!world.isChunkLoaded(x + dx, z + dz)) continue;
     if (world.getBlock(x + dx, y, z + dz) === LAVA) world.setBlock(x + dx, y, z + dz, OBSIDIAN_ID);
   }
   if (world.getBlock(x, y - 1, z) === LAVA) world.setBlock(x, y - 1, z, OBSIDIAN_ID);
   // 混凝土粉末固化（MC：邻接水立即固化，含水流入格）：6 邻域的粉末变对应颜色混凝土
-  for (const [dx, dy, dz] of [[1, 0, 0], [-1, 0, 0], [0, 0, 1], [0, 0, -1], [0, -1, 0], [0, 1, 0]] as const) {
-    if (dy === 0 && !loaded(x + dx, z + dz)) continue;
+  for (const [dx, dy, dz] of DIRS6) {
+    if (dy === 0 && !world.isChunkLoaded(x + dx, z + dz)) continue;
     const key = BLOCKS[world.getBlock(x + dx, y + dy, z + dz)]?.key;
     if (key?.endsWith('_concrete_powder')) world.setBlock(x + dx, y + dy, z + dz, BLOCK_BY_KEY[key.slice(0, -'_powder'.length)].id);
   }
@@ -191,23 +246,25 @@ function tickWater(world: World, x: number, y: number, z: number, level: number,
   // falling 邻居按源强度（0 级）计——瀑布落地柱作为上游供养四周 1 级流（MC 瀑布成潭）
   if (level > 0 && !isWaterId(world.getBlock(x, y + 1, z))) {
     const parentLevel = level - 1;
-    const hasParent = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => {
-      if (!loaded(x + dx, z + dz)) return false;
+    const hasParent = DIRS4.some(([dx, dz]) => {
+      if (!world.isChunkLoaded(x + dx, z + dz)) return false;
       const nLevel = waterLevel(world.getBlock(x + dx, y, z + dz));
       // 同流体的 falling 格（必为 1 级流 id）视为 0 级上游
-      return nLevel === parentLevel || (parentLevel === 0 && nLevel === 1 && falling.has(`${x + dx},${y},${z + dz}`));
+      return nLevel === parentLevel || (parentLevel === 0 && nLevel === 1 && hasCell(falling, x + dx, y, z + dz));
     });
     if (!hasParent) {
       world.setBlock(x, y, z, AIR);
-      falling.delete(cellKey);
+      deleteCell(falling, x, y, z);
       return;
     }
   }
   // 无限水源（MC 规则）：水平两侧都是水源 且 下方是水源或实心方块 → 本格成源；下落水（falling）不转源（MC）
   if (level > 0 && !fall) {
-    const sources = [[1, 0], [-1, 0], [0, 1], [0, -1]].filter(
-      ([dx, dz]) => loaded(x + dx, z + dz) && world.getBlock(x + dx, y, z + dz) === WATER,
-    ).length;
+    let sources = 0;
+    for (const [dx, dz] of DIRS4) {
+      if (!world.isChunkLoaded(x + dx, z + dz)) continue;
+      if (world.getBlock(x + dx, y, z + dz) === WATER) sources++;
+    }
     if (sources >= 2) {
       const below = world.getBlock(x, y - 1, z);
       if (below === WATER || BLOCKS[below]?.opaque) {
@@ -234,8 +291,8 @@ function tickWater(world: World, x: number, y: number, z: number, level: number,
   // 下落水按源强度扩散（effLevel 0 → 1 级起，MC：瀑布落地扩满 7 格；修复前 1 级柱落地只扩 6 格）
   const effLevel = fall ? 0 : level;
   if (effLevel < 7 && !isWaterId(world.getBlock(x, y - 1, z))) {
-    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
-      if (!loaded(x + dx, z + dz)) continue;
+    for (const [dx, dz] of DIRS4) {
+      if (!world.isChunkLoaded(x + dx, z + dz)) continue;
       const t = world.getBlock(x + dx, y, z + dz);
       if (t === AIR || WASHABLE.has(t)) {
         if (t !== AIR) breakWashable(world, x + dx, y, z + dz, t, true);
@@ -249,20 +306,20 @@ function tickWater(world: World, x: number, y: number, z: number, level: number,
 }
 
 /** 岩浆格处理（每 lavaInterval 秒一步）：水火接触 + 向下流 + 落地按维度距离扩散 + 烧毁非实心方块 */
-function tickLava(world: World, x: number, y: number, z: number, level: number, maxLevel: number, cellKey: string, loaded: (nx: number, nz: number) => boolean): void {
+function tickLava(world: World, x: number, y: number, z: number, level: number, maxLevel: number): void {
   // 下落岩浆（MC falling，与水同理）：源/下落格垂直下流形成，强度等同源——落地按维度从 1 级起扩满
-  let fall = falling.has(cellKey);
-  if (fall && level !== 1) { falling.delete(cellKey); fall = false; } // 陈旧标记：格内容已非 1 级流
+  let fall = hasCell(falling, x, y, z);
+  if (fall && level !== 1) { deleteCell(falling, x, y, z); fall = false; } // 陈旧标记：格内容已非 1 级流
   // 上方是水（MC：水从上方浇到岩浆）：源 → 黑曜石（源遇水一律黑曜石）；流动岩浆 → 圆石
   if (isWaterId(world.getBlock(x, y + 1, z))) {
     world.setBlock(x, y, z, level === 0 ? OBSIDIAN_ID : COBBLE);
-    falling.delete(cellKey);
+    deleteCell(falling, x, y, z);
     return;
   }
   // 岩浆源遇侧向水 → 黑曜石（MC）
   if (level === 0) {
-    const sideWater = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(
-      ([dx, dz]) => loaded(x + dx, z + dz) && isWaterId(world.getBlock(x + dx, y, z + dz)),
+    const sideWater = DIRS4.some(
+      ([dx, dz]) => world.isChunkLoaded(x + dx, z + dz) && isWaterId(world.getBlock(x + dx, y, z + dz)),
     );
     if (sideWater) {
       world.setBlock(x, y, z, OBSIDIAN_ID);
@@ -274,15 +331,15 @@ function tickLava(world: World, x: number, y: number, z: number, level: number, 
   // 下一级在下一个岩浆步才消退——节奏与扩散一致。
   if (level > 0 && !isLavaId(world.getBlock(x, y + 1, z))) {
     const parentLevel = level - 1;
-    const hasParent = [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([dx, dz]) => {
-      if (!loaded(x + dx, z + dz)) return false;
+    const hasParent = DIRS4.some(([dx, dz]) => {
+      if (!world.isChunkLoaded(x + dx, z + dz)) return false;
       const nLevel = lavaLevel(world.getBlock(x + dx, y, z + dz));
       // 同流体的 falling 格（必为 1 级流 id）视为 0 级上游（与水同理：岩浆瀑布落地柱供养 1 级流）
-      return nLevel === parentLevel || (parentLevel === 0 && nLevel === 1 && falling.has(`${x + dx},${y},${z + dz}`));
+      return nLevel === parentLevel || (parentLevel === 0 && nLevel === 1 && hasCell(falling, x + dx, y, z + dz));
     });
     if (!hasParent) {
       world.setBlock(x, y, z, AIR);
-      falling.delete(cellKey);
+      deleteCell(falling, x, y, z);
       return;
     }
   }
@@ -304,8 +361,8 @@ function tickLava(world: World, x: number, y: number, z: number, level: number, 
   // 下落岩浆按源强度扩散（effLevel 0 → 1 级起，与水同理：岩浆瀑布落地扩满 3/7 格）
   const effLevel = fall ? 0 : level;
   if (effLevel < maxLevel && !isLavaId(world.getBlock(x, y - 1, z))) {
-    for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
-      if (!loaded(x + dx, z + dz)) continue;
+    for (const [dx, dz] of DIRS4) {
+      if (!world.isChunkLoaded(x + dx, z + dz)) continue;
       const t = world.getBlock(x + dx, y, z + dz);
       if (t === AIR || WASHABLE.has(t)) {
         if (t !== AIR) breakWashable(world, x + dx, y, z + dz, t, false);
@@ -327,46 +384,54 @@ export function tickFluids(world: World, budget = 128): void {
   if (pending.size === 0) return;
   const nether = world.terrain.kind === 'nether';
   lavaAcc += BEAT;
-  const lavaDue = lavaAcc >= (nether ? LAVA_INTERVAL_NETHER : LAVA_INTERVAL_NORMAL);
-  if (lavaDue) lavaAcc -= nether ? LAVA_INTERVAL_NETHER : LAVA_INTERVAL_NORMAL;
+  const lavaInterval = nether ? LAVA_INTERVAL_NETHER : LAVA_INTERVAL_NORMAL;
+  const lavaDue = lavaAcc >= lavaInterval;
+  if (lavaDue) lavaAcc -= lavaInterval;
   const maxLavaLevel = nether ? 7 : 3;
-  // 本拍结算快照（水与岩浆共用）：只处理拍开始时已在队列的格子；拍内扩散/消退 setBlock 新入队的格子
-  // 留到下一拍——JS Set 迭代会访问拍内新增项，不快照会沿队列一拍级联到底
+  // 本拍结算快照：O(1) 整体换出队列——只处理拍开始时已在队列的格子；拍内扩散/消退 setBlock
+  // 新入队的格子落进新队列，留到下一拍（与原 [...pending] 数组快照同语义，免整队字符串分配）。
   // （MC 水每级 5 tick、岩浆每级 1.5s/下界 0.5s，每级都要等一个流动周期）
-  const batch = [...pending];
+  const batch = pending;
+  pending = new Map();
   created.clear();
   let drained = 0;
-  const deferred: string[] = [];
-  for (const key of batch) {
-    if (drained >= budget) break;
-    pending.delete(key);
-    const [x, y, z] = key.split(',').map(Number);
-    // 未加载的格子不处理——getBlock 会隐式触发全量生成，把 chunk 生成拖出渲染半径形成生成风暴
-    if (!world.isChunkLoaded(x, z)) continue;
-    const id = world.getBlock(x, y, z);
-    const wLevel = waterLevel(id);
-    const lLevel = wLevel < 0 ? lavaLevel(id) : -1;
-    if (wLevel < 0 && lLevel < 0) {
-      drained++; // 非流体（已被挖掉/替换）：出队即弃
-      falling.delete(key); // 顺手清掉可能残留的下落标记
-      continue;
+  let overBudget = false;
+  for (const [col, ys] of batch) {
+    const x = Math.floor(col / XZ_SPAN) - XZ_OFF;
+    const z = col % XZ_SPAN - XZ_OFF;
+    for (const y of ys) {
+      // 预算耗尽：本格与剩余格子原样留回队列（与原 break 时留在 pending 的语义一致）
+      if (overBudget || drained >= budget) {
+        overBudget = true;
+        addCell(pending, x, y, z);
+        continue;
+      }
+      // 未加载的格子不处理——getBlock 会隐式触发全量生成，把 chunk 生成拖出渲染半径形成生成风暴
+      if (!world.isChunkLoaded(x, z)) continue;
+      const id = world.getBlock(x, y, z);
+      const wLevel = waterLevel(id);
+      const lLevel = wLevel < 0 ? lavaLevel(id) : -1;
+      if (wLevel < 0 && lLevel < 0) {
+        drained++; // 非流体（已被挖掉/替换）：出队即弃
+        deleteCell(falling, x, y, z); // 顺手清掉可能残留的下落标记
+        continue;
+      }
+      // 岩浆节奏未到：本拍不结算，留回队列（先查节奏再结算，节奏未到的岩浆格不做无效结算）
+      if (lLevel >= 0 && !lavaDue) {
+        addCell(pending, x, y, z);
+        continue;
+      }
+      if (hasCell(created, x, y, z)) {
+        addCell(pending, x, y, z); // 本拍内新生成的流体格：留到下一拍
+        continue;
+      }
+      drained++;
+      // 邻格同理：chunk 未加载的方向由 tickWater/tickLava 内逐向判 isChunkLoaded 跳过，
+      // 否则在加载半径边缘倒液体会逐 chunk 向外爬，每步都隐式触发主线程全量地形生成 + cascadeLight
+      if (wLevel >= 0) tickWater(world, x, y, z, wLevel);
+      else tickLava(world, x, y, z, lLevel, maxLavaLevel);
     }
-    if (created.has(key)) {
-      deferred.push(key); // 本拍内新生成的流体格（被地面 setBlock 预入队，快照挡不住）：留到下一拍
-      continue;
-    }
-    // 邻格同理：chunk 未加载的方向直接跳过，否则在加载半径边缘倒液体会逐 chunk 向外爬，
-    // 每步都隐式触发主线程全量地形生成 + cascadeLight
-    const loaded = (nx: number, nz: number): boolean => world.isChunkLoaded(nx, nz);
-    if (lLevel >= 0 && !lavaDue) {
-      deferred.push(key); // 岩浆节奏未到：本拍不结算，留回队列
-      continue;
-    }
-    drained++;
-    if (wLevel >= 0) tickWater(world, x, y, z, wLevel, key, loaded);
-    else tickLava(world, x, y, z, lLevel, maxLavaLevel, key, loaded);
   }
-  for (const key of deferred) pending.add(key);
 }
 
 // 世界作用域自注册（lib/worldScope.ts）：流体队列随世界清理

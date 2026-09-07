@@ -2,7 +2,7 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 import { AIR, BLOCK_BY_KEY, isWaterId, STONE, WATER, WATER_FLOW_1, WHEAT_CROP_0 } from '../blocks';
-import { clearFluids, tickFluids, waterLevel } from '../fluids';
+import { clearFluids, fluidQueueSize, tickFluids, waterLevel } from '../fluids';
 import { clearDrops, itemDrops } from '../items';
 import { VOID_TERRAIN } from '../noise';
 import { World } from '../world';
@@ -22,6 +22,29 @@ describe('流体传播', () => {
     expect(waterLevel(FLOW(7))).toBe(7);
     expect(waterLevel(AIR)).toBe(-1);
     expect(waterLevel(STONE)).toBe(-1);
+  });
+
+  it('编辑非流体邻域不入队（入队门控）；流体邻域编辑照常入队', () => {
+    const w = new World('fluid-gate', undefined, VOID_TERRAIN);
+    w.setBlock(8, 30, 8, STONE); // 自身（新/旧）与 6 邻全无流体
+    expect(fluidQueueSize()).toBe(0);
+    w.setBlock(10, 31, 9, STONE); // 对角方向（非 6 邻）同样不入队
+    expect(fluidQueueSize()).toBe(0);
+    w.setBlock(4, 20, 4, WATER); // 自身是流体：入队自身 + 6 邻共 7 格
+    expect(fluidQueueSize()).toBe(7);
+    clearFluids();
+    w.setBlock(5, 20, 4, STONE); // 6 邻有水：入队（水的消退/无限水源结算依赖邻居入队）
+    expect(fluidQueueSize()).toBeGreaterThan(0);
+  });
+
+  it('负数与大坐标列键打包：远处/负坐标的水照常流动', () => {
+    const w = new World('fluid-pack', undefined, VOID_TERRAIN);
+    w.setBlock(-8, 30, -8, WATER);
+    const X = 20_000_000; // > 2^24，验证打包位宽（上限 |x|,|z| < 2^25）
+    w.setBlock(X, 30, -X, WATER);
+    for (let i = 0; i < 10; i++) tickFluids(w, 128);
+    expect(w.getBlock(-8, 29, -8)).toBe(FLOW(1));
+    expect(w.getBlock(X, 29, -X)).toBe(FLOW(1));
   });
 
   it('悬空水源向下流成水柱', () => {

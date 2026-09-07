@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useReducer, useRef, useState } from 'react';
 import { useFrame } from '@react-three/fiber';
 import { World, type Chunk } from '@/lib/world';
 import { getAtlasMaterials, type AtlasMaterials } from '@/lib/textures';
@@ -134,6 +134,9 @@ export function WorldRenderer() {
   const [world, setWorld] = useState<World | null>(null);
   const [materials, setMaterials] = useState<AtlasMaterials | null>(null);
   const [chunkList, setChunkList] = useState<Chunk[]>([]);
+  /** 渲染列表数组按 key 缓存复用引用；原地连续脏帧（drained>0 且 key 未变）时 setChunkList 同引用会被
+   *  React Object.is bailout——bump 此 epoch 强制重渲，把本帧上涨的 chunk.version 推进 memo 化的 ChunkMesh */
+  const [, bumpChunkEpoch] = useReducer((n: number) => n + 1, 0);
   const worldRef = useRef<World | null>(null);
   /** 两个维度的世界实例缓存（切换不丢 chunk 与生成状态） */
   const worldsRef = useRef<Partial<Record<Dimension, World>>>({});
@@ -351,8 +354,12 @@ export function WorldRenderer() {
           key: ck,
           arr: [...w.chunks.values()].filter((c) => Math.max(Math.abs(c.cx - pcx), Math.abs(c.cz - pcz)) <= rd),
         };
+        setChunkList(chunkArrRef.current.arr);
+      } else if (drained > 0) {
+        // 缓存键未变（原地连续多帧 drain，generation 只随 chunk 增删变化）但本帧有 version 上涨：
+        // 数组引用不变，setChunkList 会被 Object.is bailout，必须 bump epoch 重渲（O(1)，远低于每帧重建数组）
+        bumpChunkEpoch();
       }
-      setChunkList(chunkArrRef.current.arr);
     }
   });
 

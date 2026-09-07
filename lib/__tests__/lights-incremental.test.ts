@@ -26,7 +26,7 @@ function flushAll(w: World): void {
 /** 全量重算基准：所有 chunk 标脏走 cascadeLight 收敛级联（生成/读档同一条全量路径） */
 function fullRecompute(w: World): void {
   w.lightEdits.length = 0;
-  for (const c of w.chunks.values()) c.lightDirty = true;
+  for (const c of w.chunks.values()) w.markLightDirty(c);
   flushAll(w);
 }
 
@@ -194,7 +194,7 @@ describe('增量光照传播', () => {
     for (let cx = -1; cx <= 1; cx++) for (let cz = -1; cz <= 1; cz++) w.getChunk(cx, cz);
     flushAll(w);
     // 制造 4 个待全量重算的 chunk 占满预算（每帧 3 个），让 (1,0) 本帧刷不到
-    for (const key of ['-1,-1', '-1,0', '-1,1', '1,0']) w.chunks.get(key)!.lightDirty = true;
+    for (const key of ['-1,-1', '-1,0', '-1,1', '1,0']) w.markLightDirty(w.chunks.get(key)!);
     w.setBlock(15, 10, 8, TORCH); // 光会跨进 (1,0)，但 (1,0) 基线无效 → 延迟
     expect(w.lightEdits.length).toBe(5);
     flushLight(w); // 帧 1：预算被前 3 个占满，(1,0) 仍脏 → 编辑保留

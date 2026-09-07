@@ -75,6 +75,9 @@ export function tickGrowth(world: World, dt: number): void {
   if (n <= 0) return;
   sampleDebt -= n;
   for (const chunk of world.chunks.values()) {
+    // 无可生长方块（仙人掌/甘蔗/竹子）的 chunk 整 chunk 跳过：抽样必然全落空，
+    // 计数由生成/读档扫面 + setBlock 增减维护（lib/world.ts Chunk.growables），跳过不改变命中语义
+    if (chunk.growables <= 0) continue;
     for (let i = 0; i < n; i++) {
       const x = chunk.cx * 16 + Math.floor(rand() * 16);
       const z = chunk.cz * 16 + Math.floor(rand() * 16);

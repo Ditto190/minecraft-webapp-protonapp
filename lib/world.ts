@@ -1,7 +1,7 @@
 // 体素世界：chunk 存储、地形与结构生成、方块读写、脏标记
 
-import { AIR, BLOCKS } from './blocks';
-import { enqueueFluid } from './fluids';
+import { AIR, BLOCK_BY_KEY, BLOCKS } from './blocks';
+import { enqueueFluid, needsFluidCheck } from './fluids';
 import { notifyCropBlockSet } from './crops';
 import { notifyBlockSet } from './saplings';
 import { notifyRedstone } from './redstone';
@@ -24,6 +24,14 @@ export { generateChunk } from './genCore';
 /** worker/注入生成完成后的落地回调（data 为 worker 产物，chests 为生成期登记的结构战利品） */
 export type GenApply = (data: Uint16Array, chests?: ChestLoot[]) => void;
 
+/** growth.ts 随机刻关心的可生长方块（柱作物：仙人掌/甘蔗/竹子茎与竹顶段），驱动 Chunk.growables 计数 */
+const GROWABLE_IDS = new Set<number>([
+  BLOCK_BY_KEY.cactus.id,
+  BLOCK_BY_KEY.sugar_cane.id,
+  BLOCK_BY_KEY.bamboo.id,
+  BLOCK_BY_KEY.bamboo_top.id,
+]);
+
 export class Chunk {
   readonly data = new Uint16Array(CHUNK_VOLUME);
   /** 方块光照 0-15（lights.ts 维护） */
@@ -36,6 +44,9 @@ export class Chunk {
   version = 0;
   /** 被玩家修改过，需要持久化 */
   modified = false;
+  /** 可生长方块计数（growth.ts 随机刻关心的仙人掌/甘蔗/竹子；为 0 的 chunk 整 chunk 跳过抽样。
+   *  生成/读档时全量扫一次，此后由 setBlock 增减维护） */
+  growables = 0;
   constructor(
     public readonly cx: number,
     public readonly cz: number,
@@ -48,6 +59,8 @@ export class World {
   readonly chunks = new Map<string, Chunk>();
   /** 待重建 mesh 的 chunk key */
   readonly dirtyChunks = new Set<string>();
+  /** 待全量重算光照的 chunk key（与 dirtyChunks 同模式：标 lightDirty 处登记，flushLight 消费后清除） */
+  readonly lightDirtyChunks = new Set<string>();
   /** 待持久化的 chunk key */
   readonly modifiedChunks = new Set<string>();
   /**
@@ -89,13 +102,15 @@ export class World {
     const s = this.saved.get(key);
     if (s && s.length === CHUNK_VOLUME) {
       chunk.data.set(s);
+      this.scanGrowables(chunk);
       // 存档恢复的 chunk 光照数组为全 0：标脏交给 flushLight 限流重算（否则世界渲染全黑）
-      chunk.lightDirty = true;
+      this.markLightDirty(chunk);
       this.chunks.set(key, chunk);
     } else {
       if (this.terrain.kind === 'nether') generateNetherChunk(this.terrain, cx, cz, chunk.data, this.seedHash);
       else if (this.terrain.kind === 'end') generateEndChunk(this.terrain, cx, cz, chunk.data, this.seedHash);
       else generateChunk(this.terrain, cx, cz, chunk.data, this.seedHash);
+      this.scanGrowables(chunk);
       // 先入册再级联：邻居重算的边界接力要能读到本 chunk（否则新 chunk 的光照
       // 传不进既有 chunk，边界单侧陈旧直到下次偶然重算——明暗接缝的源头之一）
       this.chunks.set(key, chunk);
@@ -161,6 +176,9 @@ export class World {
     const chunk = this.getChunk(cx, cz);
     const oldId = chunk.data[localIndex(x & 15, y, z & 15)];
     chunk.data[localIndex(x & 15, y, z & 15)] = id;
+    // 可生长方块计数增减（growth.ts 整 chunk 早退依赖；O(1) Set 查询，与同函数其他钩子合并不重复扫）
+    if (GROWABLE_IDS.has(oldId)) chunk.growables--;
+    if (GROWABLE_IDS.has(id)) chunk.growables++;
     chunk.modified = true;
     this.modifiedChunks.add(key);
     this.dirtyChunks.add(key);
@@ -169,8 +187,9 @@ export class World {
     if ((x & 15) === CHUNK_SIZE - 1) this.markDirty(cx + 1, cz);
     if ((z & 15) === 0) this.markDirty(cx, cz - 1);
     if ((z & 15) === CHUNK_SIZE - 1) this.markDirty(cx, cz + 1);
-    // 水及其邻域进入流体检查队列（生成过程直接写 data 不走这里，不会触发）
-    enqueueFluid(x, y, z);
+    // 流体进入检查队列（生成过程直接写 data 不走这里，不会触发）；
+    // 自身（新/旧值）与 6 邻全无流体则跳过——非流体邻域的编辑占绝大多数
+    if (needsFluidCheck(this, x, y, z, oldId, id)) enqueueFluid(x, y, z);
     // 光照变更记入增量队列（建网前由 flushLight 统一做除光+播种 BFS，避免批量编辑雪崩）。
     // 仅当不透明度或发光值变化才需要重算——流水/作物/树叶凋零等非透明变化不影响光照，
     // 大面积水蔓延时这条能省掉成片的无效重算，避免阻塞主线程。
@@ -193,6 +212,20 @@ export class World {
     if (this.chunks.has(key)) this.dirtyChunks.add(key);
   }
 
+  /** 登记 chunk 光照全量重算：lightDirty 标记与 lightDirtyChunks 集合同步维护（flushLight 每帧限流消费集合） */
+  markLightDirty(chunk: Chunk): void {
+    chunk.lightDirty = true;
+    this.lightDirtyChunks.add(chunkKey(chunk.cx, chunk.cz));
+  }
+
+  /** 全量扫一遍 chunk 数据重计可生长方块数（生成/读档直写 data 后的唯一扫面；此后由 setBlock 增减维护） */
+  private scanGrowables(chunk: Chunk): void {
+    let n = 0;
+    const d = chunk.data;
+    for (let i = 0; i < d.length; i++) if (GROWABLE_IDS.has(d[i])) n++;
+    chunk.growables = n;
+  }
+
   /**
    * 后台加载到的存档数据到达：
    * chunk 未创建 → 存入备用（创建时优先用存档）；已创建但本局未修改 → 替换为存档版本；
@@ -207,10 +240,11 @@ export class World {
     }
     if (existing.modified) return;
     existing.data.set(data);
-    // 与 getChunk 读档路径（上方 chunk.lightDirty = true）语义一致：标脏交给 flushLight
+    this.scanGrowables(existing);
+    // 与 getChunk 读档路径（上方 markLightDirty）语义一致：标脏交给 flushLight
     // 每帧限流重算，避免继续游戏时数百个后台存档 chunk 挤在同一个 promise 回调里
     // 同步级联（每个 1-4ms）造成 50-200ms 长任务
-    existing.lightDirty = true;
+    this.markLightDirty(existing);
     this.dirtyChunks.add(key);
     // 边界面可能变化，相邻 chunk 也要重建，避免接缝
     for (const [dx, dz] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
@@ -286,7 +320,8 @@ export class World {
         }
       }
     }
-    chunk.lightDirty = true;
+    this.scanGrowables(chunk);
+    this.markLightDirty(chunk);
     this.chunks.set(key, chunk);
     this.dirtyChunks.add(key);
     // 相邻已存在 chunk 需要重网格化，避免共享边界面重复（同 getChunk 加载期标脏逻辑）
