@@ -228,6 +228,10 @@ export interface Arrow {
   fromPlayer?: boolean;
   /** 烈焰人火球（更大更亮，命中 5 伤 + 点燃玩家 5 秒，MC）或恶魂爆裂火球（命中/撞墙爆炸）或凋灵骷髅弹（爆炸 + 凋零 DOT）或末影珍珠（落点传送）或末影之眼（飞向要塞后悬停碎裂/掉落） */
   kind?: 'fireball' | 'ghast' | 'pearl' | 'wither_skull' | 'eye' | 'shulker';
+  /** tickArrows 的 chunk 驻留缓存：箭多数帧留在同一 chunk，跨 chunk 才重查加载态（避免每帧拼字符串键） */
+  ckX?: number;
+  ckZ?: number;
+  ckIn?: boolean;
 }
 
 export const mobs: Mob[] = [];
@@ -300,12 +304,28 @@ export function isNight(): boolean {
   return dayFactorAt(worldClock.t) < 0.4;
 }
 
-/** 白天自燃判定：头顶露天（y+2 向上无遮挡）且头部不在水中（树荫/洞穴/水下不烧，MC 一致）；参数为任意坐标点（生物/玩家共用） */
+/** 白天自燃判定：头顶露天（y+2 向上无遮挡）且头部不在水中（树荫/洞穴/水下不烧，MC 一致）；参数为任意坐标点（生物/玩家共用）。
+ *  快路径：头格所在 chunk 的天空光 <15 ⇒ 同列上方必有不透明遮挡（lights.ts 竖直填充保证无遮挡列恒为 15），洞穴/建筑内 O(1) 判定不露天；
+ *  sky===15 只保证上方无「不透明」格，仍扫列排除树叶/水/玻璃等非不透明非空气遮挡（本引擎树叶 opaque:false，天空光穿透树冠）。
+ *  与原逐格扫描的唯一差异：遮挡刚被挖掉而增量光照尚未 flushLight 时，陈旧 sky<15 会把「恢复露天」推迟到下次光照刷新（游戏内每帧限流 flush，≤1 帧量级）。 */
 function exposedToSky(world: World, m: { x: number; y: number; z: number }): boolean {
   const bx = Math.floor(m.x);
   const bz = Math.floor(m.z);
-  if (isWaterId(world.getBlock(bx, Math.floor(m.y) + 1, bz))) return false;
-  for (let y = Math.floor(m.y) + 2; y < WORLD_HEIGHT; y++) {
+  const hy = Math.floor(m.y) + 1;
+  if (isWaterId(world.getBlock(bx, hy, bz))) return false;
+  const c = world.chunks.get(chunkKey(bx >> 4, bz >> 4));
+  if (c) {
+    if (hy >= 0 && hy < WORLD_HEIGHT && c.sky[localIndex(bx & 15, hy, bz & 15)] < 15) return false;
+    // 露天候选：直读 chunk 数据扫列（与 getBlock 同源，省去逐格调用开销；y 越界等价 AIR，故从 max(0,·) 起扫）
+    const lx = bx & 15;
+    const lz = bz & 15;
+    for (let y = Math.max(0, hy + 1); y < WORLD_HEIGHT; y++) {
+      if (c.data[localIndex(lx, y, lz)] !== AIR) return false;
+    }
+    return true;
+  }
+  // chunk 缺失：退回原逐格扫描（保留 getBlock 隐式生成语义）
+  for (let y = hy + 1; y < WORLD_HEIGHT; y++) {
     if (world.getBlock(bx, y, bz) !== AIR) return false;
   }
   return true;
@@ -529,24 +549,39 @@ export function tryBuildCopperGolem(world: World, x: number, y: number, z: numbe
   return false;
 }
 
-/** 水平 ≤32 格、竖直 ±8 内满足 match 的最近容器（只读已加载 chunk；每列先按水平距剪枝） */
-function scanContainer(world: World, m: Mob, match: (id: number, key: string) => boolean): { x: number; y: number; z: number } | null {
+/** 水平 ≤32 格、竖直 ±8 内最近的 wantId 容器（test 按位置键再过滤）；只读已加载 chunk（未加载列整列跳过）。
+ *  距离用平方比较（与原 hypot 判定同序）；按 x→z→y 顺序扫描并保持「更近才替换」，等距取先扫到者——与原实现一致。 */
+function scanContainer(world: World, m: Mob, wantId: number, test: (key: string) => boolean): { x: number; y: number; z: number } | null {
   const x0 = Math.floor(m.x);
   const y0 = Math.floor(m.y);
   const z0 = Math.floor(m.z);
+  const yLo = Math.max(0, y0 - GOLEM_RANGE_Y);
+  const yHi = Math.min(WORLD_HEIGHT - 1, y0 + GOLEM_RANGE_Y);
+  const range2 = GOLEM_RANGE * GOLEM_RANGE;
   let best: { x: number; y: number; z: number } | null = null;
-  let bestD = Infinity;
+  let bestD2 = Infinity;
+  let ccx = NaN; // NaN 不等于任何值（含自身），首轮必查；未加载 chunk 也缓存 undefined，同 chunk 后续列不重查
+  let ccz = NaN;
+  let c: ReturnType<World['chunks']['get']>;
   for (let x = x0 - GOLEM_RANGE; x <= x0 + GOLEM_RANGE; x++) {
+    const dx = x + 0.5 - m.x;
     for (let z = z0 - GOLEM_RANGE; z <= z0 + GOLEM_RANGE; z++) {
-      const d = Math.hypot(x + 0.5 - m.x, z + 0.5 - m.z);
-      if (d > GOLEM_RANGE || d >= bestD) continue;
-      if (!world.isChunkLoaded(x, z)) continue;
-      for (let y = Math.max(0, y0 - GOLEM_RANGE_Y); y <= Math.min(WORLD_HEIGHT - 1, y0 + GOLEM_RANGE_Y); y++) {
-        const id = world.getBlock(x, y, z);
-        if (id === AIR) continue;
-        if (!match(id, `${x},${y},${z}`)) continue;
+      const dz = z + 0.5 - m.z;
+      const d2 = dx * dx + dz * dz;
+      if (d2 > range2 || d2 >= bestD2) continue;
+      const cx = x >> 4;
+      const cz = z >> 4;
+      if (cx !== ccx || cz !== ccz) {
+        ccx = cx;
+        ccz = cz;
+        c = world.chunks.get(chunkKey(cx, cz));
+      }
+      if (!c) continue;
+      for (let y = yLo; y <= yHi; y++) {
+        if (c.data[localIndex(x & 15, y, z & 15)] !== wantId) continue; // id 预检：非目标容器直接跳过，不拼位置键
+        if (!test(`${x},${y},${z}`)) continue;
         best = { x, y, z };
-        bestD = d;
+        bestD2 = d2;
       }
     }
   }
@@ -555,8 +590,7 @@ function scanContainer(world: World, m: Mob, match: (id: number, key: string) =>
 
 /** 取货目标：范围内最近的有货铜箱（storages 有该位置数据且至少一格非空） */
 function findCopperChestWithItems(world: World, m: Mob): { x: number; y: number; z: number } | null {
-  const cid = BLOCK_BY_KEY.copper_chest.id;
-  return scanContainer(world, m, (id, key) => id === cid && (storages.get(key)?.some((s) => s !== null) ?? false));
+  return scanContainer(world, m, BLOCK_BY_KEY.copper_chest.id, (key) => storages.get(key)?.some((s) => s !== null) ?? false);
 }
 
 /**
@@ -566,15 +600,13 @@ function findCopperChestWithItems(world: World, m: Mob): { x: number; y: number;
 function findDepositChest(world: World, m: Mob, item: Slot): { x: number; y: number; z: number } | null {
   const cid = BLOCK_BY_KEY.chest.id;
   if (item && (item.kind === 'block' || item.kind === 'material')) {
-    const same = scanContainer(world, m, (id, key) => {
-      if (id !== cid) return false;
+    const same = scanContainer(world, m, cid, (key) => {
       const st = storages.get(key);
       return st?.some((s) => s !== null && s.kind !== 'tool' && s.kind !== 'armor' && s.count < 64 && sameStack(s, item)) ?? false;
     });
     if (same) return same;
   }
-  return scanContainer(world, m, (id, key) => {
-    if (id !== cid) return false;
+  return scanContainer(world, m, cid, (key) => {
     const st = storages.get(key);
     return !st || st.some((s) => s === null);
   });
@@ -674,7 +706,7 @@ export function spawnLightAt(world: World, x: number, y: number, z: number): num
 /** 玩家是否穿任一金装备（MC：猪灵不主动攻击穿金甲的玩家；蛮兵不吃这套） */
 export function wearsGoldArmor(): boolean {
   const a = useGameStore.getState().armorSlots;
-  return [a.helmet, a.chestplate, a.leggings, a.boots].some((p) => p?.material === 'gold');
+  return a.helmet?.material === 'gold' || a.chestplate?.material === 'gold' || a.leggings?.material === 'gold' || a.boots?.material === 'gold';
 }
 
 /** 以物易物表（MC 1.16 权重展开的简化：9 样，权重和 100）
@@ -723,12 +755,17 @@ export function trySpawn(world: World, px: number, pz: number): boolean {
     if (trySpawnGolem(world, village)) return true;
   }
   const villageRoll = !night && village !== null && Math.random() < 0.85;
-  const hostileCount = mobs.filter((m) => MOB_DEFS[m.type].hostile && !m.tamed && m.type !== 'iron_golem').length;
-  const passiveCount = mobs.filter((m) => !MOB_DEFS[m.type].hostile).length;
+  let hostileCount = 0;
+  let passiveCount = 0;
+  for (const m of mobs) {
+    if (!MOB_DEFS[m.type].hostile) passiveCount++;
+    else if (!m.tamed && m.type !== 'iron_golem') hostileCount++;
+  }
   if (night && hostileCount >= MAX_HOSTILE) return false;
   // 村民单独限额（每村最多 3 只，MC 村庄必有村民——不与普通动物共享被动上限，否则被猪牛挤满永不出村民）
   if (villageRoll) {
-    const villagerCount = mobs.filter((m) => m.type === 'villager' && Math.hypot(m.x - village!.x, m.z - village!.z) < 48).length;
+    let villagerCount = 0;
+    for (const m of mobs) if (m.type === 'villager' && Math.hypot(m.x - village!.x, m.z - village!.z) < 48) villagerCount++;
     if (villagerCount >= 3) return false;
   } else if (!night && passiveCount >= MAX_PASSIVE) return false;
   for (let attempt = 0; attempt < 8; attempt++) {
@@ -1088,8 +1125,16 @@ function tickArrows(
     const nx = a.x + a.vx * dt;
     const ny = a.y + a.vy * dt;
     const nz = a.z + a.vz * dt;
-    // 目标位置 chunk 未加载：直接移除（读块会触发隐式全量生成，卡顿）
-    if (!world.chunks.has(`${Math.floor(nx) >> 4},${Math.floor(nz) >> 4}`)) {
+    // 目标位置 chunk 未加载：直接移除（读块会触发隐式全量生成，卡顿）。
+    // 按箭缓存 chunk 坐标与查询结果，只有跨 chunk 才重查（拼字符串键）；chunk 在箭驻留期间卸载的极端情形会延迟到跨 chunk 才移除
+    const acx = Math.floor(nx) >> 4;
+    const acz = Math.floor(nz) >> 4;
+    if (acx !== a.ckX || acz !== a.ckZ) {
+      a.ckX = acx;
+      a.ckZ = acz;
+      a.ckIn = world.chunks.has(chunkKey(acx, acz));
+    }
+    if (!a.ckIn) {
       arrows.splice(i, 1);
       continue;
     }
