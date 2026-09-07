@@ -31,6 +31,8 @@ const fogScratch = { near: 0, far: 0 };
 export function UnderwaterFX() {
   /** 距下一朵呼出气泡的秒数（仅头入水时倒计时，出水重置） */
   const bubbleIn = useRef(0.5);
+  /** 上一帧头是否在水中，用于边沿触发一次性重置计时器 */
+  const wasInWater = useRef(false);
 
   useFrame(({ scene, camera }, delta) => {
     const world = getActiveWorld();
@@ -43,7 +45,9 @@ export function UnderwaterFX() {
       Math.floor(camera.position.y),
       Math.floor(camera.position.z),
     );
-    if (isWaterId(head)) {
+    const inWater = isWaterId(head);
+    if (inWater) {
+      wasInWater.current = true;
       bg.set(WATER_COLOR);
       fog.color.set(WATER_COLOR);
       fog.near = WATER_FOG_NEAR;
@@ -62,8 +66,11 @@ export function UnderwaterFX() {
         }
       }
     } else {
-      // 出水（含岩浆）即停：计时器重置，再入水按完整随机间隔起算
-      bubbleIn.current = 0.3 + Math.random() * 0.5;
+      // 出水（含岩浆）即停：仅边沿从水切换到非水时重置计时器，避免出水后每帧随机分配
+      if (wasInWater.current) {
+        wasInWater.current = false;
+        bubbleIn.current = 0.3 + Math.random() * 0.5;
+      }
       if (isLavaId(head)) {
         // 头没入岩浆：橙红短雾
         bg.set(LAVA_COLOR);

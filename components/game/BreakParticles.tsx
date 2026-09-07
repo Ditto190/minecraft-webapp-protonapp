@@ -31,6 +31,10 @@ interface Particle {
 
 /** 模块级粒子池：帧循环里直接改（与 digState/touchInput 同模式） */
 const particlePool: Particle[] = [];
+/** 空闲槽索引栈：spawn 时 O(1) 取槽，粒子死亡时 O(1) 回收 */
+const freeIndices: number[] = [];
+/** 当前活跃粒子索引列表：useFrame 只遍历活跃粒子 */
+const activeIndices: number[] = [];
 /** 池共享材质：图集碎块 / 白烟（池初始化时写入；spawn 按事件类型切换 mesh.material，卸载时释放） */
 let sharedMatRef: Material | null = null;
 let smokeMatRef: Material | null = null;
@@ -69,6 +73,7 @@ export function BreakParticles() {
         mesh.visible = false;
         group.add(mesh);
         particlePool.push({ mesh, geo, vel: new Vector3(), spin: new Vector3(), age: 0, active: false, size: BASE_SIZE, smoke: false });
+        freeIndices.push(i);
       }
     });
     return () => {
@@ -82,6 +87,8 @@ export function BreakParticles() {
       smokeMatRef?.dispose();
       sharedMatRef = null;
       smokeMatRef = null;
+      freeIndices.length = 0;
+      activeIndices.length = 0;
     };
   }, [kind]);
 
@@ -96,17 +103,22 @@ export function BreakParticles() {
     }
 
     // 消费破坏事件，每次激活最多 PARTICLES_PER_BREAK 个粒子
-    while (particlePool.length > 0 && breakParticles.length > 0) {
+    while (freeIndices.length > 0 && breakParticles.length > 0) {
       const e = breakParticles.shift()!;
       spawn(e);
     }
 
-    for (const p of particlePool) {
-      if (!p.active) continue;
+    // 只更新活跃粒子；无活跃时跳过物理循环
+    if (activeIndices.length === 0) return;
+    for (let i = activeIndices.length - 1; i >= 0; i--) {
+      const idx = activeIndices[i];
+      const p = particlePool[idx];
       p.age += dt;
       if (p.age >= LIFE) {
         p.active = false;
         p.mesh.visible = false;
+        activeIndices.splice(i, 1);
+        freeIndices.push(idx);
         continue;
       }
       if (p.smoke) {
@@ -158,8 +170,10 @@ function spawn(e: BreakParticleEvent): void {
   const col = e.tile % ATLAS_COLS;
   const row = Math.floor(e.tile / ATLAS_COLS);
   let spawned = 0;
-  for (const p of particlePool) {
-    if (p.active) continue;
+  while (spawned < PARTICLES_PER_BREAK && freeIndices.length > 0) {
+    const idx = freeIndices.pop()!;
+    activeIndices.push(idx);
+    const p = particlePool[idx];
     p.active = true;
     p.age = 0;
     p.smoke = smoke;
@@ -176,7 +190,7 @@ function spawn(e: BreakParticleEvent): void {
       p.spin.set(0, 0, 0);
       p.mesh.rotation.set(0, 0, 0);
       p.mesh.scale.setScalar(p.size * 0.8);
-      if (++spawned >= PARTICLES_PER_BREAK) break;
+      spawned++;
       continue;
     }
     p.mesh.position.set(
@@ -198,6 +212,6 @@ function spawn(e: BreakParticleEvent): void {
     const vTop = 1 - (row * ATLAS_CELL_RATIO + ATLAS_PAD_RATIO + cy) / (ATLAS_ROWS * ATLAS_CELL_RATIO);
     const vBottom = 1 - (row * ATLAS_CELL_RATIO + ATLAS_PAD_RATIO + cy + cw) / (ATLAS_ROWS * ATLAS_CELL_RATIO);
     setGeoUv(p.geo, u0, vTop, u1, vBottom);
-    if (++spawned >= PARTICLES_PER_BREAK) break;
+    spawned++;
   }
 }

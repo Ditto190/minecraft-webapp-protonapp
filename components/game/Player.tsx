@@ -44,6 +44,9 @@ const SWEEP_ARC = [-0.7, 0.7] as const;
 const LOOK_SENSITIVITY = 0.0045; // 触屏视角灵敏度（弧度/像素）
 const SPAWN = { x: 8.5, z: 8.5 };
 
+/** 每帧准星射线的原地写入输出对象（减少命中时的新对象分配）；结果再赋给 game.ts 的 targetBlock.hit */
+const raycastHitOut = { block: [0, 0, 0] as [number, number, number], face: [0, 0, 0] as [number, number, number] };
+
 /** 出生点避让：海洋/河流/蘑菇岛/山地（含雪顶）不适合出生（MC 出生点在平缓陆地） */
 const BAD_SPAWN: Biome[] = ['ocean', 'river', 'mushroom_fields', 'mountains'];
 const spawnCache = new WeakMap<World, { x: number; z: number }>();
@@ -1043,12 +1046,14 @@ export function Player() {
     playerPosition.y = p.y;
     playerPosition.z = p.z;
 
-    // 每帧一次的准星射线（rayDir 上面已算好），高亮/预览/挖掘共用
+    // 每帧一次的准星射线（rayDir 上面已算好），高亮/预览/挖掘共用；传入复用 out 避免命中时分配
     targetBlock.hit = raycastBlock(
       world,
       camera.position.x, camera.position.y, camera.position.z,
       rayDir.x, rayDir.y, rayDir.z,
       REACH,
+      false,
+      raycastHitOut,
     );
 
     // 长按/点按：优先攻击准星附近的生物（MC 1.9 攻击冷却），否则挖掘方块

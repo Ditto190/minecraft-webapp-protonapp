@@ -31,6 +31,14 @@ rainGeo.setAttribute('position', rainAttr);
 const rainMat = new LineBasicMaterial({ color: '#8fb3d9', transparent: true, opacity: 0.45, depthWrite: false });
 const rainState = { seeded: false };
 
+// 雪花横向飘移：预存每滴的相位 cos/sin，每帧只算一次全局 sin/cos，用线性组合替代逐滴 sin
+const snowPhaseCos = new Float32Array(MAX_DROPS);
+const snowPhaseSin = new Float32Array(MAX_DROPS);
+/** 头顶遮挡扫描缓存：头部所在方块变化或上下移动时才重扫，静止时复用 */
+const ceilingCache = { x: NaN, y: NaN, z: NaN, has: false };
+/** 材质属性缓存：仅 snow/天气种类变化时才改 color/opacity */
+const matState = { snow: null as boolean | null, kind: '' as string };
+
 const SPLASH_RADIUS = 12; // 溅射水平散布半径（比雨丝小，只在近处出，少占粒子池）
 /** 溅射节流：acc 累计 dt，到 next 推一朵；next 每次取 0.3-0.7s 随机（~2 朵/秒，克制） */
 const splashState = { acc: 0, next: 0.5 };
@@ -50,6 +58,23 @@ function localPrecip(world: World, bx: number, by: number, bz: number): Precip {
     precipCache.snowline = t.snowlineAt(bx, bz);
   }
   return precipForBiome(precipCache.biome, by, precipCache.snowline);
+}
+
+/** 从头部向上扫描 24 格是否有不透明遮挡 */
+function hasCeilingAbove(world: World, bx: number, by: number, bz: number): boolean {
+  for (let y = 1; y <= 24; y++) {
+    const b = world.getBlock(bx, by + y, bz);
+    if (BLOCKS[b]?.opaque) return true;
+  }
+  return false;
+}
+
+/** 应用雨声目标状态（''=静音 / rain / thunder / snow）：startRain/stopRain 均幂等 */
+function applyAudio(audioRef: { current: string }, want: string) {
+  if (audioRef.current === want) return;
+  audioRef.current = want;
+  if (want === '') stopRain();
+  else startRain(want === 'thunder' ? 1.5 : want === 'snow' ? 0.15 : 1); // 雷暴略响，雪天极轻
 }
 
 /** 推一朵雨点落地溅射：相机周围随机水平位置，自上而下找首个裸露表面（实心块或水面——屋檐下/洞穴内的位置
@@ -83,18 +108,11 @@ export function Rain() {
   useFrame(({ camera }, delta) => {
     const lines = ref.current;
     if (!lines) return;
-    /** 雨声目标状态（''=静音 / rain / thunder / snow）：startRain、stopRain 均幂等 */
-    const applyAudio = (want: string) => {
-      if (audioRef.current === want) return;
-      audioRef.current = want;
-      if (want === '') stopRain();
-      else startRain(want === 'thunder' ? 1.5 : want === 'snow' ? 0.15 : 1); // 雷暴略响，雪天极轻
-    };
     const raining = weather.kind !== 'clear';
     if (!raining) {
       lines.visible = false;
       rainState.seeded = false;
-      applyAudio('');
+      applyAudio(audioRef, '');
       return;
     }
     const world = getActiveWorld();
@@ -106,33 +124,43 @@ export function Rain() {
     if (precip === 'none') {
       lines.visible = false;
       rainState.seeded = false;
-      applyAudio('');
+      applyAudio(audioRef, '');
       return;
     }
     const snow = precip === 'snow';
     if (world) {
-      const head = world.getBlock(Math.floor(cx), Math.floor(cy), Math.floor(cz));
+      const headBx = Math.floor(cx);
+      const headBy = Math.floor(cy);
+      const headBz = Math.floor(cz);
+      const head = world.getBlock(headBx, headBy, headBz);
       if (isWaterId(head) || isLavaId(head)) {
         lines.visible = false;
-        applyAudio(''); // 头入水/岩浆：雨声隔断
+        applyAudio(audioRef, ''); // 头入水/岩浆：雨声隔断
         return;
       }
       // 头顶 24 格内有不透明遮挡（洞穴/屋内）则看不到雨（但仍闻雨声，MC 屋内听雨观感，不动 audioRef）
-      for (let y = 1; y <= 24; y++) {
-        const b = world.getBlock(Math.floor(cx), Math.floor(cy) + y, Math.floor(cz));
-        if (BLOCKS[b]?.opaque) {
-          lines.visible = false;
-          return;
-        }
+      if (ceilingCache.x !== headBx || ceilingCache.y !== headBy || ceilingCache.z !== headBz) {
+        ceilingCache.x = headBx;
+        ceilingCache.y = headBy;
+        ceilingCache.z = headBz;
+        ceilingCache.has = hasCeilingAbove(world, headBx, headBy, headBz);
+      }
+      if (ceilingCache.has) {
+        lines.visible = false;
+        return;
       }
     }
     lines.visible = true;
-    applyAudio(snow ? 'snow' : weather.kind);
+    applyAudio(audioRef, snow ? 'snow' : weather.kind);
 
     const count = weather.kind === 'thunder' ? MAX_DROPS : RAIN_DROPS;
-    // 雪：白色、更慢、更短（雪片观感），横向飘移
-    rainMat.color.set(snow ? '#eef4fb' : '#8fb3d9');
-    rainMat.opacity = snow ? 0.8 : weather.kind === 'thunder' ? 0.6 : 0.45;
+    // 雪：白色、更慢、更短（雪片观感），横向飘移；仅在变化时更新材质属性
+    if (matState.snow !== snow || matState.kind !== weather.kind) {
+      matState.snow = snow;
+      matState.kind = weather.kind;
+      rainMat.color.set(snow ? '#eef4fb' : '#8fb3d9');
+      rainMat.opacity = snow ? 0.8 : weather.kind === 'thunder' ? 0.6 : 0.45;
+    }
     const streak = snow ? 0.08 : STREAK;
     const dt = Math.min(delta, 0.05);
     // 雨点落地溅射：间歇推一朵（雪天不做）；头顶遮挡/水下已在上面 return，走到这里必然露天见雨
@@ -152,14 +180,19 @@ export function Rain() {
         drops[i * 4 + 1] = cy - BOTTOM + Math.random() * (TOP + BOTTOM);
         drops[i * 4 + 2] = cz + (Math.random() * 2 - 1) * RADIUS;
         drops[i * 4 + 3] = snow ? 2.5 + Math.random() * 1.5 : 18 + Math.random() * 6;
+        // 预存雪花相位（复刻原 Math.sin(t * 1.5 + i) 的偏移）
+        snowPhaseCos[i] = Math.cos(i);
+        snowPhaseSin[i] = Math.sin(i);
       }
     }
     const t = performance.now() / 1000;
+    const sinT = Math.sin(t * 1.5);
+    const cosT = Math.cos(t * 1.5);
     // 只推进/写当前密度的滴（普通雨 450，雷暴 900）；其余滴由 drawRange 截断不绘制，也不再逐帧写顶点
     for (let i = 0; i < count; i++) {
       const di = i * 4;
       drops[di + 1] -= drops[di + 3] * dt;
-      if (snow) drops[di] += Math.sin(t * 1.5 + i) * 0.35 * dt; // 雪片横向飘移
+      if (snow) drops[di] += (sinT * snowPhaseCos[i] + cosT * snowPhaseSin[i]) * 0.35 * dt; // 雪片横向飘移：线性组合替代逐滴 sin
       // 回收：落出下界或偏离相机过远
       const dx = drops[di] - cx;
       const dz = drops[di + 2] - cz;

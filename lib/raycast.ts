@@ -24,6 +24,8 @@ export function raycastBlock(
   maxDist: number,
   /** 是否命中流体（水/岩浆）。默认 false：挖掘/放置穿过流体；装水等场景传 true */
   includeFluid = false,
+  /** 可选输出对象。传入时函数原地写入 block/face 并返回本对象，避免每帧分配；不传时行为与旧 API 一致 */
+  out?: RaycastHit,
 ): RaycastHit | null {
   const len = Math.hypot(dx, dy, dz);
   if (len === 0) return null;
@@ -60,6 +62,15 @@ export function raycastBlock(
     // 可命中的方块：实心、cross（花草/火把）、非实心薄片（雪层/红石粉/压力板——MC 均可挖掘）；includeFluid 时还可命中流体（装水）
     const def = BLOCKS[id];
     if (id !== AIR && def && (def.solid || def.shape === 'cross' || (def.shape === 'slab' && def.digTime !== undefined) || (includeFluid && def.fluid))) {
+      if (out) {
+        out.block[0] = x;
+        out.block[1] = y;
+        out.block[2] = z;
+        out.face[0] = faceScratch[0];
+        out.face[1] = faceScratch[1];
+        out.face[2] = faceScratch[2];
+        return out;
+      }
       return { block: [x, y, z], face: [faceScratch[0], faceScratch[1], faceScratch[2]] };
     }
     if (tMaxX < tMaxY && tMaxX < tMaxZ) {

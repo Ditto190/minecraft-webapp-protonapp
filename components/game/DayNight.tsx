@@ -166,6 +166,18 @@ const boltGeom = new BoxGeometry(0.22, 1, 0.22);
 const boltMat = new MeshBasicMaterial({ color: '#f4f8ff', transparent: true, blending: AdditiveBlending, depthWrite: false, fog: false });
 const boltSegDir = new Vector3();
 const boltUp = new Vector3(0, 1, 0);
+/** 闪电段 mesh 池：复用而非每帧 new Mesh，按当前总段数扩容，bolt 消失时隐藏多余段 */
+const boltSegmentPool: Mesh[] = [];
+
+function getBoltSegment(group: Group, index: number): Mesh {
+  let seg = boltSegmentPool[index];
+  if (!seg) {
+    seg = new Mesh(boltGeom, boltMat);
+    boltSegmentPool[index] = seg;
+  }
+  if (seg.parent !== group) group.add(seg);
+  return seg;
+}
 
 /** 闪电 bolt 渲染：白色竖直分段折线（细长方体段，加法混合），存活 ~0.2s 淡出；数据来自 lib/lightning.ts */
 function LightningBolts() {
@@ -173,8 +185,8 @@ function LightningBolts() {
   useFrame(() => {
     const g = groupRef.current;
     if (!g) return;
-    g.clear();
     let strongest = 0;
+    let segIndex = 0;
     for (const bolt of bolts) {
       strongest = Math.max(strongest, bolt.ttl);
       for (let i = 0; i < bolt.points.length - 1; i++) {
@@ -183,16 +195,28 @@ function LightningBolts() {
         boltSegDir.set(b.x - a.x, b.y - a.y, b.z - a.z);
         const len = boltSegDir.length();
         if (len < 0.01) continue;
-        const seg = new Mesh(boltGeom, boltMat);
+        const seg = getBoltSegment(g, segIndex++);
         seg.position.set((a.x + b.x) / 2, (a.y + b.y) / 2, (a.z + b.z) / 2);
         seg.scale.set(1, len, 1);
-        seg.quaternion.setFromUnitVectors(boltUp, boltSegDir.normalize());
-        g.add(seg);
+        boltSegDir.multiplyScalar(1 / len);
+        seg.quaternion.setFromUnitVectors(boltUp, boltSegDir);
+        seg.visible = true;
       }
     }
-    g.visible = bolts.length > 0;
+    // 隐藏池里当前未使用的段（bolt 消失时移除视觉，而非销毁 mesh）
+    for (let i = segIndex; i < boltSegmentPool.length; i++) {
+      boltSegmentPool[i].visible = false;
+    }
+    g.visible = segIndex > 0;
     boltMat.opacity = Math.min(1, (strongest / BOLT_TTL) * 1.2);
   });
+  // 卸载时把池内 mesh 从父级移除并隐藏（几何/材质模块级共享，由 DayNight effect 释放）
+  useEffect(() => () => {
+    for (const seg of boltSegmentPool) {
+      seg.removeFromParent();
+      seg.visible = false;
+    }
+  }, []);
   return <group ref={groupRef} />;
 }
 
