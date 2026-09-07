@@ -30,12 +30,19 @@ function loadSettings(): Settings {
   }
 }
 
+/** 落盘防抖定时器（拖拽滑块 60Hz 触发 updateSettings，store 即时更新，仅落盘合并到 ~300ms 一次） */
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+
 function saveSettings(s: Settings): void {
-  try {
-    window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
-  } catch {
-    // 隐私模式等场景下写入失败，忽略
-  }
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    saveTimer = null;
+    try {
+      window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(s));
+    } catch {
+      // 隐私模式等场景下写入失败，忽略
+    }
+  }, 300);
 }
 
 export interface SettingsSlice {

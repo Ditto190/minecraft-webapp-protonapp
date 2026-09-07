@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import { memo, useEffect, useRef, useState, type KeyboardEvent } from 'react';
 import { eatState } from '@/lib/actions';
 import { attackState, bossState, debugInfo, eatFeedback, survivalStats } from '@/lib/game';
 import { clearMobs } from '@/lib/mobs';
@@ -256,20 +256,8 @@ function AirBubbles() {
   );
 }
 
-/** 生存模式护甲 + 血条 + 饥饿条（护甲条在上，与 MC 一致；置于热键栏簇内最上方） */
-function SurvivalBars() {
-  const health = useGameStore((s) => s.health);
-  const hunger = useGameStore((s) => s.hunger);
-  const saturation = useGameStore((s) => s.saturation);
-  const lastDamageAt = useGameStore((s) => s.lastDamageAt);
-  const xpTotal = useGameStore((s) => s.xpTotal);
-  const armor = useGameStore((s) => armorPoints(s.armorSlots));
-  const [, setTick] = useState(0);
-  // 药水效果倒计时徽章（1s 刷新）
-  useEffect(() => {
-    const t = setInterval(() => setTick((n) => n + 1), 1000);
-    return () => clearInterval(t);
-  }, []);
+/** 当前生效的药水效果列表（[显示名, 剩余秒]） */
+function activeEffects(): [string, number][] {
   const active: [string, number][] = [];
   if (effects.speed > 0) active.push(['迅捷', effects.speed]);
   if (effects.strength > 0) active.push(['力量', effects.strength]);
@@ -281,17 +269,56 @@ function SurvivalBars() {
   if (effects.jumpBoost > 0) active.push(['跳跃', effects.jumpBoost]);
   if (effects.levitation > 0) active.push(['漂浮', effects.levitation]);
   if (effects.hunger > 0) active.push(['饥饿', effects.hunger]);
+  return active;
+}
+
+/** 效果签名：名称 + 剩余整秒，与徽章显示值一一对应（签名变 = 显示变） */
+function effectsSignature(): string {
+  return activeEffects()
+    .map(([n, s]) => `${n}${Math.floor(s)}`)
+    .join('|');
+}
+
+/** 药水效果倒计时徽章：1s 轮询效果签名，变了才重渲（无效果时零渲染，与 BossBar/AirBubbles 同模式） */
+function EffectBadges() {
+  const [, setTick] = useState(0);
+  /** 上次渲染的效果签名 */
+  const last = useRef('');
+  useEffect(() => {
+    const t = setInterval(() => {
+      const sig = effectsSignature();
+      if (sig !== last.current) {
+        last.current = sig;
+        setTick((n) => n + 1);
+      }
+    }, 1000);
+    return () => clearInterval(t);
+  }, []);
+  const active = activeEffects();
+  if (active.length === 0) return null;
+  return (
+    <div className="flex justify-center gap-1.5">
+      {active.map(([name, sec]) => (
+        <span key={name} className="rounded bg-purple-700/80 px-1.5 py-0.5 text-[10px] text-white">
+          {name} {Math.floor(sec / 60)}:{String(Math.floor(sec % 60)).padStart(2, '0')}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** 生存模式护甲 + 血条 + 饥饿条（护甲条在上，与 MC 一致；置于热键栏簇内最上方）。
+ *  memo：热键栏簇因背包/选槽高频重渲时，血条簇只随自身订阅字段（health/hunger/xp 等）更新 */
+const SurvivalBars = memo(function SurvivalBars() {
+  const health = useGameStore((s) => s.health);
+  const hunger = useGameStore((s) => s.hunger);
+  const saturation = useGameStore((s) => s.saturation);
+  const lastDamageAt = useGameStore((s) => s.lastDamageAt);
+  const xpTotal = useGameStore((s) => s.xpTotal);
+  const armor = useGameStore((s) => armorPoints(s.armorSlots));
   return (
     <div className="w-full space-y-1 pb-0.5">
-      {active.length > 0 && (
-        <div className="flex justify-center gap-1.5">
-          {active.map(([name, sec]) => (
-            <span key={name} className="rounded bg-purple-700/80 px-1.5 py-0.5 text-[10px] text-white">
-              {name} {Math.floor(sec / 60)}:{String(Math.floor(sec % 60)).padStart(2, '0')}
-            </span>
-          ))}
-        </div>
-      )}
+      <EffectBadges />
       {armor > 0 && <Meter value={armor * 2} kind="armor" />}
       {(() => {
         const { level, progress } = levelFromXp(xpTotal);
@@ -319,7 +346,7 @@ function SurvivalBars() {
       </div>
     </div>
   );
-}
+});
 
 /** 竖屏触屏提示条：建议横屏游玩（仅触屏 + 竖屏显示，可关闭，不持久化） */
 function PortraitHint() {
@@ -489,20 +516,91 @@ function BossBar() {
   );
 }
 
+/** 热键栏簇：血条簇 + 选中名 + 9 格 + 合成/选块按钮。自订阅 selectedSlot/hotbarSlots 等高频字段并 memo，
+ *  放置/拾取/进食只重渲本簇，不波及 Hud 壳与其余对话框/触屏层 */
+const HotbarCluster = memo(function HotbarCluster() {
+  const selectedSlot = useGameStore((s) => s.selectedSlot);
+  const hotbarSlots = useGameStore((s) => s.hotbarSlots);
+  const flying = useGameStore((s) => s.flying);
+  const touchMode = useGameStore((s) => s.touchMode);
+  const worldMode = useGameStore((s) => s.worldMode);
+  const setSlot = useGameStore((s) => s.setSlot);
+  const setCraftingOpen = useGameStore((s) => s.setCraftingOpen);
+
+  // 当前选中项名称（创造/生存同一套槽位：方块/材料/工具/装备）
+  const heldSlot = hotbarSlots[selectedSlot];
+  const selectedName = heldSlot ? slotName(heldSlot) : '空手';
+
+  return (
+    <div className="pointer-events-auto absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 flex-col items-center gap-1">
+      {worldMode === 'survival' && <SurvivalBars />}
+      <div className="text-center text-sm text-white drop-shadow-md">
+        {selectedName}
+        {flying ? ' · 飞行中' : ''}
+      </div>
+      <div className="relative p-1">
+        {/* MC 热键栏：hotbar.png 纹理背景（Faithful），格子图标叠加，选中格 hotbar_selection 框 */}
+        <img src={withBase('/textures/gui/hud/hotbar.png')} alt="" draggable={false} className="pointer-events-none absolute inset-0 h-full w-full select-none [image-rendering:pixelated]" />
+        <div className="relative flex gap-1">
+          {hotbarSlots.map((slot, i) => (
+            <SurvivalCell key={i} index={i} slot={slot} active={i === selectedSlot} onClick={() => setSlot(i)} />
+          ))}
+        </div>
+      </div>
+      {worldMode === 'creative' ? (
+        <div className="mt-1 text-center">
+          <button
+            onClick={() => useGameStore.getState().setPickerOpen(true)}
+            className={`rounded bg-black/50 text-white/80 hover:bg-black/70 ${touchMode ? 'px-4 py-2.5 text-sm' : 'px-2 py-0.5 text-xs'}`}
+          >
+            选块 (E)
+          </button>
+        </div>
+      ) : (
+        <div className="mt-1 text-center">
+          <button
+            onClick={() => setCraftingOpen(true, false)}
+            className={`rounded bg-black/50 text-white/80 hover:bg-black/70 ${touchMode ? 'px-4 py-2.5 text-sm' : 'px-2 py-0.5 text-xs'}`}
+          >
+            合成 (E)
+          </button>
+        </div>
+      )}
+    </div>
+  );
+});
+
+/** 受击红屏闪烁：动画播完（onAnimationEnd；600ms 兜底防动画未触发）即卸载，不再常驻 DOM */
+function HurtOverlay() {
+  const lastDamageAt = useGameStore((s) => s.lastDamageAt);
+  /** 已播完卸载的受击时间戳（lastDamageAt 恒 >0，靠它判定本次闪烁是否已结束） */
+  const [dismissed, setDismissed] = useState(0);
+  const visible = lastDamageAt > dismissed;
+  useEffect(() => {
+    if (!visible) return;
+    // 600ms 兜底：onAnimationEnd 未触发（如系统减弱动态效果）时也卸载
+    const t = setTimeout(() => setDismissed(lastDamageAt), 600);
+    return () => clearTimeout(t);
+  }, [visible, lastDamageAt]);
+  if (!visible) return null;
+  return (
+    <div
+      key={lastDamageAt}
+      className="absolute inset-0 z-20 bg-red-600"
+      style={{ animation: 'hurt-flash 0.5s ease-out forwards' }}
+      onAnimationEnd={() => setDismissed(lastDamageAt)}
+    />
+  );
+}
+
 /** DOM 覆盖层：准星、热键栏、血条、暂停/死亡遮罩 */
 export function Hud() {
-  const selectedSlot = useGameStore((s) => s.selectedSlot);
-  const flying = useGameStore((s) => s.flying);
   const paused = useGameStore((s) => s.paused);
   const debug = useGameStore((s) => s.debug);
   const hudHidden = useGameStore((s) => s.hudHidden);
   const touchMode = useGameStore((s) => s.touchMode);
   const worldMode = useGameStore((s) => s.worldMode);
   const dead = useGameStore((s) => s.dead);
-  const lastDamageAt = useGameStore((s) => s.lastDamageAt);
-  const hotbarSlots = useGameStore((s) => s.hotbarSlots);
-  const setSlot = useGameStore((s) => s.setSlot);
-  const setCraftingOpen = useGameStore((s) => s.setCraftingOpen);
   const panelOpen = useGameStore(anyPanelOpen);
 
   // F1 切换 HUD 显隐（Java 截图模式：热键栏/血条/准星/调试面板等全隐，GUI 面板不受影响；会话内状态不持久化）
@@ -517,10 +615,6 @@ export function Hud() {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []);
-
-  // 当前选中项名称（创造/生存同一套槽位：方块/材料/工具/装备）
-  const heldSlot = hotbarSlots[selectedSlot];
-  const selectedName = heldSlot ? slotName(heldSlot) : '空手';
 
   return (
     <div className="pointer-events-none absolute inset-0 z-10 select-none">
@@ -551,53 +645,11 @@ export function Hud() {
 
       {!hudHidden && <Notice />}
 
-      {/* 热键栏（可点选，移动端小屏缩小；创造=固定面板，生存=槽位背包；生存时血量饥饿置顶） */}
-      {!hudHidden && (
-      <div className="pointer-events-auto absolute bottom-3 left-1/2 z-20 flex -translate-x-1/2 flex-col items-center gap-1">
-        {worldMode === 'survival' && <SurvivalBars />}
-        <div className="text-center text-sm text-white drop-shadow-md">
-          {selectedName}
-          {flying ? ' · 飞行中' : ''}
-        </div>
-        <div className="relative p-1">
-          {/* MC 热键栏：hotbar.png 纹理背景（Faithful），格子图标叠加，选中格 hotbar_selection 框 */}
-          <img src={withBase('/textures/gui/hud/hotbar.png')} alt="" draggable={false} className="pointer-events-none absolute inset-0 h-full w-full select-none [image-rendering:pixelated]" />
-          <div className="relative flex gap-1">
-            {hotbarSlots.map((slot, i) => (
-              <SurvivalCell key={i} index={i} slot={slot} active={i === selectedSlot} onClick={() => setSlot(i)} />
-            ))}
-          </div>
-        </div>
-        {worldMode === 'creative' ? (
-          <div className="mt-1 text-center">
-            <button
-              onClick={() => useGameStore.getState().setPickerOpen(true)}
-              className={`rounded bg-black/50 text-white/80 hover:bg-black/70 ${touchMode ? 'px-4 py-2.5 text-sm' : 'px-2 py-0.5 text-xs'}`}
-            >
-              选块 (E)
-            </button>
-          </div>
-        ) : (
-          <div className="mt-1 text-center">
-            <button
-              onClick={() => setCraftingOpen(true, false)}
-              className={`rounded bg-black/50 text-white/80 hover:bg-black/70 ${touchMode ? 'px-4 py-2.5 text-sm' : 'px-2 py-0.5 text-xs'}`}
-            >
-              合成 (E)
-            </button>
-          </div>
-        )}
-      </div>
-      )}
+      {/* 热键栏簇（可点选，移动端小屏缩小；创造=固定面板，生存=槽位背包；生存时血量饥饿置顶） */}
+      {!hudHidden && <HotbarCluster />}
 
-      {/* 受击红屏闪烁 */}
-      {lastDamageAt > 0 && (
-        <div
-          key={lastDamageAt}
-          className="absolute inset-0 z-20 bg-red-600"
-          style={{ animation: 'hurt-flash 0.5s ease-out forwards' }}
-        />
-      )}
+      {/* 受击红屏闪烁（动画播完即卸载） */}
+      <HurtOverlay />
 
       {/* 触屏控制层 */}
       {touchMode && !paused && !hudHidden && <TouchControls />}

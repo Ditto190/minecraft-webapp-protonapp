@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { memo, useCallback, useEffect, useRef, useState } from 'react';
 import { useGameStore } from '@/lib/store';
 import {
   Dialog,
@@ -25,7 +25,8 @@ interface SettingRowProps {
   onChange: (v: number) => void;
 }
 
-function SettingRow({ label, display, min, max, step, value, onChange }: SettingRowProps) {
+/** 单个设置滑块行；memo：拖一个滑块时其余行 props 不变（onChange 由 useCallback 稳定）直接跳过 */
+const SettingRow = memo(function SettingRow({ label, display, min, max, step, value, onChange }: SettingRowProps) {
   return (
     <div className="space-y-2">
       <div className="flex items-center justify-between">
@@ -41,7 +42,7 @@ function SettingRow({ label, display, min, max, step, value, onChange }: Setting
       />
     </div>
   );
-}
+});
 
 /** 设置弹窗：音量 / FOV / 渲染距离 / 灵敏度（鼠标+触屏独立） / 反转 Y / 自动跳跃 / 云 / 粒子 / 渲染器 / 贴图包，改动即时生效并存 localStorage */
 export function SettingsDialog() {
@@ -67,6 +68,13 @@ export function SettingsDialog() {
     }
   };
 
+  // 滑块 onChange 稳定引用（updateSettings 为 store 稳定引用）：SettingRow memo 不被内联箭头击穿
+  const onVolume = useCallback((volume: number) => updateSettings({ volume }), [updateSettings]);
+  const onFov = useCallback((fov: number) => updateSettings({ fov }), [updateSettings]);
+  const onRenderDistance = useCallback((renderDistance: number) => updateSettings({ renderDistance }), [updateSettings]);
+  const onSensitivity = useCallback((sensitivity: number) => updateSettings({ sensitivity }), [updateSettings]);
+  const onTouchSensitivity = useCallback((touchSensitivity: number) => updateSettings({ touchSensitivity }), [updateSettings]);
+
   return (
     <Dialog>
       <DialogTrigger render={<McButton className="w-full" />}>
@@ -85,7 +93,7 @@ export function SettingsDialog() {
             max={1}
             step={0.01}
             value={settings.volume}
-            onChange={(volume) => updateSettings({ volume })}
+            onChange={onVolume}
           />
           <SettingRow
             label="视野 (FOV)"
@@ -94,7 +102,7 @@ export function SettingsDialog() {
             max={110}
             step={1}
             value={settings.fov}
-            onChange={(fov) => updateSettings({ fov })}
+            onChange={onFov}
           />
           <SettingRow
             label="渲染距离"
@@ -103,7 +111,7 @@ export function SettingsDialog() {
             max={8}
             step={1}
             value={settings.renderDistance}
-            onChange={(renderDistance) => updateSettings({ renderDistance })}
+            onChange={onRenderDistance}
           />
           <SettingRow
             label="视角灵敏度"
@@ -112,7 +120,7 @@ export function SettingsDialog() {
             max={2}
             step={0.1}
             value={settings.sensitivity}
-            onChange={(sensitivity) => updateSettings({ sensitivity })}
+            onChange={onSensitivity}
           />
           <div className="space-y-2">
             <div className="flex items-center justify-between">
@@ -139,7 +147,7 @@ export function SettingsDialog() {
               max={2}
               step={0.1}
               value={settings.touchSensitivity}
-              onChange={(touchSensitivity) => updateSettings({ touchSensitivity })}
+              onChange={onTouchSensitivity}
             />
             <p className="mt-1 text-xs text-white/60">仅触屏拖动视角生效；鼠标用上面的「视角灵敏度」</p>
           </div>

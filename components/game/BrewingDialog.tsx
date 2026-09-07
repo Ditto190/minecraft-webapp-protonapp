@@ -6,6 +6,26 @@ import { useGameStore } from '@/lib/store';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
 import { AbsSlot, GuiHotbarSlots, GuiMainSlots, McGuiFrame } from './McGui';
 
+/** 酿造进度箭头：250ms 轮询仅重渲本子组件，槽位区（45+ GuiSlot）不随进度刷新 */
+function BrewProgress({ brewKey }: { brewKey: string }) {
+  const [, setTick] = useState(0);
+  // 酿造进度连续变化：打开期间 250ms 刷新（组件随面板卸载，interval 自动停）
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 250);
+    return () => clearInterval(t);
+  }, []);
+  const b = getBrew(brewKey);
+  if (!b) return null;
+  return (
+    <div className="absolute overflow-hidden" style={{ left: 205, top: 32, width: 24, height: 58 }}>
+      <div
+        className="w-full bg-purple-500/70 transition-[height]"
+        style={{ height: `${(b.progress / BREW_TIME) * 100}%` }}
+      />
+    </div>
+  );
+}
+
 /** 酿造台界面（MC Java 光标拖拽）：brewing_stand.png 纹理背景，燃料/材料/三药水槽/背包/热键栏按 MC 坐标 absolute 对齐。
  *  放置约束在 action 层：燃料槽只收烈焰粉、材料槽只收酿造材料、药水槽只收药水（1 个）；
  *  shift 快移：对应物品入对应槽，酿造台槽内物品 shift 取出到背包。 */
@@ -18,14 +38,6 @@ export function BrewingDialog() {
   const slotDragEnter = useGameStore((s) => s.slotDragEnter);
   const slotDoubleClick = useGameStore((s) => s.slotDoubleClick);
   const brewingSlotMouseDown = useGameStore((s) => s.brewingSlotMouseDown);
-  const [, setTick] = useState(0);
-
-  // 酿造进度连续变化：打开时 250ms 刷新（关闭时不启动 interval）
-  useEffect(() => {
-    if (!brewKey) return;
-    const t = setInterval(() => setTick((n) => n + 1), 250);
-    return () => clearInterval(t);
-  }, [brewKey]);
 
   // 关闭时直接不渲染：hooks 已全部调用，顺序稳定
   if (!brewKey) return null;
@@ -55,12 +67,7 @@ export function BrewingDialog() {
               />
             ))}
             {/* 进度箭头区（右上）：按酿造进度叠加 */}
-            <div className="absolute overflow-hidden" style={{ left: 205, top: 32, width: 24, height: 58 }}>
-              <div
-                className="w-full bg-purple-500/70 transition-[height]"
-                style={{ height: `${(b.progress / BREW_TIME) * 100}%` }}
-              />
-            </div>
+            <BrewProgress brewKey={brewKey} />
             <GuiMainSlots
               slots={mainSlots}
               onSlotPress={(i, info) => slotMouseDown('main', i, info)}

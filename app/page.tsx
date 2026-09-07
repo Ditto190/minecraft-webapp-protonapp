@@ -33,7 +33,12 @@ function LoadingOverlay() {
 
   useEffect(() => {
     const timer = setInterval(() => {
-      setProgress({ phase: loadingState.phase, chunks: debugInfo.chunks });
+      // 值没变就返回旧对象：React 跳过重渲（区块计数不变时 250ms 轮询零渲染）
+      setProgress((p) =>
+        p.phase === loadingState.phase && p.chunks === debugInfo.chunks
+          ? p
+          : { phase: loadingState.phase, chunks: debugInfo.chunks },
+      );
     }, 250);
     return () => clearInterval(timer);
   }, []);

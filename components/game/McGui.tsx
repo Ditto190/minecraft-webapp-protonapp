@@ -8,7 +8,7 @@
 // 触屏（pointerType === 'touch'）走 beginTouchPress 延迟判定：快速点按 = 左键、长按 = 右键单发、
 // 按住移动 = 左键 + 拖动分发（触屏 pointer capture 挡住 pointerenter，用 elementFromPoint hit-test 找格）。
 
-import { useEffect, type ReactNode } from 'react';
+import { memo, useCallback, useEffect, useMemo, useRef, type ReactNode } from 'react';
 import { BLOCKS } from '@/lib/blocks';
 import { materialTile } from '@/lib/materials';
 import { withBase } from '@/lib/basepath';
@@ -134,6 +134,24 @@ export function trackSlotHover(area: GuiArea, index: number, hovering: boolean):
   else if (hoverSlot?.area === area && hoverSlot.index === index) hoverSlot = null;
 }
 
+/** 按 index 稳定的回调数组：包装函数只在「有无回调/数量」变化时重建，内部经 ref 转发到最新回调——
+ *  父组件每次渲染新建的内联箭头不再击穿 memo(GuiSlot) */
+export function useIndexedHandlers<A extends unknown[]>(
+  count: number,
+  cb: ((index: number, ...args: A) => void) | undefined,
+): (((...args: A) => void) | undefined)[] {
+  const cbRef = useRef(cb);
+  useEffect(() => {
+    cbRef.current = cb;
+  });
+  const hasCb = cb !== undefined;
+  return useMemo(
+    // 回调本体经 cbRef 转发，不需要作为依赖；只在「有无/数量」变化时重建
+    () => Array.from({ length: count }, (_, i) => (hasCb ? (...args: A) => cbRef.current?.(i, ...args) : undefined)),
+    [count, hasCb],
+  );
+}
+
 /** GUI 框架：container 纹理背景（原始尺寸不拉伸、裁剪面板，mx-auto 屏幕居中），children 放特有槽。
  *  标准面板 352x332（纹理 512x512）；交易台等宽面板用 width/imgW 覆盖（如 villager.png 为 552x332 / 1024x512） */
 export function McGuiFrame({
@@ -218,17 +236,7 @@ function bundleTitle(slot: Slot): string {
 }
 
 /** 通用 absolute 物品格（图标 + 数量 + 点击/光标拖拽），对齐纹理格子 */
-export function GuiSlot({
-  pos,
-  slot,
-  onClick,
-  onPress,
-  onDragEnter,
-  onDoubleClick,
-  onHoverChange,
-  title,
-  disabled,
-}: {
+interface GuiSlotProps {
   pos: [number, number];
   slot: Slot;
   /** 旧式单击（整格操作）；与 onPress 二选一，不要同时传 */
@@ -243,15 +251,35 @@ export function GuiSlot({
   onHoverChange?: (hovering: boolean) => void;
   title?: string;
   disabled?: boolean;
-}) {
+}
+
+function GuiSlotInner({
+  pos,
+  slot,
+  onClick,
+  onPress,
+  onDragEnter,
+  onDoubleClick,
+  onHoverChange,
+  title,
+  disabled,
+}: GuiSlotProps) {
   const tile = slotTile(slot);
   /** 工具/装备耐久比例（其余 null 不显示耐久条） */
   const pct = slotDurabilityPct(slot);
   /** 收纳袋占用比例（非袋 null；有内容时显示袋满度条） */
   const bundlePct = isBundleSlot(slot) ? bundleUsed(slot) / BUNDLE_CAPACITY : null;
+  /** 最新 onDragEnter（ref 回调保持稳定引用，经这里转发；ref 是 prop，内联回调会击穿 memo） */
+  const dragEnterRef = useRef(onDragEnter);
+  useEffect(() => {
+    dragEnterRef.current = onDragEnter;
+  });
+  const registerEl = useCallback((el: HTMLButtonElement | null) => {
+    if (el) dragEnterByEl.set(el, () => dragEnterRef.current?.());
+  }, []);
   return (
     <button
-      ref={onDragEnter ? (el) => { if (el) dragEnterByEl.set(el, onDragEnter); } : undefined}
+      ref={onDragEnter ? registerEl : undefined}
       data-mc-slot={onDragEnter ? '' : undefined}
       onClick={onClick}
       onPointerDown={onPress ? (e) => slotPointerDown(e, onPress) : undefined}
@@ -287,6 +315,25 @@ export function GuiSlot({
     </button>
   );
 }
+
+/** pos 按坐标值比较（调用方内联数组字面量每次渲染换引用），slot/回调按引用比较（回调由 useIndexedHandlers 稳定） */
+function guiSlotPropsEqual(a: GuiSlotProps, b: GuiSlotProps): boolean {
+  return (
+    a.pos[0] === b.pos[0] &&
+    a.pos[1] === b.pos[1] &&
+    a.slot === b.slot &&
+    a.onClick === b.onClick &&
+    a.onPress === b.onPress &&
+    a.onDragEnter === b.onDragEnter &&
+    a.onDoubleClick === b.onDoubleClick &&
+    a.onHoverChange === b.onHoverChange &&
+    a.title === b.title &&
+    a.disabled === b.disabled
+  );
+}
+
+/** 通用 absolute 物品格（图标 + 数量 + 点击/光标拖拽），对齐纹理格子；memo：父面板重渲时未变化的格子跳过 */
+export const GuiSlot = memo(GuiSlotInner, guiSlotPropsEqual);
 
 /** 材料名 → tile（兼容 'block:X' / 'material:X' 前缀与裸材料名） */
 function stackTile(item: string): number {
@@ -342,6 +389,12 @@ export function GuiMainSlots({
   onSlotDragEnter?: (index: number) => void;
   onSlotDoubleClick?: (index: number) => void;
 }) {
+  // 回调按 index 稳定（useIndexedHandlers 转发最新引用），memo(GuiSlot) 才可跳过未变格
+  const clickFns = useIndexedHandlers<[]>(slots.length, onSlotClick);
+  const pressFns = useIndexedHandlers<[SlotPress]>(slots.length, onSlotPress);
+  const dragFns = useIndexedHandlers<[]>(slots.length, onSlotDragEnter);
+  const dblFns = useIndexedHandlers<[]>(slots.length, onSlotDoubleClick);
+  const hoverFns = useIndexedHandlers<[boolean]>(slots.length, (i, h) => trackSlotHover('main', i, h));
   return (
     <>
       {slots.map((slot, i) => (
@@ -349,11 +402,11 @@ export function GuiMainSlots({
           key={i}
           pos={[invX(i), invY(i)]}
           slot={slot}
-          onClick={onSlotClick ? () => onSlotClick(i) : undefined}
-          onPress={onSlotPress ? (info) => onSlotPress(i, info) : undefined}
-          onDragEnter={onSlotDragEnter ? () => onSlotDragEnter(i) : undefined}
-          onDoubleClick={onSlotDoubleClick ? () => onSlotDoubleClick(i) : undefined}
-          onHoverChange={(h) => trackSlotHover('main', i, h)}
+          onClick={clickFns[i]}
+          onPress={pressFns[i]}
+          onDragEnter={dragFns[i]}
+          onDoubleClick={dblFns[i]}
+          onHoverChange={hoverFns[i]}
         />
       ))}
     </>
@@ -374,6 +427,11 @@ export function GuiHotbarSlots({
   onSlotDragEnter?: (index: number) => void;
   onSlotDoubleClick?: (index: number) => void;
 }) {
+  const clickFns = useIndexedHandlers<[]>(slots.length, onSlotClick);
+  const pressFns = useIndexedHandlers<[SlotPress]>(slots.length, onSlotPress);
+  const dragFns = useIndexedHandlers<[]>(slots.length, onSlotDragEnter);
+  const dblFns = useIndexedHandlers<[]>(slots.length, onSlotDoubleClick);
+  const hoverFns = useIndexedHandlers<[boolean]>(slots.length, (i, h) => trackSlotHover('hotbar', i, h));
   return (
     <>
       {slots.map((slot, i) => (
@@ -381,11 +439,11 @@ export function GuiHotbarSlots({
           key={i}
           pos={[hotX(i), HOT_Y]}
           slot={slot}
-          onClick={onSlotClick ? () => onSlotClick(i) : undefined}
-          onPress={onSlotPress ? (info) => onSlotPress(i, info) : undefined}
-          onDragEnter={onSlotDragEnter ? () => onSlotDragEnter(i) : undefined}
-          onDoubleClick={onSlotDoubleClick ? () => onSlotDoubleClick(i) : undefined}
-          onHoverChange={(h) => trackSlotHover('hotbar', i, h)}
+          onClick={clickFns[i]}
+          onPress={pressFns[i]}
+          onDragEnter={dragFns[i]}
+          onDoubleClick={dblFns[i]}
+          onHoverChange={hoverFns[i]}
         />
       ))}
     </>

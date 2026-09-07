@@ -14,6 +14,30 @@ const SLOT_OUTPUT: [number, number] = [232, 70];
 const ARROW: [number, number, number, number] = [158, 68, 44, 34];
 const FLAME: [number, number, number, number] = [112, 74, 28, 28];
 
+/** 烧炼进度箭头 + 火焰：250ms 轮询仅重渲本子组件，槽位区（45+ GuiSlot）不随进度刷新 */
+function FurnaceProgress({ furnaceKey }: { furnaceKey: string }) {
+  const [, setTick] = useState(0);
+  // 烧炼进度连续变化：打开期间 250ms 刷新（组件随面板卸载，interval 自动停）
+  useEffect(() => {
+    const t = setInterval(() => setTick((n) => n + 1), 250);
+    return () => clearInterval(t);
+  }, []);
+  const f = getFurnace(furnaceKey);
+  if (!f) return null;
+  return (
+    <>
+      {/* 进度箭头区：按烧炼进度叠加 */}
+      <div className="absolute overflow-hidden" style={{ left: ARROW[0], top: ARROW[1], width: ARROW[2], height: ARROW[3] }}>
+        <div className="h-full bg-white/60 transition-[width]" style={{ width: `${(f.progress / SMELT_TIME) * 100}%` }} />
+      </div>
+      {/* 火焰区：燃料燃烧中 */}
+      {f.burnLeft > 0 && (
+        <div className="absolute rounded-sm bg-orange-500/60" style={{ left: FLAME[0], top: FLAME[1], width: FLAME[2], height: FLAME[3] }} />
+      )}
+    </>
+  );
+}
+
 /** 熔炉界面（MC Java 光标拖拽）：输入/燃料槽可放可取（仅方块/材料，工具/装备拒绝），
  *  产出槽只能取（左键全取/右键取 1 到光标，shift 直接入背包并结算烧炼经验）；
  *  背包/热键栏 shift 快移：可烧炼物→输入槽、燃料→燃料槽（双重身份优先进燃料槽）。
@@ -27,14 +51,6 @@ export function FurnaceDialog() {
   const slotDragEnter = useGameStore((s) => s.slotDragEnter);
   const slotDoubleClick = useGameStore((s) => s.slotDoubleClick);
   const furnaceSlotMouseDown = useGameStore((s) => s.furnaceSlotMouseDown);
-  const [, setTick] = useState(0);
-
-  // 烧炼进度连续变化：打开时 250ms 刷新（关闭时不启动 interval）
-  useEffect(() => {
-    if (!furnaceKey) return;
-    const t = setInterval(() => setTick((n) => n + 1), 250);
-    return () => clearInterval(t);
-  }, [furnaceKey]);
 
   // 关闭时直接不渲染：hooks 已全部调用，顺序稳定
   if (!furnaceKey) return null;
@@ -53,14 +69,7 @@ export function FurnaceDialog() {
             <AbsSlot pos={SLOT_INPUT} stack={f.input} onPress={(info) => furnaceSlotMouseDown('input', info)} />
             <AbsSlot pos={SLOT_FUEL} stack={f.fuel} onPress={(info) => furnaceSlotMouseDown('fuel', info)} />
             <AbsSlot pos={SLOT_OUTPUT} stack={f.output} onPress={(info) => furnaceSlotMouseDown('output', info)} />
-            {/* 进度箭头区：按烧炼进度叠加 */}
-            <div className="absolute overflow-hidden" style={{ left: ARROW[0], top: ARROW[1], width: ARROW[2], height: ARROW[3] }}>
-              <div className="h-full bg-white/60 transition-[width]" style={{ width: `${(f.progress / SMELT_TIME) * 100}%` }} />
-            </div>
-            {/* 火焰区：燃料燃烧中 */}
-            {f.burnLeft > 0 && (
-              <div className="absolute rounded-sm bg-orange-500/60" style={{ left: FLAME[0], top: FLAME[1], width: FLAME[2], height: FLAME[3] }} />
-            )}
+            <FurnaceProgress furnaceKey={furnaceKey} />
             <GuiMainSlots
               slots={mainSlots}
               onSlotPress={(i, info) => slotMouseDown('main', i, info)}

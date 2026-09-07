@@ -1,9 +1,9 @@
 'use client';
 
-import { getStorage } from '@/lib/storage';
+import { getStorage, STORAGE_SIZE } from '@/lib/storage';
 import { useGameStore } from '@/lib/store';
 import { Dialog, DialogContent } from '@/components/ui/dialog';
-import { GuiSlot, McGuiFrame, trackSlotHover } from './McGui';
+import { GuiSlot, McGuiFrame, trackSlotHover, useIndexedHandlers, type SlotPress } from './McGui';
 
 /** 容器界面（箱子/木桶）：27 格容器 + 27 背包 + 9 热键栏。
  *  MC Java 光标拖拽：左键拿放/合并/交换，右键半取/单放，shift 快移（容器↔背包/热键栏），
@@ -18,6 +18,21 @@ export function StorageDialog() {
   const slotDoubleClick = useGameStore((s) => s.slotDoubleClick);
   // 容器内容（lib/storage storages map）变化不走 zustand 字段：guiTick 计数驱动重渲染
   useGameStore((s) => s.guiTick);
+
+  // 回调按 index 稳定（useIndexedHandlers 转发最新引用）：guiTick 驱动整面板重渲时，
+  // memo(GuiSlot) 靠 slot 引用 + 稳定回调跳过未变化的 63 格中的绝大多数
+  const storagePress = useIndexedHandlers<[SlotPress]>(STORAGE_SIZE, (i, info) => slotMouseDown('storage', i, info));
+  const storageDrag = useIndexedHandlers<[]>(STORAGE_SIZE, (i) => slotDragEnter('storage', i));
+  const storageDbl = useIndexedHandlers<[]>(STORAGE_SIZE, (i) => slotDoubleClick('storage', i));
+  const storageHover = useIndexedHandlers<[boolean]>(STORAGE_SIZE, (i, h) => trackSlotHover('storage', i, h));
+  const mainPress = useIndexedHandlers<[SlotPress]>(mainSlots.length, (i, info) => slotMouseDown('main', i, info));
+  const mainDrag = useIndexedHandlers<[]>(mainSlots.length, (i) => slotDragEnter('main', i));
+  const mainDbl = useIndexedHandlers<[]>(mainSlots.length, (i) => slotDoubleClick('main', i));
+  const mainHover = useIndexedHandlers<[boolean]>(mainSlots.length, (i, h) => trackSlotHover('main', i, h));
+  const hotbarPress = useIndexedHandlers<[SlotPress]>(hotbarSlots.length, (i, info) => slotMouseDown('hotbar', i, info));
+  const hotbarDrag = useIndexedHandlers<[]>(hotbarSlots.length, (i) => slotDragEnter('hotbar', i));
+  const hotbarDbl = useIndexedHandlers<[]>(hotbarSlots.length, (i) => slotDoubleClick('hotbar', i));
+  const hotbarHover = useIndexedHandlers<[boolean]>(hotbarSlots.length, (i, h) => trackSlotHover('hotbar', i, h));
 
   if (!storageKey) return null;
   const storage = getStorage(storageKey);
@@ -37,10 +52,10 @@ export function StorageDialog() {
               key={'c' + i}
               pos={[16 + (i % 9) * 36, 34 + Math.floor(i / 9) * 36]}
               slot={slot}
-              onPress={(info) => slotMouseDown('storage', i, info)}
-              onDragEnter={() => slotDragEnter('storage', i)}
-              onDoubleClick={() => slotDoubleClick('storage', i)}
-              onHoverChange={(h) => trackSlotHover('storage', i, h)}
+              onPress={storagePress[i]}
+              onDragEnter={storageDrag[i]}
+              onDoubleClick={storageDbl[i]}
+              onHoverChange={storageHover[i]}
             />
           ))}
           {mainSlots.map((slot, i) => (
@@ -48,10 +63,10 @@ export function StorageDialog() {
               key={'m' + i}
               pos={[16 + (i % 9) * 36, 166 + Math.floor(i / 9) * 36]}
               slot={slot}
-              onPress={(info) => slotMouseDown('main', i, info)}
-              onDragEnter={() => slotDragEnter('main', i)}
-              onDoubleClick={() => slotDoubleClick('main', i)}
-              onHoverChange={(h) => trackSlotHover('main', i, h)}
+              onPress={mainPress[i]}
+              onDragEnter={mainDrag[i]}
+              onDoubleClick={mainDbl[i]}
+              onHoverChange={mainHover[i]}
             />
           ))}
           {hotbarSlots.map((slot, i) => (
@@ -59,10 +74,10 @@ export function StorageDialog() {
               key={'h' + i}
               pos={[16 + i * 36, 282]}
               slot={slot}
-              onPress={(info) => slotMouseDown('hotbar', i, info)}
-              onDragEnter={() => slotDragEnter('hotbar', i)}
-              onDoubleClick={() => slotDoubleClick('hotbar', i)}
-              onHoverChange={(h) => trackSlotHover('hotbar', i, h)}
+              onPress={hotbarPress[i]}
+              onDragEnter={hotbarDrag[i]}
+              onDoubleClick={hotbarDbl[i]}
+              onHoverChange={hotbarHover[i]}
             />
           ))}
         </McGuiFrame>
