@@ -155,6 +155,22 @@ describe('柱状植物（仙人掌/甘蔗/竹子）', () => {
     expect(w.getBlock(4, 32, 4)).toBe(K('cactus'));
   });
 
+  it('World.growableChunks 集合与 Chunk.growables 同步维护', () => {
+    const w = setup();
+    expect(w.growableChunks.size).toBe(0);
+    w.setBlock(4, 31, 4, K('cactus'));
+    expect(w.growableChunks.has('0,0')).toBe(true);
+    w.setBlock(4, 31, 4, AIR);
+    expect(w.growableChunks.has('0,0')).toBe(false);
+    // 跨 chunk 放置：集合按 chunkKey 分桶
+    w.setBlock(20, 31, 4, K('sugar_cane'));
+    expect(w.growableChunks.has('1,0')).toBe(true);
+    // chunk 卸载后同步从集合移除
+    w.updateAround(-3 * 16, 0, 0, 10_000);
+    expect(w.chunks.has('1,0')).toBe(false);
+    expect(w.growableChunks.has('1,0')).toBe(false);
+  });
+
   it('Chunk.growables 计数：setBlock 增减维护，为 0 的 chunk 被 tickGrowth 整 chunk 跳过', () => {
     const w = setup();
     const c = w.getChunk(0, 0);

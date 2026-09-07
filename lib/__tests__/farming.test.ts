@@ -2,7 +2,7 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 import { breakBlock, tryPlace } from '../actions';
-import { BLOCK_BY_KEY, GRASS, STONE, WHEAT_CROP_0 } from '../blocks';
+import { AIR, BLOCK_BY_KEY, GRASS, STONE, WHEAT_CROP_0 } from '../blocks';
 import { notifyCropBlockSet, tickCrops, trampleFarmland } from '../crops';
 import { cameraRef, setActiveWorld, worldClock } from '../game';
 import { clearDrops, itemDrops } from '../items';
@@ -108,6 +108,25 @@ describe('耕种', () => {
     expect(w.getBlock(4, 31, 4)).toBe(0); // 弹出而非吞掉
     const seeds = itemDrops.filter((d) => d.drop.kind === 'material' && d.drop.material === 'wheat_seeds');
     expect(seeds).toHaveLength(1);
+  });
+
+  it('耕地湿润缓存：放置/移除水源即时更新周围耕地，tickCrops 不再全量扫 9×9×2', () => {
+    const w = setup();
+    w.setBlock(4, 30, 4, BLOCK_BY_KEY.farmland.id);
+    w.setBlock(6, 30, 4, BLOCK_BY_KEY.farmland.id);
+    w.setBlock(4, 31, 4, WHEAT_CROP_0);
+    w.setBlock(6, 31, 4, WHEAT_CROP_0);
+    expect(w.getBlock(4, 30, 4)).toBe(BLOCK_BY_KEY.farmland.id); // 仍干
+    // 放置水源：缓存增量更新，下一 tick 两块都变湿润
+    w.setBlock(5, 30, 4, BLOCK_BY_KEY.water.id);
+    tickCrops(w, 2);
+    expect(w.getBlock(4, 30, 4)).toBe(BLOCK_BY_KEY.farmland_moist.id);
+    expect(w.getBlock(6, 30, 4)).toBe(BLOCK_BY_KEY.farmland_moist.id);
+    // 移除水源：缓存增量更新，耕地重新变干
+    w.setBlock(5, 30, 4, AIR);
+    tickCrops(w, 2);
+    expect(w.getBlock(4, 30, 4)).toBe(BLOCK_BY_KEY.farmland.id);
+    expect(w.getBlock(6, 30, 4)).toBe(BLOCK_BY_KEY.farmland.id);
   });
 
   it('耕地被非透明实心方块压顶 → 变回泥土；透明方块（树叶）压顶不触发', () => {

@@ -61,6 +61,10 @@ export function notifyBlockSet(world: World, x: number, y: number, z: number, ol
   else saplings.delete(k);
   // 树叶被替换/破坏（含爆炸、树干顶穿）：persistent 除名。新树叶由生长/生成写入时不登记——只有玩家放置才登记
   if (!isLeavesId(newId)) placedLeaves.delete(k);
+  // 原木或树叶变化会改变周围叶子的 distance，失效缓存
+  if (isLogId(oldId) || isLogId(newId) || isLeavesId(oldId) || isLeavesId(newId)) {
+    invalidateLeafDistanceCache(x, y, z);
+  }
   if (isLogId(oldId) && !isLogId(newId)) {
     // 原木没了：6 格内（distance 模型最远供养距离）的树叶进入凋零检查队列
     for (let dx = -6; dx <= 6; dx++) {
@@ -98,6 +102,21 @@ export function growTree(world: World, x: number, y: number, z: number, wood: st
 let growAcc = 0;
 const rand = mulberry32(0x9e3779b9);
 
+// ——— 树叶 distance 缓存 ———
+/** leafDistanceToLog 结果缓存：key → distance（≤6 或 Infinity）；原木/树叶在 6 格内变化时失效 */
+const leafDistanceCache = new Map<string, number>();
+
+function invalidateLeafDistanceCache(x: number, y: number, z: number): void {
+  // 保守失效：变化点周围 6 格立方内的 distance 都可能改变
+  for (let dx = -6; dx <= 6; dx++) {
+    for (let dy = -6; dy <= 6; dy++) {
+      for (let dz = -6; dz <= 6; dz++) {
+        leafDistanceCache.delete(key(x + dx, y + dy, z + dz));
+      }
+    }
+  }
+}
+
 // ——— 树叶凋零队列 ———
 
 // Set 去重（key 格式同 saplings）：同一树叶被多根原木扫到只入队一次
@@ -112,7 +131,10 @@ const FACES = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -
  * BFS 深度限 6，波及范围不出切比雪夫 6 格立方；未加载 chunk 不算供养（防 getBlock 隐式触发生成）。
  */
 export function leafDistanceToLog(world: World, x: number, y: number, z: number): number {
-  const visited = new Set<string>([key(x, y, z)]);
+  const k = key(x, y, z);
+  const cached = leafDistanceCache.get(k);
+  if (cached !== undefined) return cached;
+  const visited = new Set<string>([k]);
   let frontier: [number, number, number][] = [[x, y, z]];
   for (let d = 1; d <= 6 && frontier.length > 0; d++) {
     const next: [number, number, number][] = [];
@@ -123,16 +145,20 @@ export function leafDistanceToLog(world: World, x: number, y: number, z: number)
         const nz = cz + dz;
         if (!world.isChunkLoaded(nx, nz)) continue;
         const id = world.getBlock(nx, ny, nz);
-        if (isLogId(id)) return d;
+        if (isLogId(id)) {
+          leafDistanceCache.set(k, d);
+          return d;
+        }
         if (!isLeavesId(id)) continue;
-        const k = key(nx, ny, nz);
-        if (visited.has(k)) continue;
-        visited.add(k);
+        const nk = key(nx, ny, nz);
+        if (visited.has(nk)) continue;
+        visited.add(nk);
         next.push([nx, ny, nz]);
       }
     }
     frontier = next;
   }
+  leafDistanceCache.set(k, Infinity);
   return Infinity;
 }
 
@@ -180,7 +206,9 @@ export function tickSaplings(world: World, dt: number): void {
   growAcc = 0;
 
   const day = dayFactorAt(worldClock.t) > 0.4;
+  const handled = new Set<string>(); // 本 tick 已处理过的 2×2 方阵角点/单苗，避免重复检查
   for (const k of [...saplings]) {
+    if (handled.has(k)) continue;
     const [x, y, z] = k.split(',').map(Number);
     if (!world.chunks.has(`${x >> 4},${z >> 4}`)) continue; // 未加载的不管
     const def = BLOCKS[world.getBlock(x, y, z)];
@@ -192,6 +220,7 @@ export function tickSaplings(world: World, dt: number): void {
     if (def.treeWood === 'dark_oak') {
       const square = saplingSquareAt(world, x, y, z, 'dark_oak');
       if (!square) continue; // 凑不齐 2×2 四棵苗：永不生长
+      for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [1, 1]] as const) handled.add(key(square[0] + dx, y, square[1] + dz));
       if (rand() < 1 / 25) {
         growTree(world, square[0], y, square[1], 'dark_oak');
         for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [1, 1]] as const) {
@@ -204,6 +233,7 @@ export function tickSaplings(world: World, dt: number): void {
       // MC：丛林苗 2×2 四棵长成巨树；单苗走下方通用路径长普通丛林树
       const square = saplingSquareAt(world, x, y, z, 'jungle');
       if (square) {
+        for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [1, 1]] as const) handled.add(key(square[0] + dx, y, square[1] + dz));
         if (rand() < 1 / 25) {
           growTree(world, square[0], y, square[1], 'jungle', true);
           for (const [dx, dz] of [[0, 0], [1, 0], [0, 1], [1, 1]] as const) {
@@ -213,6 +243,7 @@ export function tickSaplings(world: World, dt: number): void {
         continue; // 已成阵的丛林苗不再走单苗普通树路径
       }
     }
+    handled.add(k);
     if (rand() < 1 / 25) {
       growTree(world, x, y, z, def.treeWood);
       saplings.delete(k);
@@ -253,11 +284,12 @@ export function setSaplingDropHandler(fn: typeof onSaplingDrop): void {
   onSaplingDrop = fn;
 }
 
-/** 清空树苗登记、persistent 树叶登记与凋零队列（切换世界时调用） */
+/** 清空树苗登记、persistent 树叶登记、凋零队列与 distance 缓存（切换世界时调用） */
 export function clearSaplings(): void {
   saplings.clear();
   placedLeaves.clear();
   leafQueue.clear();
+  leafDistanceCache.clear();
 }
 
 /**

@@ -77,6 +77,22 @@ describe('World 方块读写', () => {
     expect(w.chunks.size).toBe(25);
   });
 
+  it('updateAround 增量：玩家走 1 chunk 边界只加载新条带，旧 desired 进缓冲；继续走远才卸载', () => {
+    const w = voidWorld();
+    // 初始铺满 5×5 desired
+    expect(w.updateAround(0, 0, 2, 10_000)).toBe(0);
+    expect(w.chunks.size).toBe(25);
+    // 向东走 1 chunk：新 desired 列 (x=3) 加载，旧 desired 列 (x=-2) 仍在半径+2 缓冲内保留
+    expect(w.updateAround(16, 0, 2, 10_000)).toBe(0);
+    expect(w.chunks.has('3,0')).toBe(true); // 新进入 desired 列
+    expect(w.chunks.has('-2,0')).toBe(true); // 旧 desired 列，现处缓冲层
+    expect(w.chunks.has('-3,0')).toBe(false); // 从未加载
+    // 继续东走到 (3,0)：x=-2 距离新中心为 5 > 半径+2，应被卸载
+    expect(w.updateAround(3 * 16, 0, 2, 10_000)).toBe(0);
+    expect(w.chunks.has('-2,0')).toBe(false);
+    expect(w.chunks.has('5,0')).toBe(true); // 新 desired 边缘
+  });
+
   it('updateAround 记忆化：同位置同视距早退不重扫，跨边界/失效后重扫', () => {
     const w = voidWorld();
     expect(w.updateAround(0, 0, 2, 10_000)).toBe(0); // 铺满，缓存生效

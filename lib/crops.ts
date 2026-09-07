@@ -23,6 +23,8 @@ export function isFarmlandId(id: BlockId): boolean {
 const crops = new Set<string>();
 const farmlands = new Set<string>();
 const key = (x: number, y: number, z: number): string => `${x},${y},${z}`;
+/** 耕地湿润缓存：key → 邻近是否有水（tickCrops 直接读取，避免每块扫 9×9×2） */
+const farmlandMoisture = new Map<string, boolean>();
 
 /** 每 tick 最多处理的耕地数（湿润检查每块要扫 9×9×2，限量避免大农场卡顿） */
 const FARMLAND_BATCH = 64;
@@ -61,16 +63,57 @@ function rand(): number {
   return ((rngState >>> 9) & 0x7fffffff) / 0x7fffffff;
 }
 
-/** MC 规则：水平 4 格内（同层或高 1 层）有水则耕地湿润 */
+/** MC 规则：水平 4 格内（同层或高 1 层）有水则耕地湿润；跳过未加载 chunk 避免隐式生成 */
 function hasWaterNear(world: World, x: number, y: number, z: number): boolean {
   for (let dx = -4; dx <= 4; dx++) {
     for (let dz = -4; dz <= 4; dz++) {
       for (let dy = 0; dy <= 1; dy++) {
-        if (isWaterId(world.getBlock(x + dx, y + dy, z + dz))) return true;
+        const wx = x + dx;
+        const wz = z + dz;
+        if (!world.isChunkLoaded(wx, wz)) continue;
+        if (isWaterId(world.getBlock(wx, y + dy, wz))) return true;
       }
     }
   }
   return false;
+}
+
+/** 重新计算并缓存单个耕地的湿润状态；耕地所在 chunk 未加载时不触发隐式生成 */
+function recomputeMoisture(world: World, x: number, y: number, z: number): void {
+  if (!world.isChunkLoaded(x, z)) return;
+  const k = key(x, y, z);
+  if (!isFarmlandId(world.getBlock(x, y, z))) {
+    farmlandMoisture.delete(k);
+    return;
+  }
+  farmlandMoisture.set(k, hasWaterNear(world, x, y, z));
+}
+
+function isIceId(id: BlockId): boolean {
+  return BLOCKS[id]?.key === 'ice';
+}
+
+/** world.setBlock 钩子：水/冰/耕地变化时增量更新周围耕地的湿润缓存 */
+export function notifyMoistureBlockSet(world: World, x: number, y: number, z: number, oldId: BlockId, newId: BlockId): void {
+  const oldIsFarmland = isFarmlandId(oldId);
+  const newIsFarmland = isFarmlandId(newId);
+  const waterChanged = isWaterId(oldId) || isWaterId(newId) || isIceId(oldId) || isIceId(newId);
+
+  if (newIsFarmland) {
+    recomputeMoisture(world, x, y, z);
+  } else if (oldIsFarmland) {
+    farmlandMoisture.delete(key(x, y, z));
+  }
+
+  if (waterChanged) {
+    for (let dx = -4; dx <= 4; dx++) {
+      for (let dz = -4; dz <= 4; dz++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          recomputeMoisture(world, x + dx, y + dy, z + dz);
+        }
+      }
+    }
+  }
 }
 
 /** 作物所在格的有效光照：方块光与（白天时的）天空光取大者 */
@@ -90,10 +133,11 @@ function canSeeSky(world: World, x: number, y: number, z: number): boolean {
   return c.sky[i] >= 15;
 }
 
-/** 清空作物/耕地登记（切换世界时调用） */
+/** 清空作物/耕地登记与湿润缓存（切换世界时调用） */
 export function clearCrops(): void {
   crops.clear();
   farmlands.clear();
+  farmlandMoisture.clear();
 }
 
 /**
@@ -139,8 +183,13 @@ export function rescanCropsChunk(world: World, cx: number, cz: number): void {
     for (let z = 0; z < 16; z++) {
       for (let x = 0; x < 16; x++) {
         const id = c.data[(y * 16 + z) * 16 + x];
-        if (isWheatCropId(id)) crops.add(key(bx + x, y, bz + z));
-        else if (isFarmlandId(id)) farmlands.add(key(bx + x, y, bz + z));
+        const wx = bx + x;
+        const wz = bz + z;
+        if (isWheatCropId(id)) crops.add(key(wx, y, wz));
+        else if (isFarmlandId(id)) {
+          farmlands.add(key(wx, y, wz));
+          farmlandMoisture.set(key(wx, y, wz), hasWaterNear(world, wx, y, wz));
+        }
       }
     }
   }
@@ -186,7 +235,7 @@ export function tickCrops(world: World, dt: number): void {
       world.setBlock(x, y, z, dirtId); // setBlock 钩子会把 k 从 farmlands 移除
       continue;
     }
-    const moist = hasWaterNear(world, x, y, z);
+    const moist = farmlandMoisture.get(k) ?? hasWaterNear(world, x, y, z);
     if (moist && id === dryId) world.setBlock(x, y, z, moistId);
     else if (!moist && id === moistId) world.setBlock(x, y, z, dryId);
     if (!moist && !isWheatCropId(world.getBlock(x, y + 1, z)) && rand() < 1 / 30) {

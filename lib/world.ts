@@ -2,7 +2,7 @@
 
 import { AIR, BLOCK_BY_KEY, BLOCKS } from './blocks';
 import { enqueueFluid, needsFluidCheck } from './fluids';
-import { notifyCropBlockSet } from './crops';
+import { notifyCropBlockSet, notifyMoistureBlockSet } from './crops';
 import { notifyBlockSet } from './saplings';
 import { notifyRedstone } from './redstone';
 import { createTerrain, hashString, type Terrain } from './noise';
@@ -63,6 +63,8 @@ export class World {
   readonly lightDirtyChunks = new Set<string>();
   /** 待持久化的 chunk key */
   readonly modifiedChunks = new Set<string>();
+  /** 有可生长方块（仙人掌/甘蔗/竹子）的 chunk key 集合，tickGrowth 直接遍历，避免扫所有已加载 chunk */
+  readonly growableChunks = new Set<string>();
   /**
    * 光照增量编辑队列（flushLight 逐条做除光+播种 BFS）：打包五元组 x,y,z,oldId,newId。
    * 仅记录不透明度/发光变化的 setBlock；生成/读档 chunk 无旧光照基线，仍走 lightDirty 全量重算
@@ -132,12 +134,14 @@ export class World {
   private lastChunkCz = 0;
 
   /**
-   * updateAround 记忆化：上次「全量重扫且周围已铺满」时的玩家 chunk 坐标与视距。
-   * null = 缓存无效（尚未铺满 / invalidateAround 失效），下次调用必须重扫。
-   * 判定键 = 世界实例（本字段随实例）+ 玩家 chunk 坐标 + 视距；玩家跨 chunk 边界、传送、
-   * 视距调整都会使坐标/视距变化从而自动触发重扫。
+   * updateAround 增量记忆化：
+   * - pcx/pcz/radius 为上次铺满时的玩家 chunk 坐标与视距；
+   * - keep 为当时应保留的 chunk 位置集合（半径+2 的切比雪夫方形），跨边界时用它做
+   *   增量 delta：只加载新进入半径的 chunk、只卸载离开 keep 区的 chunk，避免每帧
+   *   全量扫描 this.chunks。
+   * null = 缓存无效（首次 / invalidateAround / 加载期未铺满），下次调用全量重扫。
    */
-  private aroundCache: { pcx: number; pcz: number; radius: number } | null = null;
+  private aroundCache: { pcx: number; pcz: number; radius: number; keep: Set<string> } | null = null;
 
   /**
    * 强制下次 updateAround 全量重扫（在坐标/视距不变但世界内容可能突变时使用，
@@ -176,9 +180,11 @@ export class World {
     const chunk = this.getChunk(cx, cz);
     const oldId = chunk.data[localIndex(x & 15, y, z & 15)];
     chunk.data[localIndex(x & 15, y, z & 15)] = id;
-    // 可生长方块计数增减（growth.ts 整 chunk 早退依赖；O(1) Set 查询，与同函数其他钩子合并不重复扫）
+    // 可生长方块计数增减（growth.ts 直接遍历 growableChunks，为 0 的 chunk 整 chunk 跳过）
     if (GROWABLE_IDS.has(oldId)) chunk.growables--;
     if (GROWABLE_IDS.has(id)) chunk.growables++;
+    if (chunk.growables > 0) this.growableChunks.add(key);
+    else this.growableChunks.delete(key);
     chunk.modified = true;
     this.modifiedChunks.add(key);
     this.dirtyChunks.add(key);
@@ -203,6 +209,8 @@ export class World {
     notifyBlockSet(this, x, y, z, oldId, id);
     // 小麦作物登记（同上）
     notifyCropBlockSet(x, y, z, id);
+    // 耕地湿润缓存增量维护（水/冰/耕地变化时刷新周围 9×9×2 内耕地的邻近有水标记）
+    notifyMoistureBlockSet(this, x, y, z, oldId, id);
     // 红石电源登记与粉网络重算（同上）
     notifyRedstone(this, x, y, z, oldId, id);
   }
@@ -224,6 +232,9 @@ export class World {
     const d = chunk.data;
     for (let i = 0; i < d.length; i++) if (GROWABLE_IDS.has(d[i])) n++;
     chunk.growables = n;
+    const key = chunkKey(chunk.cx, chunk.cz);
+    if (n > 0) this.growableChunks.add(key);
+    else this.growableChunks.delete(key);
   }
 
   /**
@@ -343,20 +354,74 @@ export class World {
   updateAround(x: number, z: number, radius: number, budgetMs = 6): number {
     const pcx = x >> 4;
     const pcz = z >> 4;
-    // 记忆化早退：上次重扫已铺满，且玩家未跨 chunk 边界、视距未变 → 缺失列表必为空，
-    // 跳过 (2r+1)² 次 chunkKey 字符串分配 + sort + 全 Map 卸载扫描（卸载判定只随重扫做）。
-    // 注意：只有缺失全部生成完（返回 0）才写缓存，加载期每帧仍重扫以持续推进生成。
     const cache = this.aroundCache;
+
+    // 完全未变：零成本早退。只有「上次已铺满」才写缓存，因此可安全跳过。
     if (cache && cache.pcx === pcx && cache.pcz === pcz && cache.radius === radius) return 0;
-    // 收集缺失的 chunk（在途异步生成的不算缺失，不重复派发），按距离由近及远，避免单帧卡顿
+
+    // 决定全量重扫还是增量 delta：
+    // - 无缓存、视距变化、玩家瞬移（>1 chunk）时回退全量；
+    // - 仅跨 1 个 chunk 边界且所有已加载 chunk 都在旧 keep 区内时做增量，避免遍历整个 this.chunks。
+    let fullRecompute = !cache ||
+      cache.radius !== radius ||
+      Math.abs(cache.pcx - pcx) > 1 ||
+      Math.abs(cache.pcz - pcz) > 1;
+    if (!fullRecompute && cache) {
+      if (this.chunks.size > cache.keep.size) {
+        fullRecompute = true; // 已加载数超过 keep 位置数，必有游离 chunk
+      } else {
+        for (const key of this.chunks.keys()) {
+          if (!cache.keep.has(key)) {
+            fullRecompute = true; // 发现旧 keep 区外的已加载 chunk
+            break;
+          }
+        }
+      }
+    }
+
+    const keepR = radius + 2;
+    const newKeep = new Set<string>();
+    for (let dx = -keepR; dx <= keepR; dx++) {
+      for (let dz = -keepR; dz <= keepR; dz++) {
+        newKeep.add(chunkKey(pcx + dx, pcz + dz));
+      }
+    }
+
     const missing: [number, number, number][] = [];
-    for (let dx = -radius; dx <= radius; dx++) {
-      for (let dz = -radius; dz <= radius; dz++) {
-        const key = chunkKey(pcx + dx, pcz + dz);
-        if (!this.chunks.has(key) && !this.pendingGen.has(key)) missing.push([Math.max(Math.abs(dx), Math.abs(dz)), pcx + dx, pcz + dz]);
+    const toRemove: string[] = [];
+
+    if (fullRecompute) {
+      // 收集缺失 chunk（在途异步生成的不算缺失，不重复派发），按距离由近及远
+      for (let dx = -radius; dx <= radius; dx++) {
+        for (let dz = -radius; dz <= radius; dz++) {
+          const key = chunkKey(pcx + dx, pcz + dz);
+          if (!this.chunks.has(key) && !this.pendingGen.has(key)) {
+            missing.push([Math.max(Math.abs(dx), Math.abs(dz)), pcx + dx, pcz + dz]);
+          }
+        }
+      }
+      // 全量扫描卸载：半径+2 外全部移除
+      for (const [key, c] of this.chunks) {
+        const dist = Math.max(Math.abs(c.cx - pcx), Math.abs(c.cz - pcz));
+        if (dist > radius + 2) toRemove.push(key);
+      }
+    } else {
+      // 增量：只处理新进入半径的缺失 chunk
+      for (let dx = -radius; dx <= radius; dx++) {
+        for (let dz = -radius; dz <= radius; dz++) {
+          const key = chunkKey(pcx + dx, pcz + dz);
+          if (!this.chunks.has(key) && !this.pendingGen.has(key)) {
+            missing.push([Math.max(Math.abs(dx), Math.abs(dz)), pcx + dx, pcz + dz]);
+          }
+        }
+      }
+      // 增量：只卸载旧 keep 区中现在离开的 chunk（保持原顺序）
+      for (const key of cache!.keep) {
+        if (!newKeep.has(key) && this.chunks.has(key)) toRemove.push(key);
       }
     }
     missing.sort((a, b) => a[0] - b[0]);
+
     const start = performance.now();
     let syncDone = 0;
     let asyncReq = 0;
@@ -378,11 +443,6 @@ export class World {
       if (performance.now() - start >= budgetMs) break;
     }
 
-    const toRemove: string[] = [];
-    for (const [key, c] of this.chunks) {
-      const dist = Math.max(Math.abs(c.cx - pcx), Math.abs(c.cz - pcz));
-      if (dist > radius + 2) toRemove.push(key);
-    }
     for (const key of toRemove) {
       const c = this.chunks.get(key);
       if (c?.modified) {
@@ -391,6 +451,7 @@ export class World {
         this.saved.set(key, c.data);
       }
       this.chunks.delete(key);
+      this.growableChunks.delete(key);
       // getBlock 缓存的引用若指向被卸载的 chunk：失效（否则读到游离旧数据、且不再触发生成）
       if (c && this.lastChunk === c) this.lastChunk = null;
       this.generation++;
@@ -403,11 +464,11 @@ export class World {
         getGenPool()?.cancel(key);
       }
     }
-    // 本轮缺失全部落地（含本就无缺失、无在途异步）：记录坐标/视距，之后同位置同视距的调用直接早退；
-    // 仍有剩余（预算耗尽/有在途异步未落地）则不缓存，下帧重扫继续推进
+    // 本轮缺失全部落地（含本就无缺失、无在途异步）：记录坐标/视距/keep 集合，之后同位置同视距直接早退；
+    // 仍有剩余（预算耗尽/有在途异步未落地）则不缓存，下帧继续推进
     // 仍缺失 = 本轮未处理的 + 在途未落地的（pendingGen 含本轮新派发的，别重复计数）
     const remaining = missing.length - syncDone - asyncReq + this.pendingGen.size;
-    if (remaining === 0) this.aroundCache = { pcx, pcz, radius };
+    if (remaining === 0) this.aroundCache = { pcx, pcz, radius, keep: newKeep };
     return remaining;
   }
 }
