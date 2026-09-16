@@ -9,7 +9,7 @@ import { createTerrain, hashString, type Terrain } from './noise';
 import { generateNetherChunk } from './nether';
 import { generateEndChunk } from './end';
 import { cascadeLight } from './lights';
-import { getStorage } from './storage';
+import { getStorage, isStorageBlockId } from './storage';
 import { generateChunk, type ChestLoot } from './genCore';
 import { getGenPool } from './genPool';
 
@@ -65,6 +65,12 @@ export class World {
   readonly modifiedChunks = new Set<string>();
   /** 有可生长方块（仙人掌/甘蔗/竹子）的 chunk key 集合，tickGrowth 直接遍历，避免扫所有已加载 chunk */
   readonly growableChunks = new Set<string>();
+  /** 容器位置注册表：chunkKey → 容器 blockId → 位置 key "x,y,z" 集合。
+   *  由 setBlock 同步维护；chunk 卸载时清理；供铜傀儡 O(1) 范围扫描替代 65×65×17 逐格暴力搜 */
+  readonly containerRegistry = new Map<string, Map<number, Set<string>>>();
+  /** 每列首个不透明方块高度（colKey="x,z"）。setBlock 增量维护；缺失时按需从 chunk 数据重算。
+   *  供 exposedToSky 露天候选 O(1) 判定（树叶/水/玻璃 opaque:false 不遮挡）。 */
+  readonly colTop = new Map<string, number>();
   /**
    * 光照增量编辑队列（flushLight 逐条做除光+播种 BFS）：打包五元组 x,y,z,oldId,newId。
    * 仅记录不透明度/发光变化的 setBlock；生成/读档 chunk 无旧光照基线，仍走 lightDirty 全量重算
@@ -213,6 +219,81 @@ export class World {
     notifyMoistureBlockSet(this, x, y, z, oldId, id);
     // 红石电源登记与粉网络重算（同上）
     notifyRedstone(this, x, y, z, oldId, id);
+    // 容器位置注册表与列顶不透明缓存（mobs.ts 扫描优化）
+    this.updateContainerRegistry(x, y, z, oldId, id);
+    this.updateColTop(x, y, z, oldId, id);
+  }
+
+  /** setBlock 钩子：维护 containerRegistry（放置/破坏容器时同步增删） */
+  private updateContainerRegistry(x: number, y: number, z: number, oldId: number, newId: number): void {
+    const oldContainer = isStorageBlockId(oldId);
+    const newContainer = isStorageBlockId(newId);
+    if (!oldContainer && !newContainer) return;
+    const ck = chunkKey(x >> 4, z >> 4);
+    const pk = `${x},${y},${z}`;
+    if (oldContainer) {
+      const byId = this.containerRegistry.get(ck);
+      if (byId) {
+        byId.get(oldId)?.delete(pk);
+        if (byId.get(oldId)?.size === 0) byId.delete(oldId);
+        if (byId.size === 0) this.containerRegistry.delete(ck);
+      }
+    }
+    if (newContainer) {
+      let byId = this.containerRegistry.get(ck);
+      if (!byId) {
+        byId = new Map();
+        this.containerRegistry.set(ck, byId);
+      }
+      let set = byId.get(newId);
+      if (!set) {
+        set = new Set();
+        byId.set(newId, set);
+      }
+      set.add(pk);
+    }
+  }
+
+  /** setBlock 钩子：增量维护 colTop（最高不透明方块 y）。破坏列顶时向下重算；放置更高 opaque 则直接更新。 */
+  private updateColTop(x: number, y: number, z: number, oldId: number, newId: number): void {
+    const oldOpaque = BLOCKS[oldId]?.opaque ?? false;
+    const newOpaque = BLOCKS[newId]?.opaque ?? false;
+    if (!oldOpaque && !newOpaque) return;
+    const key = `${x},${z}`;
+    const top = this.colTop.get(key);
+    if (newOpaque && (top === undefined || y > top)) {
+      this.colTop.set(key, y);
+      return;
+    }
+    if (oldOpaque && top !== undefined && y >= top) {
+      const t = this.computeColTop(x, z);
+      if (t === undefined) this.colTop.delete(key);
+      else this.colTop.set(key, t);
+    }
+  }
+
+  /** 从 chunk 数据重算某列最高不透明方块；chunk 未加载返回 undefined */
+  private computeColTop(x: number, z: number): number | undefined {
+    const c = this.chunks.get(chunkKey(x >> 4, z >> 4));
+    if (!c) return undefined;
+    const lx = x & 15;
+    const lz = z & 15;
+    for (let y = WORLD_HEIGHT - 1; y >= 0; y--) {
+      const id = c.data[localIndex(lx, y, lz)];
+      if (id !== AIR && (BLOCKS[id]?.opaque ?? false)) return y;
+    }
+    return undefined;
+  }
+
+  /** 首次查询某列时从已加载 chunk 初始化 colTop */
+  getColTop(x: number, z: number): number | undefined {
+    const key = `${x},${z}`;
+    let v = this.colTop.get(key);
+    if (v === undefined) {
+      v = this.computeColTop(x, z);
+      if (v !== undefined) this.colTop.set(key, v);
+    }
+    return v;
   }
 
   private markDirty(cx: number, cz: number): void {
@@ -328,6 +409,23 @@ export class World {
           const st = getStorage(pos);
           if (st.some((sl) => sl !== null)) continue;
           for (let i = 0; i < slots.length && i < st.length; i++) st[i] = slots[i];
+          // 将生成期战利品箱登记到容器注册表（玩家未编辑过，但铜傀儡应能作为目标箱）
+          const [px, py, pz] = pos.split(',').map(Number);
+          const id = chunk.data[localIndex(px & 15, py, pz & 15)];
+          if (isStorageBlockId(id)) {
+            const ck = chunkKey(px >> 4, pz >> 4);
+            let byId = this.containerRegistry.get(ck);
+            if (!byId) {
+              byId = new Map();
+              this.containerRegistry.set(ck, byId);
+            }
+            let set = byId.get(id);
+            if (!set) {
+              set = new Set();
+              byId.set(id, set);
+            }
+            set.add(pos);
+          }
         }
       }
     }
@@ -452,6 +550,7 @@ export class World {
       }
       this.chunks.delete(key);
       this.growableChunks.delete(key);
+      this.containerRegistry.delete(key);
       // getBlock 缓存的引用若指向被卸载的 chunk：失效（否则读到游离旧数据、且不再触发生成）
       if (c && this.lastChunk === c) this.lastChunk = null;
       this.generation++;

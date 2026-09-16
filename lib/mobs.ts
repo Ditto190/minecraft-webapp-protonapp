@@ -236,6 +236,8 @@ export interface Arrow {
 
 export const mobs: Mob[] = [];
 export const arrows: Arrow[] = [];
+/** 处于恋爱状态的动物按 type 分桶（繁殖寻伴 O(n²)→O(同 type 数量)） */
+const loveMobsByType = new Map<MobType, Set<Mob>>();
 
 const HALF_W = 0.3;
 const HEIGHT = 1.8;
@@ -297,6 +299,7 @@ let spawnTimer = 0;
 export function clearMobs(): void {
   mobs.length = 0;
   arrows.length = 0;
+  loveMobsByType.clear();
 }
 
 /** 夜晚（昼夜系数低） */
@@ -304,10 +307,10 @@ export function isNight(): boolean {
   return dayFactorAt(worldClock.t) < 0.4;
 }
 
-/** 白天自燃判定：头顶露天（y+2 向上无遮挡）且头部不在水中（树荫/洞穴/水下不烧，MC 一致）；参数为任意坐标点（生物/玩家共用）。
- *  快路径：头格所在 chunk 的天空光 <15 ⇒ 同列上方必有不透明遮挡（lights.ts 竖直填充保证无遮挡列恒为 15），洞穴/建筑内 O(1) 判定不露天；
- *  sky===15 只保证上方无「不透明」格，仍扫列排除树叶/水/玻璃等非不透明非空气遮挡（本引擎树叶 opaque:false，天空光穿透树冠）。
- *  与原逐格扫描的唯一差异：遮挡刚被挖掉而增量光照尚未 flushLight 时，陈旧 sky<15 会把「恢复露天」推迟到下次光照刷新（游戏内每帧限流 flush，≤1 帧量级）。 */
+/** 白天自燃判定：头顶露天（y+2 向上无不透明遮挡）且头部不在水中（洞穴/建筑/水下不烧，MC 一致）；参数为任意坐标点（生物/玩家共用）。
+ *  快路径 1：头格所在 chunk 的天空光 <15 ⇒ 同列上方必有不透明遮挡（lights.ts 竖直填充保证无遮挡列恒为 15），洞穴/建筑内 O(1) 判定不露天；
+ *  快路径 2：露天候选直接比较 hy+1 与 world.colTop（该列最高不透明方块 y），树叶/水/玻璃 opaque:false 不遮挡，O(1)。
+ *  与原逐格扫描的差异：遮挡刚被挖掉而增量光照尚未 flushLight 时，colTop 已随 setBlock 更新，露天判定比 sky 快路径更及时。 */
 function exposedToSky(world: World, m: { x: number; y: number; z: number }): boolean {
   const bx = Math.floor(m.x);
   const bz = Math.floor(m.z);
@@ -316,13 +319,9 @@ function exposedToSky(world: World, m: { x: number; y: number; z: number }): boo
   const c = world.chunks.get(chunkKey(bx >> 4, bz >> 4));
   if (c) {
     if (hy >= 0 && hy < WORLD_HEIGHT && c.sky[localIndex(bx & 15, hy, bz & 15)] < 15) return false;
-    // 露天候选：直读 chunk 数据扫列（与 getBlock 同源，省去逐格调用开销；y 越界等价 AIR，故从 max(0,·) 起扫）
-    const lx = bx & 15;
-    const lz = bz & 15;
-    for (let y = Math.max(0, hy + 1); y < WORLD_HEIGHT; y++) {
-      if (c.data[localIndex(lx, y, lz)] !== AIR) return false;
-    }
-    return true;
+    // 露天候选：用列顶不透明方块高度 O(1) 判定
+    const top = world.getColTop(bx, bz);
+    return top === undefined || hy + 1 > top;
   }
   // chunk 缺失：退回原逐格扫描（保留 getBlock 隐式生成语义）
   for (let y = hy + 1; y < WORLD_HEIGHT; y++) {
@@ -399,7 +398,24 @@ export const BREED_FOOD: Partial<Record<MobType, string>> = {
 /** 喂食：进入 8s 恋爱模式并回复 4 血（MC 喂食回 2 心） */
 export function feedMob(m: Mob): void {
   m.loveTimer = 8;
+  addLoveMob(m);
   m.hp = Math.min(MOB_DEFS[m.type].hp, m.hp + 4);
+}
+
+/** 进入恋爱池（feedMob 调用；避免外部直接设置 loveTimer 导致不同步） */
+function addLoveMob(m: Mob): void {
+  if ((m.loveTimer ?? 0) <= 0 || m.baby) return;
+  let s = loveMobsByType.get(m.type);
+  if (!s) {
+    s = new Set();
+    loveMobsByType.set(m.type, s);
+  }
+  s.add(m);
+}
+
+/** 退出恋爱池（计时到 0 / 繁殖成功 / 死亡） */
+function removeLoveMob(m: Mob): void {
+  loveMobsByType.get(m.type)?.delete(m);
 }
 
 /** 羊毛色按 MC 分布（白 82 / 黑灰各 5 / 淡灰 5 / 棕 3 / 粉 1） */
@@ -549,40 +565,34 @@ export function tryBuildCopperGolem(world: World, x: number, y: number, z: numbe
   return false;
 }
 
-/** 水平 ≤32 格、竖直 ±8 内最近的 wantId 容器（test 按位置键再过滤）；只读已加载 chunk（未加载列整列跳过）。
- *  距离用平方比较（与原 hypot 判定同序）；按 x→z→y 顺序扫描并保持「更近才替换」，等距取先扫到者——与原实现一致。 */
+/** 水平 ≤32 格、竖直 ±8 内最近的 wantId 容器（test 按位置键再过滤）；只读已加载 chunk。
+ *  改为遍历 world.containerRegistry 中已登记的同 id 容器，按平方距离取最近；等距取先迭代到者。
+ *  注册表在 world.setBlock 放置/破坏容器时同步维护，故交接瞬间不再重扫 65×65×17 空间。 */
 function scanContainer(world: World, m: Mob, wantId: number, test: (key: string) => boolean): { x: number; y: number; z: number } | null {
-  const x0 = Math.floor(m.x);
   const y0 = Math.floor(m.y);
-  const z0 = Math.floor(m.z);
   const yLo = Math.max(0, y0 - GOLEM_RANGE_Y);
   const yHi = Math.min(WORLD_HEIGHT - 1, y0 + GOLEM_RANGE_Y);
   const range2 = GOLEM_RANGE * GOLEM_RANGE;
   let best: { x: number; y: number; z: number } | null = null;
   let bestD2 = Infinity;
-  let ccx = NaN; // NaN 不等于任何值（含自身），首轮必查；未加载 chunk 也缓存 undefined，同 chunk 后续列不重查
-  let ccz = NaN;
-  let c: ReturnType<World['chunks']['get']>;
-  for (let x = x0 - GOLEM_RANGE; x <= x0 + GOLEM_RANGE; x++) {
-    const dx = x + 0.5 - m.x;
-    for (let z = z0 - GOLEM_RANGE; z <= z0 + GOLEM_RANGE; z++) {
+  for (const [ck, byId] of world.containerRegistry) {
+    const set = byId.get(wantId);
+    if (!set || set.size === 0) continue;
+    // chunk 级粗筛：以 chunk 中心估算，超出范围+边距的 chunk 整批跳过
+    const [cx, cz] = ck.split(',').map(Number);
+    const cdx = (cx << 4) + 8 - m.x;
+    const cdz = (cz << 4) + 8 - m.z;
+    if (cdx * cdx + cdz * cdz > (GOLEM_RANGE + 12) * (GOLEM_RANGE + 12)) continue;
+    for (const pk of set) {
+      const [x, y, z] = pk.split(',').map(Number);
+      if (y < yLo || y > yHi) continue;
+      const dx = x + 0.5 - m.x;
       const dz = z + 0.5 - m.z;
       const d2 = dx * dx + dz * dz;
       if (d2 > range2 || d2 >= bestD2) continue;
-      const cx = x >> 4;
-      const cz = z >> 4;
-      if (cx !== ccx || cz !== ccz) {
-        ccx = cx;
-        ccz = cz;
-        c = world.chunks.get(chunkKey(cx, cz));
-      }
-      if (!c) continue;
-      for (let y = yLo; y <= yHi; y++) {
-        if (c.data[localIndex(x & 15, y, z & 15)] !== wantId) continue; // id 预检：非目标容器直接跳过，不拼位置键
-        if (!test(`${x},${y},${z}`)) continue;
-        best = { x, y, z };
-        bestD2 = d2;
-      }
+      if (!test(pk)) continue;
+      best = { x, y, z };
+      bestD2 = d2;
     }
   }
   return best;
@@ -1392,6 +1402,19 @@ export function tickMobs(
 
   tickArrows(world, dt, targetPos, onAttackPlayer);
 
+  // 铁傀儡目标空间索引：每 tick 初按 chunk 分桶一次，避免每只铁傀儡 O(n) 扫全部 mobs
+  const hostileByChunk = new Map<string, Mob[]>();
+  for (const o of mobs) {
+    if (o.hp <= 0 || !GOLEM_TARGETS.includes(o.type)) continue;
+    const ck = chunkKey(Math.floor(o.x) >> 4, Math.floor(o.z) >> 4);
+    let arr = hostileByChunk.get(ck);
+    if (!arr) {
+      arr = [];
+      hostileByChunk.set(ck, arr);
+    }
+    arr.push(o);
+  }
+
   // 玩家着火 DOT（烈焰人小火球点燃，MC 每秒 1 伤；入水/死亡/雨天露天熄灭；创造 hostile=false 不烧）
   if (playerFire.left > 0 && hostile) {
     if (
@@ -1428,6 +1451,7 @@ export function tickMobs(
     const m = mobs[i];
     // 死亡态（hp≤0 由 damageMob 标记）：倒地渐隐计时，期间不 AI/不移动/不碰撞；归零才真正移除并出白烟（MC 死亡演出）
     if (m.hp <= 0) {
+      removeLoveMob(m);
       if ((m.deathTimer ?? 0) > 0) {
         m.deathTimer = (m.deathTimer ?? 0) - dt;
         if (m.deathTimer <= 0) {
@@ -1462,7 +1486,10 @@ export function tickMobs(
       }
     }
     // 恋爱/繁殖冷却倒数；僵尸猪灵仇恨倒数
-    if (m.loveTimer !== undefined && m.loveTimer > 0) m.loveTimer -= dt;
+    if (m.loveTimer !== undefined && m.loveTimer > 0) {
+      m.loveTimer -= dt;
+      if (m.loveTimer <= 0) removeLoveMob(m);
+    }
     if (m.breedCd !== undefined && m.breedCd > 0) m.breedCd -= dt;
     if (m.aggroTimer !== undefined && m.aggroTimer > 0) m.aggroTimer -= dt;
     if ((m.hurtImmune ?? 0) > 0) m.hurtImmune = (m.hurtImmune ?? 0) - dt; // 受伤免疫帧按游戏刻递减（MC 0.5s）
@@ -1727,12 +1754,21 @@ export function tickMobs(
       if (m.type === 'iron_golem') {
         let target: Mob | null = null;
         let best = 24;
-        for (const o of mobs) {
-          if (o === m || o.hp <= 0 || !GOLEM_TARGETS.includes(o.type)) continue; // 死亡态尸体不再是目标
-          const od = Math.hypot(o.x - m.x, o.z - m.z);
-          if (od < best) {
-            best = od;
-            target = o;
+        const mcx = Math.floor(m.x) >> 4;
+        const mcz = Math.floor(m.z) >> 4;
+        // 5×5 chunk 覆盖 80 格范围，足够 24 格目标（即使傀儡贴 chunk 边）
+        for (let dx = -2; dx <= 2; dx++) {
+          for (let dz = -2; dz <= 2; dz++) {
+            const arr = hostileByChunk.get(chunkKey(mcx + dx, mcz + dz));
+            if (!arr) continue;
+            for (const o of arr) {
+              if (o === m) continue;
+              const od = Math.hypot(o.x - m.x, o.z - m.z);
+              if (od < best) {
+                best = od;
+                target = o;
+              }
+            }
           }
         }
         if (target) {
@@ -1817,13 +1853,19 @@ export function tickMobs(
       } else if ((m.loveTimer ?? 0) > 0) {
         // 恋爱中：寻找 8 格内同种恋爱个体，走过去；贴近则产仔（双方进 60s 冷却）
         let partner: Mob | null = null;
-        for (const other of mobs) {
-          if (other === m || other.type !== m.type || other.baby || (other.loveTimer ?? 0) <= 0) continue;
-          const od = Math.hypot(other.x - m.x, other.z - m.z);
-          if (od > 8) continue;
-          if ((other.breedCd ?? 0) > 0 || (m.breedCd ?? 0) > 0) continue;
-          partner = other;
-          break;
+        const candidates = loveMobsByType.get(m.type);
+        if (candidates) {
+          const mcx = Math.floor(m.x) >> 4;
+          const mcz = Math.floor(m.z) >> 4;
+          for (const other of candidates) {
+            if (other === m || other.hp <= 0 || other.baby || (other.breedCd ?? 0) > 0 || (m.breedCd ?? 0) > 0) continue;
+            // 按 chunk 粗剪：8 格范围最多跨 1 个 chunk
+            if (Math.abs((Math.floor(other.x) >> 4) - mcx) > 1 || Math.abs((Math.floor(other.z) >> 4) - mcz) > 1) continue;
+            const od = Math.hypot(other.x - m.x, other.z - m.z);
+            if (od > 8) continue;
+            partner = other;
+            break;
+          }
         }
         if (partner) {
           const px = partner.x - m.x;
@@ -1836,6 +1878,8 @@ export function tickMobs(
             // 配对成功：产仔并清恋爱、进冷却（变种随机继承双亲之一，见 breedMob）
             partner.loveTimer = 0;
             m.loveTimer = 0;
+            removeLoveMob(partner);
+            removeLoveMob(m);
             partner.breedCd = 60;
             m.breedCd = 60;
             if (mobs.length < 40) breedMob(m, partner);

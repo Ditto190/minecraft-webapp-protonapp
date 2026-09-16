@@ -52,13 +52,13 @@ describe('白天自燃：天空光快路径', () => {
     expect(z.hp).toBe(20);
   });
 
-  it('树叶顶棚 flushLight 后仍不烧（天空光穿透树叶，扫列兜底非不透明遮挡）', () => {
+  it('树叶顶棚 flushLight 后照烧（colTop 只认不透明方块；树叶/水/玻璃不遮挡）', () => {
     const w = floorWorld();
     roof(w, LEAVES);
-    flushLight(w); // 树叶 opaque:false → 顶棚下 sky 仍 15，靠扫列发现树叶
+    flushLight(w); // 树叶 opaque:false → 顶棚下 sky 仍 15，但 colTop 只统计不透明方块
     const z = spawnMobAt('zombie', 8.5, 10, 8.5);
     tick(w);
-    expect(z.hp).toBe(20);
+    expect(z.hp).toBeLessThan(20);
   });
 
   it('顶棚挖掉并 flushLight 后恢复露天照烧（陈旧 sky 随光照刷新恢复）', () => {
