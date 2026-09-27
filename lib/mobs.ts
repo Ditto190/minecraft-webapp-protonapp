@@ -16,6 +16,7 @@ import { raycastBlock } from './raycast';
 import { getStorage, mergeIntoStorage, sameStack, storages } from './storage';
 import { type Slot } from './slots';
 import { villageCenterNear } from './structures';
+import { clearTradeStock, resetTradeStocks } from './trading';
 import { weather, precipAt, type WeatherKind } from './weather';
 // 循环引用说明：redstone.ts 的 tickPlates 引用本文件 mobs 列表；此处 strikeTarget 仅运行时调用，ESM live binding 安全
 import { strikeTarget } from './redstone';
@@ -298,12 +299,13 @@ function addMob(m: Mob): void {
   spawnCountsTotal++;
 }
 
-/** 内部移除统一入口：索引 + 计数一并维护（Boss 缓存失效） */
+/** 内部移除统一入口：索引 + 计数一并维护（Boss 缓存失效）；交易补货状态一并清掉（trading.ts 按村民 id 存内存） */
 function unindexMob(m: Mob): void {
   indexRemove(m);
   tallySpawnCount(m, -1);
   spawnCountsTotal--;
   if (bossCache === m) bossCache = null;
+  clearTradeStock(m.id);
 }
 
 function rebuildMobIndex(): void {
@@ -466,6 +468,7 @@ export function clearMobs(): void {
   spawnCountsTotal = 0;
   bossCache = null;
   pendingKill.length = 0;
+  resetTradeStocks(); // 村民交易补货状态按 id 存内存，随生物清空一并释放
 }
 
 /** 夜晚（昼夜系数低） */

@@ -110,6 +110,8 @@ export class World {
     const s = this.saved.get(key);
     if (s && s.length === CHUNK_VOLUME) {
       chunk.data.set(s);
+      // 数据已拷进 chunk.data：释放备用引用（同一份 64KB 不再存两份）；卸载写回时以 modified 分支重新 set
+      this.saved.delete(key);
       this.scanGrowables(chunk);
       // 存档恢复的 chunk 光照数组为全 0：标脏交给 flushLight 限流重算（否则世界渲染全黑）
       this.markLightDirty(chunk);
@@ -399,6 +401,8 @@ export class World {
     const s = this.saved.get(key);
     if (s && s.length === CHUNK_VOLUME) {
       chunk.data.set(s);
+      // 同 getChunk 读档路径：拷入后释放备用引用，避免同一份数据双份持有
+      this.saved.delete(key);
     } else {
       // transferable 产物已在主线程（结构化克隆零拷贝转移），这里最后一次落进 chunk 自有数组
       chunk.data.set(data);
@@ -551,6 +555,17 @@ export class World {
       this.chunks.delete(key);
       this.growableChunks.delete(key);
       this.containerRegistry.delete(key);
+      // 列顶缓存只统计已加载 chunk 的列：随卸载清掉本 chunk 16×16 列的条目（键为 "x,z" 世界列坐标），
+      // 重载后由 getColTop 按需重算，语义不变
+      if (c) {
+        const bx = c.cx * CHUNK_SIZE;
+        const bz = c.cz * CHUNK_SIZE;
+        for (let lx = 0; lx < CHUNK_SIZE; lx++) {
+          for (let lz = 0; lz < CHUNK_SIZE; lz++) {
+            this.colTop.delete(`${bx + lx},${bz + lz}`);
+          }
+        }
+      }
       // getBlock 缓存的引用若指向被卸载的 chunk：失效（否则读到游离旧数据、且不再触发生成）
       if (c && this.lastChunk === c) this.lastChunk = null;
       this.generation++;

@@ -2,9 +2,12 @@
 
 import { beforeEach, describe, expect, it } from 'vitest';
 import { BLOCK_BY_KEY } from '../blocks';
+import { clearMobs, damageMob, mobs, spawnMobAt, tickMobs } from '../mobs';
 import { MATERIAL_INFO } from '../materials';
+import { VOID_TERRAIN } from '../noise';
 import { useGameStore } from '../store';
 import { emptySlots, type Slot } from '../slots';
+import { World } from '../world';
 import {
   canAfford,
   executeTrade,
@@ -158,6 +161,27 @@ describe('交易库存（简化 MC：每项每补货期限购，每天补货 2 �
     expect(tradePeriod(0.8)).toBe(1);
     expect(tradePeriod(0.1)).toBe(2); // 0.8 → 0.1 回卷：新的一天午前期
     expect(tradePeriod(0.6)).toBe(3);
+  });
+
+  it('村民移除清理其补货状态（死亡/消失不残留）；clearMobs 全清', () => {
+    const w = new World('trading-cleanup', undefined, VOID_TERRAIN);
+    const player = { x: 8.5, y: 41, z: 8.5 };
+    // 死亡移除路径：tickMobs 死亡演出计时归零 → removeMob → unindexMob 汇聚点清理
+    const v = spawnMobAt('villager', 8.5, 41, 8.5);
+    for (let k = 0; k < 12; k++) deductTradeStock(v.id, 0, 0);
+    expect(tradeStockLeft(v.id, 0, 0)).toBe(0); // 售罄
+    damageMob(v, 999); // 进入死亡态（尸体驻留）
+    expect(tradeStockLeft(v.id, 0, 0)).toBe(0); // 移除前仍售罄
+    for (let i = 0; i < 12 && mobs.includes(v); i++) tickMobs(w, 0.1, player, () => undefined);
+    expect(mobs.includes(v)).toBe(false); // 尸体计时结束已移除
+    expect(tradeStockLeft(v.id, 0, 0)).toBe(12); // 同补货期：残留则应为 0，补满即证明已清理
+    // clearMobs 路径：维度切换/新世界时全清
+    const v2 = spawnMobAt('villager', 8.5, 41, 8.5);
+    for (let k = 0; k < 12; k++) deductTradeStock(v2.id, 0, 0);
+    expect(tradeStockLeft(v2.id, 0, 0)).toBe(0);
+    clearMobs();
+    expect(mobs).toHaveLength(0);
+    expect(tradeStockLeft(v2.id, 0, 0)).toBe(12);
   });
 
   it('tradeDay：昼夜时钟回卷（过日出）记一天', () => {

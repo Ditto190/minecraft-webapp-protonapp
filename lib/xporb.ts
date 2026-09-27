@@ -30,6 +30,8 @@ const ATTRACT_SPEED = 8;
 const MAX_AGE = 300;
 /** 合并距离（MC：相邻约 0.5 格内的经验球合并为大球） */
 const MERGE_RANGE = 0.5;
+/** 经验球数量上限（宽松）：超出的球并入最近的已有球（MC：经验球会相互合并），经验总量不丢 */
+export const MAX_XP_ORBS = 512;
 
 /** 合并扫描的死球暂存集（模块级复用，避免每次扫描 new Set） */
 const deadScratch = new Set<number>();
@@ -68,7 +70,24 @@ export function mergeXpOrbs(range = MERGE_RANGE): void {
   }
 }
 
-/** 死亡掉落经验：MC 约 min(等级×7, 100) 点，拆成 3-6 球散落 */
+/** 达上限时把 value 并入距离最近的已有球（平方距离比较；位置/速度/年龄不变，与 MC 合并语义一致） */
+function absorbIntoNearest(x: number, y: number, z: number, value: number): void {
+  let nearest: XpOrb | null = null;
+  let bestD = Infinity;
+  for (const o of xpOrbs) {
+    const dx = o.x - x;
+    const dy = o.y - y;
+    const dz = o.z - z;
+    const d = dx * dx + dy * dy + dz * dz;
+    if (d < bestD) {
+      bestD = d;
+      nearest = o;
+    }
+  }
+  if (nearest) nearest.value += value;
+}
+
+/** 死亡掉落经验：MC 约 min(等级×7, 100) 点，拆成 3-6 球散落；超上限的球并入最近已有球 */
 export function spawnXpOrbs(x: number, y: number, z: number, total: number): void {
   if (total <= 0) return;
   const n = Math.min(6, Math.max(3, Math.floor(total / 5)));
@@ -76,6 +95,10 @@ export function spawnXpOrbs(x: number, y: number, z: number, total: number): voi
   for (let i = 0; i < n; i++) {
     const value = i === n - 1 ? left : Math.max(1, Math.floor(total / n));
     left -= value;
+    if (xpOrbs.length >= MAX_XP_ORBS) {
+      absorbIntoNearest(x, y, z, value);
+      continue;
+    }
     const ang = Math.random() * Math.PI * 2;
     const sp = 1 + Math.random() * 2;
     xpOrbs.push({

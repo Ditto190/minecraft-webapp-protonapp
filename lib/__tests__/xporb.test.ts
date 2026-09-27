@@ -2,7 +2,7 @@
 
 import { afterEach, describe, expect, it } from 'vitest';
 import { levelFromXp, xpForLevel } from '../xp';
-import { clearXpOrbs, mergeXpOrbs, spawnXpOrbs, tickXpOrbs, xpOrbs } from '../xporb';
+import { clearXpOrbs, MAX_XP_ORBS, mergeXpOrbs, spawnXpOrbs, tickXpOrbs, xpOrbs, type XpOrb } from '../xporb';
 import { VOID_TERRAIN } from '../noise';
 import { World } from '../world';
 
@@ -89,5 +89,39 @@ describe('经验球合并（MC）', () => {
     expect(xpOrbs).toHaveLength(1);
     expect(xpOrbs[0].value).toBe(7);
     expect(xpOrbs[0].age).toBe(3);
+  });
+});
+
+describe('经验球数量上限（MC：球会合并）', () => {
+  it('达上限时新球并入最近的已有球：数量封顶、经验总量守恒、拾取全额可得', () => {
+    // 直接铺到上限（散列位置，x=0 处最近），每球 value=1
+    const filler = (i: number): XpOrb => ({
+      id: 1000 + i,
+      x: i * 4,
+      y: 40,
+      z: 0,
+      velX: 0,
+      velY: 0,
+      velZ: 0,
+      value: 1,
+      age: 1,
+    });
+    for (let i = 0; i < MAX_XP_ORBS; i++) xpOrbs.push(filler(i));
+    spawnXpOrbs(0, 40, 0, 10); // 10/5=2 → 拆 3 球（3+3+4），全部落在 (0,40,0)
+    expect(xpOrbs.length).toBe(MAX_XP_ORBS); // 数量不越上限
+    expect(xpOrbs.reduce((n, o) => n + o.value, 0)).toBe(MAX_XP_ORBS + 10); // 经验总量守恒
+    expect(xpOrbs[0].value).toBe(11); // 并入最近（距离 0）的 x=0 那颗
+    // 拾取路径不受影响：总额全部可领回
+    const w = new World('xporb-cap', undefined, VOID_TERRAIN);
+    let got = 0;
+    const player = { x: 0.2, y: 40, z: 0.2 };
+    for (let i = 0; i < 30; i++) tickXpOrbs(w, 0.1, player, (v) => (got += v), solid);
+    expect(got).toBe(11);
+  });
+
+  it('上限宽松：常规死亡掉落（≤6 球）完全不受影响', () => {
+    spawnXpOrbs(4, 40, 4, 100); // 单次掉落最大值
+    expect(xpOrbs.length).toBe(6);
+    expect(xpOrbs.reduce((n, o) => n + o.value, 0)).toBe(100);
   });
 });

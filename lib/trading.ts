@@ -211,3 +211,8 @@ export function resetTradeStocks(): void {
   lastClockT = -1;
   dayCount = 0;
 }
+
+/** 移除单个村民的补货状态（mobs.ts 生物移除路径统一调用，防 stocks 随死亡/消失村民无界增长） */
+export function clearTradeStock(mobId: number): void {
+  stocks.delete(mobId);
+}

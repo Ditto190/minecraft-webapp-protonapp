@@ -197,6 +197,9 @@ export function WorldRenderer() {
           firstLoadRef.current = false;
           await clearWorldStore();
           worldClock.t = 0.3; // 新世界从上午开始
+          // 丢弃上一个世界的全部维度实例：每个实例持有完整 chunk 数据，只覆写当前维度会让
+          // 其余维度旧实例继续被 worldsRef 引用、常驻内存（就地清键保持 Map 身份，cleanup 捕获的引用不失效）
+          for (const k of Object.keys(worlds)) delete worlds[k as Dimension];
           worlds[dimension] = makeDimWorld(dimension, seed);
           for (const k of Object.keys(dimStates)) delete dimStates[k as Dimension]; // 新世界不沿用旧世界的维度暂存
           clearWorldScopes(); // 清空上一个世界的全部世界作用域残留（容器/红石/生物/掉落物……）

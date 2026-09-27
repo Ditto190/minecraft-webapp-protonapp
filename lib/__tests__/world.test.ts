@@ -247,3 +247,28 @@ describe('地形生成', () => {
     expect(edgeCactus).toBeGreaterThan(0); // 旧逻辑边界一圈永不生成仙人掌
   });
 });
+
+describe('内存冗余清理', () => {
+  it('读档 chunk 加载后释放 saved 备用数组（同一份数据不双份持有）', () => {
+    const arr = new Uint16Array(CHUNK_VOLUME);
+    arr[localIndex(3, 40, 3)] = STONE;
+    const saved = new Map([['0,0', arr]]);
+    const w = new World('save-seed', saved);
+    expect(w.getBlock(3, 40, 3)).toBe(STONE);
+    expect(saved.size).toBe(0); // 已拷入 chunk.data，备用引用随之释放
+  });
+
+  it('chunk 卸载清理其 16×16 列的 colTop 缓存（含负坐标 chunk）；重载后按需重算一致', () => {
+    const w = voidWorld();
+    w.setBlock(0, 40, 0, STONE); // chunk (0,0) 列 "0,0"
+    w.setBlock(-1, 40, -1, STONE); // chunk (-1,-1) 列 "-1,-1"
+    expect(w.getColTop(0, 0)).toBe(40);
+    expect(w.getColTop(-1, -1)).toBe(40);
+    w.updateAround(20 * 16, 0, 2, 10_000); // 走远：两个 chunk 均卸载
+    expect(w.chunks.has('0,0')).toBe(false);
+    expect(w.chunks.has('-1,-1')).toBe(false);
+    expect(w.colTop.size).toBe(0); // 覆盖列的缓存全部清掉，无界增长切断
+    w.updateAround(0, 0, 2, 10_000); // 回来：修改过的 chunk 经 saved 写回读档重建
+    expect(w.getColTop(0, 0)).toBe(40); // 重载后惰性重算，露天判定语义不变
+  });
+});
