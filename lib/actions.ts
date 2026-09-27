@@ -62,22 +62,42 @@ const PLACE_COOLDOWN = 150; // ms
 let lastPlace = 0;
 const dir = new Vector3();
 
-/** 桌面 Shift 按住状态：Player.tsx 的键盘表是其内部 ref 未导出，这里独立监听 window（blur 复位防卡键） */
+/** 桌面 Shift 按住状态：Player.tsx 的键盘表是其内部 ref 未导出，这里独立监听 window（blur 复位防卡键）。
+ *  惰性绑定：不再在模块顶层注册——首次游戏内入口（tickEating/isSneaking）注册一次；pagehide（页面卸载/进出 bfcache）
+ *  时移除全部监听，之后由下次游戏内入口重绑（SSR/游戏外零 window 副作用）。 */
 let shiftHeld = false;
-if (typeof window !== 'undefined') {
-  window.addEventListener('keydown', (e) => {
-    if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') shiftHeld = true;
-  });
-  window.addEventListener('keyup', (e) => {
-    if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') shiftHeld = false;
-  });
-  window.addEventListener('blur', () => {
-    shiftHeld = false;
-  });
+let shiftInputBound = false;
+
+function onShiftKeyDown(e: KeyboardEvent): void {
+  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') shiftHeld = true;
+}
+function onShiftKeyUp(e: KeyboardEvent): void {
+  if (e.code === 'ShiftLeft' || e.code === 'ShiftRight') shiftHeld = false;
+}
+function onShiftWindowBlur(): void {
+  shiftHeld = false;
+}
+function unbindShiftInput(): void {
+  if (!shiftInputBound) return;
+  shiftInputBound = false;
+  shiftHeld = false;
+  window.removeEventListener('keydown', onShiftKeyDown);
+  window.removeEventListener('keyup', onShiftKeyUp);
+  window.removeEventListener('blur', onShiftWindowBlur);
+  window.removeEventListener('pagehide', unbindShiftInput);
+}
+function bindShiftInput(): void {
+  if (shiftInputBound || typeof window === 'undefined') return;
+  shiftInputBound = true;
+  window.addEventListener('keydown', onShiftKeyDown);
+  window.addEventListener('keyup', onShiftKeyUp);
+  window.addEventListener('blur', onShiftWindowBlur);
+  window.addEventListener('pagehide', unbindShiftInput); // 页面卸载（含 bfcache 往返）时移除监听
 }
 
 /** 潜行判定：桌面 Shift 或触屏潜行开关（与 Player.tsx 移动逻辑的合并方式一致） */
 export function isSneaking(): boolean {
+  bindShiftInput(); // 惰性绑定：首次游戏内调用时注册
   return shiftHeld || touchInput.sneak;
 }
 

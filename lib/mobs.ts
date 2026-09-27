@@ -213,6 +213,10 @@ export interface Mob {
   /** 被玩家骑乘中（骑乘 agent 在 Player 侧写入，physics.ts RideMountLike 对接字段；
    *  mobs.ts 对该个体跳过 AI 移动/重力/悬浮起伏——位置由 Player 侧骑乘控制驱动；计时/回血照常） */
   riddenByPlayer?: boolean;
+  /** 常驻 chunk 索引内部字段：当前所在 chunk 坐标（生成/移除/跨 chunk 移动时维护，tick 对账兜底；
+   *  未定义 = 不在索引中。索引只收 hp>0 个体——死亡态尸体不占桶） */
+  ickX?: number;
+  ickZ?: number;
 }
 
 export interface Arrow {
@@ -238,6 +242,157 @@ export const mobs: Mob[] = [];
 export const arrows: Arrow[] = [];
 /** 处于恋爱状态的动物按 type 分桶（繁殖寻伴 O(n²)→O(同 type 数量)） */
 const loveMobsByType = new Map<MobType, Set<Mob>>();
+
+// ——— 常驻 chunk 空间索引 + 刷怪计数 + Boss 缓存 ———
+// mobInReach/tickArrows/群体仇恨/村庄守卫扫描原各自全量线性扫 mobs；索引与计数由内部生成/移除/跨 chunk 移动即时维护，
+// 每 tick 开头对账一次（骑乘等外部位移归位）。外部模块绕过维护直改 mobs 数组（World.tsx 生成龙、wither.ts 召唤、
+// endfight.ts 纠错、lightning.ts 转化、测试直推）由总数校验的 O(1) 自检发现失同步 → 全量重建一次（摊还近乎为零）。
+const mobsByChunk = new Map<string, Mob[]>();
+/** 索引内 mob 总数（= 各桶长度和）：与 mobs.length 比对自检 */
+let mobsIndexedTotal = 0;
+/** 刷怪计数（trySpawn 原每 tick 多次全量统计的替代；口径与原逐条统计一致——尸体也计入，移除时才减） */
+const spawnCounts = { hostile: 0, passive: 0, phantom: 0 };
+/** 内部增删计数：与 mobs.length 比对自检（与 mobsIndexedTotal 双保险，失同步即重建） */
+let spawnCountsTotal = 0;
+/** Boss 血条缓存：原每 tick mobs.find 全扫（无 hp 门槛，尸体也命中）；缓存个体仍满足距离条件则复用，否则重扫 */
+let bossCache: Mob | null = null;
+
+function indexInsert(m: Mob, cx: number, cz: number): void {
+  const ck = chunkKey(cx, cz);
+  const arr = mobsByChunk.get(ck);
+  if (arr) arr.push(m);
+  else mobsByChunk.set(ck, [m]);
+  m.ickX = cx;
+  m.ickZ = cz;
+  mobsIndexedTotal++;
+}
+
+function indexRemove(m: Mob): void {
+  const cx = m.ickX;
+  const cz = m.ickZ;
+  m.ickX = m.ickZ = undefined;
+  if (cx === undefined || cz === undefined) return;
+  const ck = chunkKey(cx, cz);
+  const arr = mobsByChunk.get(ck);
+  if (!arr) return;
+  const i = arr.indexOf(m);
+  if (i >= 0) {
+    arr.splice(i, 1);
+    mobsIndexedTotal--;
+  }
+  if (arr.length === 0) mobsByChunk.delete(ck);
+}
+
+/** 计数口径与原逐条统计逐字一致：敌对 = hostile 且未驯服且非铁傀儡；铁傀儡/驯服狼两者都不计 */
+function tallySpawnCount(m: Mob, delta: number): void {
+  if (m.type === 'phantom') spawnCounts.phantom += delta;
+  if (!MOB_DEFS[m.type].hostile) spawnCounts.passive += delta;
+  else if (!m.tamed && m.type !== 'iron_golem') spawnCounts.hostile += delta;
+}
+
+/** 内部生成统一入口：数组 + 索引 + 计数一并维护（外部直 push 由 ensureMobIndex 兜住） */
+function addMob(m: Mob): void {
+  mobs.push(m);
+  if (m.hp > 0) indexInsert(m, Math.floor(m.x) >> 4, Math.floor(m.z) >> 4);
+  tallySpawnCount(m, 1);
+  spawnCountsTotal++;
+}
+
+/** 内部移除统一入口：索引 + 计数一并维护（Boss 缓存失效） */
+function unindexMob(m: Mob): void {
+  indexRemove(m);
+  tallySpawnCount(m, -1);
+  spawnCountsTotal--;
+  if (bossCache === m) bossCache = null;
+}
+
+function rebuildMobIndex(): void {
+  mobsByChunk.clear();
+  mobsIndexedTotal = 0;
+  spawnCounts.hostile = 0;
+  spawnCounts.passive = 0;
+  spawnCounts.phantom = 0;
+  bossCache = null;
+  for (const m of mobs) {
+    if (m.hp > 0) indexInsert(m, Math.floor(m.x) >> 4, Math.floor(m.z) >> 4);
+    tallySpawnCount(m, 1);
+  }
+  spawnCountsTotal = mobs.length;
+}
+
+/** 查询/计数入口的 O(1) 自检：外部直改 mobs（push/splice）失同步时重建索引/计数/Boss 缓存 */
+function ensureMobIndex(): void {
+  if (mobsIndexedTotal === mobs.length && spawnCountsTotal === mobs.length) return;
+  rebuildMobIndex();
+}
+
+/** 每 tick 对账：索引对齐到当前位置与存活状态（成本 = 每生物两次整数比较；骑乘位移等外部位移在此归位）。
+ *  顺带兼作首次构建——外部直推的 mob ickX 未定义 → 插入即入索引。 */
+function reconcileMobIndex(): void {
+  for (const m of mobs) {
+    if (m.hp <= 0) {
+      indexRemove(m);
+      continue;
+    }
+    const cx = Math.floor(m.x) >> 4;
+    const cz = Math.floor(m.z) >> 4;
+    if (m.ickX !== cx || m.ickZ !== cz) {
+      indexRemove(m);
+      indexInsert(m, cx, cz);
+    }
+  }
+}
+
+/** 瞬移类位移立即归位（跨 chunk 时）；普通逐帧移动由 tick 对账兜底（保持旧临时索引的 tick 快照语义） */
+function reindexMob(m: Mob): void {
+  if (m.ickX === undefined) return;
+  const cx = Math.floor(m.x) >> 4;
+  const cz = Math.floor(m.z) >> 4;
+  if (m.ickX !== cx || m.ickZ !== cz) {
+    indexRemove(m);
+    indexInsert(m, cx, cz);
+  }
+}
+
+/** 以 (x,z) 为中心 radius 格内的存活生物遍历（chunk 跨度 ⌊radius/16⌋+1，按最坏边界推导全覆盖；精确谓词由调用方给） */
+function forEachMobNear(x: number, z: number, radius: number, fn: (m: Mob) => void): void {
+  const span = Math.floor(radius / 16) + 1;
+  const cx = Math.floor(x) >> 4;
+  const cz = Math.floor(z) >> 4;
+  for (let dx = -span; dx <= span; dx++) {
+    for (let dz = -span; dz <= span; dz++) {
+      const arr = mobsByChunk.get(chunkKey(cx + dx, cz + dz));
+      if (!arr) continue;
+      for (const m of arr) {
+        if (Math.abs(m.x - x) > radius || Math.abs(m.z - z) > radius) continue; // 方块粗剪（圆域超集，不丢目标）
+        fn(m);
+      }
+    }
+  }
+}
+
+/** Boss 血条查询：凋灵 48 格 / 末影龙 96 格内的首个命中（原 mobs.find 每 tick 全扫；无 hp 门槛——尸体也命中）。
+ *  缓存上次结果：个体仍在索引中（尸体则处于移除前稳定的死亡态驻留）且距离条件未变则复用；新 Boss 只追加数组尾部，
+ *  不会改变已缓存者的数组序优先性，故缓存语义与全扫 find 完全一致。失同步重建/移除时缓存清空 → 下次重扫。 */
+function bossNear(px: number, pz: number): Mob | null {
+  ensureMobIndex();
+  const cond = (m: Mob) =>
+    (m.type === 'wither' && Math.hypot(m.x - px, m.z - pz) < 48) || (m.type === 'ender_dragon' && Math.hypot(m.x - px, m.z - pz) < 96);
+  const c = bossCache;
+  if (c) {
+    const stillThere =
+      c.deathTimer !== undefined || // 死亡态尸体：移除统一走 unindexMob（缓存随之清空），驻留期间必然仍在 mobs
+      (c.ickX !== undefined && c.ickZ !== undefined && (mobsByChunk.get(chunkKey(c.ickX, c.ickZ))?.includes(c) ?? false));
+    if (stillThere && cond(c)) return c;
+  }
+  bossCache = mobs.find(cond) ?? null;
+  return bossCache;
+}
+
+/** 驯服钩子（actions.ts 驯狼调用）：狼 def 为 hostile，驯服后移出敌对计数（原统计口径 !m.tamed） */
+export function onMobTamed(m: Mob): void {
+  if (MOB_DEFS[m.type].hostile && m.type !== 'iron_golem') spawnCounts.hostile--;
+}
 
 const HALF_W = 0.3;
 const HEIGHT = 1.8;
@@ -281,14 +436,17 @@ function pushDeathSmoke(m: Mob): void {
   breakParticles.push({ x: m.x, y: m.y, z: m.z, tile: DEATH_SMOKE_TILE });
 }
 
-/** 移除 mob：遍历中（tickDepth>0）入延迟队列，否则立即 splice */
+/** 移除 mob：遍历中（tickDepth>0）入延迟队列，否则立即 splice（索引/计数随 unindexMob 同步维护） */
 function removeMob(mob: Mob): void {
   if (tickDepth > 0) {
     if (!pendingKill.includes(mob)) pendingKill.push(mob);
     return;
   }
   const i = mobs.indexOf(mob);
-  if (i >= 0) mobs.splice(i, 1);
+  if (i >= 0) {
+    unindexMob(mob);
+    mobs.splice(i, 1);
+  }
 }
 
 let nextId = 1;
@@ -300,6 +458,14 @@ export function clearMobs(): void {
   mobs.length = 0;
   arrows.length = 0;
   loveMobsByType.clear();
+  mobsByChunk.clear();
+  mobsIndexedTotal = 0;
+  spawnCounts.hostile = 0;
+  spawnCounts.passive = 0;
+  spawnCounts.phantom = 0;
+  spawnCountsTotal = 0;
+  bossCache = null;
+  pendingKill.length = 0;
 }
 
 /** 夜晚（昼夜系数低） */
@@ -383,7 +549,7 @@ export function breedMob(parent: Mob, otherParent?: Mob): Mob {
     baby.variant = Math.random() < 0.5 ? pv : ov;
   }
   useGameStore.getState().addXp(XP_BREED[0] + Math.floor(Math.random() * (XP_BREED[1] - XP_BREED[0] + 1)));
-  mobs.push(baby);
+  addMob(baby);
   return baby;
 }
 
@@ -473,7 +639,7 @@ export function makeSlime(x: number, y: number, z: number, size: 4 | 2 | 1): Mob
 /** 在指定位置生成一只生物并加入世界（actions.ts 鸡蛋砸出小鸡等定点生成场景用；返回生成的生物） */
 export function spawnMobAt(type: MobType, x: number, y: number, z: number): Mob {
   const m = makeMob(type, x, y, z);
-  mobs.push(m);
+  addMob(m);
   return m;
 }
 
@@ -489,7 +655,7 @@ export function spawnGhastling(x: number, y: number, z: number): Mob {
   const m = makeMob('ghastling', x, y, z);
   m.baby = true;
   m.growUp = GHASTLING_GROW_SECONDS;
-  mobs.push(m);
+  addMob(m);
   return m;
 }
 
@@ -755,27 +921,35 @@ export function barterWith(mob: Mob): boolean {
  *  敌对生成需点亮度 ≤7（天空光按昼夜折算）；村庄附近生成村民与铁傀儡守卫；蘑菇岛只出蘑菇牛且夜晚不刷怪） */
 export function trySpawn(world: World, px: number, pz: number): boolean {
   const night = isNight();
+  ensureMobIndex(); // 测试等外部直调入口：索引/计数自检（tickMobs 每帧已对账过，此处 O(1) 直通）
   // 下界：只刷僵尸猪灵（下界岩上 2-3 只成群；不被激怒不攻击）
   if (world.terrain.kind === 'nether') return trySpawnNether(world, px, pz);
   // 末地：末影人成群（末地石表面；MC 末地主岛遍布末影人）
   if (world.terrain.kind === 'end') return trySpawnEnd(world, px, pz);
   // 靠近村庄中心：白天 70% 生成村民（锚定村庄，不远离）；村庄无守卫时刷 1 只铁傀儡（MC，不占刷怪上限）
   const village = villageCenterNear(world.seedHash, world.terrain, px, pz, 48);
-  if (village && !mobs.some((m) => m.type === 'iron_golem' && Math.hypot(m.x - village.x, m.z - village.z) < 48) && Math.random() < 0.2) {
+  let golemNearVillage = false;
+  if (village) {
+    const v = village;
+    forEachMobNear(v.x, v.z, 48, (m) => {
+      if (m.type === 'iron_golem' && Math.hypot(m.x - v.x, m.z - v.z) < 48) golemNearVillage = true;
+    });
+  }
+  if (village && !golemNearVillage && Math.random() < 0.2) {
     if (trySpawnGolem(world, village)) return true;
   }
   const villageRoll = !night && village !== null && Math.random() < 0.85;
-  let hostileCount = 0;
-  let passiveCount = 0;
-  for (const m of mobs) {
-    if (!MOB_DEFS[m.type].hostile) passiveCount++;
-    else if (!m.tamed && m.type !== 'iron_golem') hostileCount++;
-  }
+  // 敌对/被动计数：常驻计数器替代每 tick 多次全量统计（口径一致：尸体计入，移除才减）
+  const hostileCount = spawnCounts.hostile;
+  const passiveCount = spawnCounts.passive;
   if (night && hostileCount >= MAX_HOSTILE) return false;
   // 村民单独限额（每村最多 3 只，MC 村庄必有村民——不与普通动物共享被动上限，否则被猪牛挤满永不出村民）
   if (villageRoll) {
+    const v = village;
     let villagerCount = 0;
-    for (const m of mobs) if (m.type === 'villager' && Math.hypot(m.x - village!.x, m.z - village!.z) < 48) villagerCount++;
+    forEachMobNear(v.x, v.z, 48, (m) => {
+      if (m.type === 'villager' && Math.hypot(m.x - v.x, m.z - v.z) < 48) villagerCount++;
+    });
     if (villagerCount >= 3) return false;
   } else if (!night && passiveCount >= MAX_PASSIVE) return false;
   for (let attempt = 0; attempt < 8; attempt++) {
@@ -813,7 +987,7 @@ export function trySpawn(world: World, px: number, pz: number): boolean {
       if (!slimeChunk && spawnLightAt(world, bx, sy, bz) > 7) continue; // 亮度门控（MC 敌对 ≤7）
       const type: MobType = slimeChunk ? 'slime' : pickSpawnType(true, biome);
       if (!aabbFree(world, bx + 0.5, sy, bz + 0.5, HALF_W, HEIGHT)) continue;
-      mobs.push(type === 'slime' ? makeSlime(bx + 0.5, sy, bz + 0.5, Math.random() < 0.6 ? 4 : 2) : makeMob(type, bx + 0.5, sy, bz + 0.5));
+      addMob(type === 'slime' ? makeSlime(bx + 0.5, sy, bz + 0.5, Math.random() < 0.6 ? 4 : 2) : makeMob(type, bx + 0.5, sy, bz + 0.5));
       return true;
     }
     const wantType = biome === 'mushroom_fields' ? 'mooshroom' : villageRoll ? 'villager' : pickSpawnType(night, biome);
@@ -836,7 +1010,7 @@ export function trySpawn(world: World, px: number, pz: number): boolean {
       mob.homeX = village.x;
       mob.homeZ = village.z;
     }
-    mobs.push(mob);
+    addMob(mob);
     return true;
   }
   return false;
@@ -856,7 +1030,7 @@ function trySpawnGolem(world: World, village: { x: number; z: number }): boolean
     const g = makeMob('iron_golem', bx + 0.5, sy, bz + 0.5);
     g.homeX = village.x;
     g.homeZ = village.z;
-    mobs.push(g);
+    addMob(g);
     return true;
   }
   return false;
@@ -864,7 +1038,7 @@ function trySpawnGolem(world: World, village: { x: number; z: number }): boolean
 
 /** 下界刷怪：僵尸猪灵 2-3 只成群（下界岩/灵魂沙表面、岩浆海以上；MC 成群出没）；堡垒附近出凋灵骷髅/烈焰人 */
 function trySpawnNether(world: World, px: number, pz: number): boolean {
-  const hostileCount = mobs.filter((m) => MOB_DEFS[m.type].hostile && !m.tamed && m.type !== 'iron_golem').length;
+  const hostileCount = spawnCounts.hostile;
   if (hostileCount >= MAX_HOSTILE) return false;
   for (let attempt = 0; attempt < 8; attempt++) {
     const ang = Math.random() * Math.PI * 2;
@@ -921,13 +1095,13 @@ function trySpawnNether(world: World, px: number, pz: number): boolean {
     if (type === 'zombified_piglin' || type === 'piglin') {
       const pack = 2 + Math.floor(Math.random() * 2); // 2-3 只
       for (let i = 0; i < pack; i++) {
-        mobs.push(makeMob(type, bx + 0.5 + (Math.random() - 0.5) * 2, sy, bz + 0.5 + (Math.random() - 0.5) * 2));
+        addMob(makeMob(type, bx + 0.5 + (Math.random() - 0.5) * 2, sy, bz + 0.5 + (Math.random() - 0.5) * 2));
       }
     } else if (type === 'ghast') {
       // 恶魂需要上方空域（悬浮生成）
-      if (aabbFree(world, bx + 0.5, sy + 2, bz + 0.5, 1.2, 2.5)) mobs.push(makeMob(type, bx + 0.5, sy + 2, bz + 0.5));
+      if (aabbFree(world, bx + 0.5, sy + 2, bz + 0.5, 1.2, 2.5)) addMob(makeMob(type, bx + 0.5, sy + 2, bz + 0.5));
     } else {
-      mobs.push(makeMob(type, bx + 0.5, sy, bz + 0.5));
+      addMob(makeMob(type, bx + 0.5, sy, bz + 0.5));
     }
     return true;
   }
@@ -936,7 +1110,7 @@ function trySpawnNether(world: World, px: number, pz: number): boolean {
 
 /** 末地刷怪：末影人 1-3 只成群（末地石表面；MC 末地主岛遍布末影人，无昼夜限制） */
 function trySpawnEnd(world: World, px: number, pz: number): boolean {
-  const hostileCount = mobs.filter((m) => MOB_DEFS[m.type].hostile && !m.tamed && m.type !== 'iron_golem').length;
+  const hostileCount = spawnCounts.hostile;
   if (hostileCount >= MAX_HOSTILE * 2) return false; // 末地密度更高（MC 末影人之岛）
   for (let attempt = 0; attempt < 8; attempt++) {
     const ang = Math.random() * Math.PI * 2;
@@ -953,11 +1127,11 @@ function trySpawnEnd(world: World, px: number, pz: number): boolean {
     // 末地城（城岛）附近 60% 出潜影贝守卫（MC）；其余末影人成群
     const isle = outerIslandContaining(world.seedHash, bx, bz);
     if (isle?.city && Math.random() < 0.6) {
-      mobs.push(makeMob('shulker', bx + 0.5, sy, bz + 0.5));
+      addMob(makeMob('shulker', bx + 0.5, sy, bz + 0.5));
     } else {
       const pack = 1 + Math.floor(Math.random() * 3); // 1-3 只
       for (let i = 0; i < pack; i++) {
-        mobs.push(makeMob('enderman', bx + 0.5 + (Math.random() - 0.5) * 2, sy, bz + 0.5 + (Math.random() - 0.5) * 2));
+        addMob(makeMob('enderman', bx + 0.5 + (Math.random() - 0.5) * 2, sy, bz + 0.5 + (Math.random() - 0.5) * 2));
       }
     }
     return true;
@@ -989,6 +1163,7 @@ export function teleportEnderman(world: World, m: Mob, nearX?: number, nearZ?: n
     m.y = y + 1;
     m.z = bz + 0.5;
     m.velY = 0;
+    reindexMob(m); // 瞬移跨 chunk 立即归位（索引扫描当周有效）
     return true;
   }
   return false;
@@ -1091,6 +1266,31 @@ function explode(
   else explodeAt(world, m.x, m.y, m.z, playerPos, onAttackPlayer, { radius: 3, maxDamage: 43, hurtRadius: 4.5 }); // MC 普通难度贴脸约 43——标志性秒杀怪
 }
 
+/** 玩家箭/珍珠命中判定（AABB 粗判，龙体型放宽；原 mobs.find 全量扫 → 只扫箭所在及相邻 3×3 chunk——
+ *  单帧步进 ≤1.1 格 + 判定容差 2.5 ≪ chunk 边长 16，桶扫描无遗漏）。tickMobs 每帧对账保证桶内为 tick 起始快照。
+ *  与旧 find 的唯一差异：并列（投影 t 相同）时按桶序而非数组序取命中——两生物投影逐位相等几乎不可能，可忽略。 */
+function arrowHitMob(a: Arrow): Mob | null {
+  const acx = Math.floor(a.x) >> 4;
+  const acz = Math.floor(a.z) >> 4;
+  for (let dx = -1; dx <= 1; dx++) {
+    for (let dz = -1; dz <= 1; dz++) {
+      const arr = mobsByChunk.get(chunkKey(acx + dx, acz + dz));
+      if (!arr) continue;
+      for (const m of arr) {
+        if (m.hp <= 0) continue; // 死亡态尸体不挡箭（MC）
+        if (
+          m.type === 'ender_dragon'
+            ? Math.abs(m.x - a.x) < 2.5 && a.y > m.y - 1 && a.y < m.y + 2.5 && Math.abs(m.z - a.z) < 2.5
+            : Math.abs(m.x - a.x) < 0.55 && a.y > m.y - 0.2 && a.y < m.y + 2 && Math.abs(m.z - a.z) < 0.55
+        ) {
+          return m;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 function tickArrows(
   world: World,
   dt: number,
@@ -1178,13 +1378,7 @@ function tickArrows(
         arrows.splice(i, 1);
         continue;
       }
-      const hitMob = mobs.find(
-        (m) =>
-          m.hp > 0 && // 死亡态尸体不挡箭（MC）
-          (m.type === 'ender_dragon'
-            ? Math.abs(m.x - a.x) < 2.5 && a.y > m.y - 1 && a.y < m.y + 2.5 && Math.abs(m.z - a.z) < 2.5
-            : Math.abs(m.x - a.x) < 0.55 && a.y > m.y - 0.2 && a.y < m.y + 2 && Math.abs(m.z - a.z) < 0.55),
-      );
+      const hitMob = arrowHitMob(a);
       if (hitMob) {
         if (a.kind === 'pearl') {
           pearlTeleport.pending = { x: Math.floor(a.x) + 0.5, y: Math.ceil(a.y) + 0.01, z: Math.floor(a.z) + 0.5 };
@@ -1367,6 +1561,10 @@ export function tickMobs(
   hostile = true,
 ): void {
   const night = isNight();
+  // 常驻索引对账：生成/移除即时维护之外，每 tick 开头把桶对齐到当前位置与存活状态
+  // （骑乘等外部位移归位；普通移动的「tick 起始快照」语义与旧临时索引一致）。顺带兼作首次构建。
+  ensureMobIndex();
+  reconcileMobIndex();
   // 创造模式：刷怪/despawn/Boss 血条用真实位置；AI 仇恨目标用超远假目标（不追击、箭不伤人）
   const targetPos = hostile ? playerPos : { x: 1e9, y: -999, z: 1e9 };
   spawnTimer -= dt;
@@ -1388,7 +1586,7 @@ export function tickMobs(
   phantomState.timer -= dt;
   if (hostile && night && world.terrain.kind !== 'nether' && world.terrain.kind !== 'end' && phantomState.insomniaDays >= 3 && phantomState.timer <= 0) {
     phantomState.timer = 30 + Math.random() * 30;
-    const count = mobs.filter((m) => m.type === 'phantom').length;
+    const count = spawnCounts.phantom; // 常驻计数（尸体也计入，与旧 mobs.filter 口径一致）
     const n = Math.min(3 - count, 1 + Math.floor(Math.random() * 3));
     for (let k = 0; k < n; k++) {
       const ang = Math.random() * Math.PI * 2;
@@ -1401,19 +1599,6 @@ export function tickMobs(
   }
 
   tickArrows(world, dt, targetPos, onAttackPlayer);
-
-  // 铁傀儡目标空间索引：每 tick 初按 chunk 分桶一次，避免每只铁傀儡 O(n) 扫全部 mobs
-  const hostileByChunk = new Map<string, Mob[]>();
-  for (const o of mobs) {
-    if (o.hp <= 0 || !GOLEM_TARGETS.includes(o.type)) continue;
-    const ck = chunkKey(Math.floor(o.x) >> 4, Math.floor(o.z) >> 4);
-    let arr = hostileByChunk.get(ck);
-    if (!arr) {
-      arr = [];
-      hostileByChunk.set(ck, arr);
-    }
-    arr.push(o);
-  }
 
   // 玩家着火 DOT（烈焰人小火球点燃，MC 每秒 1 伤；入水/死亡/雨天露天熄灭；创造 hostile=false 不烧）
   if (playerFire.left > 0 && hostile) {
@@ -1436,7 +1621,7 @@ export function tickMobs(
   }
 
   // Boss 血条状态：凋灵/末影龙存活且玩家在附近（凋灵 48 格、龙全岛 96 格；无则清空）
-  const boss = mobs.find((m) => (m.type === 'wither' && Math.hypot(m.x - playerPos.x, m.z - playerPos.z) < 48) || (m.type === 'ender_dragon' && Math.hypot(m.x - playerPos.x, m.z - playerPos.z) < 96));
+  const boss = bossNear(playerPos.x, playerPos.z);
   if (boss) {
     bossState.name = MOB_DEFS[boss.type].name;
     bossState.hp = Math.max(0, boss.hp);
@@ -1513,20 +1698,25 @@ export function tickMobs(
 
     const dx = targetPos.x - m.x;
     const dz = targetPos.z - m.z;
-    const dist = Math.hypot(dx, dz); // 追击/攻击距离（创造模式为 ~1e9 假目标，AI 自然不追不攻）
-    const distReal = Math.hypot(playerPos.x - m.x, playerPos.z - m.z); // despawn 用真实玩家距离
+    // 距离惰性计算：-1 = 未消费。被动游走等分支不用距离，省掉每生物每帧两次 hypot
+    // （追击/攻击距离，创造模式为 ~1e9 假目标，AI 自然不追不攻；distReal = despawn 用真实玩家距离）
+    let dist = -1;
+    let distReal = -1;
     let mx = 0;
     let mz = 0;
 
     // 距离消失（MC 简版）：敌对 >64 立即消失；32-64 持续远离 20-40s 随机刻消失；驯服/村民（非敌对）/Boss/铁傀儡不消失
     if (def.hostile && !m.tamed && m.type !== 'wither' && m.type !== 'shulker' && m.type !== 'iron_golem') {
+      distReal = Math.hypot(playerPos.x - m.x, playerPos.z - m.z);
       if (distReal > 64) {
+        unindexMob(m);
         mobs.splice(i, 1);
         continue;
       }
       if (distReal > 32) {
         m.despawnTimer = (m.despawnTimer ?? 20 + Math.random() * 20) - dt;
         if (m.despawnTimer <= 0) {
+          unindexMob(m);
           mobs.splice(i, 1);
           continue;
         }
@@ -1578,6 +1768,7 @@ export function tickMobs(
       }
     } else if (def.hostile && (m.type !== 'spider' || night) && (m.type !== 'zombified_piglin' || (m.aggroTimer ?? 0) > 0) && (m.type !== 'wolf' || (!m.tamed && (m.aggroTimer ?? 0) > 0)) && (m.type !== 'enderman' || (m.aggroTimer ?? 0) > 0) && (m.type !== 'piglin' || ((m.aggroTimer ?? 0) > 0 || !wearsGoldArmor())) && (m.type !== 'iron_golem' || (m.aggroTimer ?? 0) > 0)) {
       // 敌对 AI（蜘蛛白天中立；僵尸猪灵/野狼/末影人未被激怒时中立；铁傀儡只对激怒它的玩家出手）
+      dist = Math.hypot(dx, dz); // 该分支起所有子分支都消费 dist：进入时一次性计算
       if (m.type === 'slime') {
         // 史莱姆：蹦跳前进（MC 标志移动）——着地蓄力，起跳带冲量，滞空惯性
         if (m.onGround) {
@@ -1725,6 +1916,7 @@ export function tickMobs(
           if (dist > 7) m.ignite = -1;
           else if (m.ignite <= 0) {
             explode(world, m, playerPos, onAttackPlayer);
+            unindexMob(m);
             mobs.splice(i, 1);
             continue;
           }
@@ -1751,6 +1943,8 @@ export function tickMobs(
       // 驯服的狼：护主（攻击玩家刚打过的目标）→ 跟随（远了传送跟上，MC）
       let handled = false;
       // 铁傀儡：猎杀 24 格内威胁村庄的敌对怪（MC 村庄守卫；未被玩家激怒时），无目标则锚定村庄游走
+      // 常驻 chunk 索引替代每 tick 重建的临时 hostileByChunk：桶内 = 本 tick 起始存活的猎杀对象（口径一致），
+      // tick 内的击杀不移出桶（尸体仍会被选中并空挥一刀，与旧临时索引行为相同）
       if (m.type === 'iron_golem') {
         let target: Mob | null = null;
         let best = 24;
@@ -1759,10 +1953,10 @@ export function tickMobs(
         // 5×5 chunk 覆盖 80 格范围，足够 24 格目标（即使傀儡贴 chunk 边）
         for (let dx = -2; dx <= 2; dx++) {
           for (let dz = -2; dz <= 2; dz++) {
-            const arr = hostileByChunk.get(chunkKey(mcx + dx, mcz + dz));
+            const arr = mobsByChunk.get(chunkKey(mcx + dx, mcz + dz));
             if (!arr) continue;
             for (const o of arr) {
-              if (o === m) continue;
+              if (o === m || !GOLEM_TARGETS.includes(o.type)) continue;
               const od = Math.hypot(o.x - m.x, o.z - m.z);
               if (od < best) {
                 best = od;
@@ -1798,6 +1992,7 @@ export function tickMobs(
       }
       if (m.type === 'wolf' && m.tamed) {
         handled = true;
+        dist = Math.hypot(dx, dz); // 跟随/传送分支消费 dist：进入时一次性计算
         const target =
           lastPlayerTarget.mob && lastPlayerTarget.mob !== m && lastPlayerTarget.mob.hp > 0 && performance.now() / 1000 - lastPlayerTarget.at < 10
             ? lastPlayerTarget.mob
@@ -1821,6 +2016,7 @@ export function tickMobs(
           m.z = playerPos.z + 1;
           m.y = playerPos.y;
           m.velY = 0;
+          reindexMob(m); // 瞬移跨 chunk 立即归位（跟随传送可能一次跨多个 chunk）
         } else if (dist > 3 && dist > 0.01) {
           mx = (dx / dist) * def.speed;
           mz = (dz / dist) * def.speed;
@@ -1887,11 +2083,11 @@ export function tickMobs(
         }
       } else if (
         // 持食引诱：玩家手持该物种食物时跟着走（MC 诱饵；1.21.6 快乐恶魂链走 TEMPT_FOOD——雪球/鞍具引诱，不繁殖）
-        lureFood && (BREED_FOOD[m.type] === lureFood || TEMPT_FOOD[m.type]?.includes(lureFood) === true) && dist < 10 && dist > 1.6
+        lureFood && (BREED_FOOD[m.type] === lureFood || TEMPT_FOOD[m.type]?.includes(lureFood) === true) && (dist < 0 ? (dist = Math.hypot(dx, dz)) : dist) < 10 && dist > 1.6
       ) {
         mx = (dx / dist) * def.speed;
         mz = (dz / dist) * def.speed;
-      } else if (m.type === 'ghastling' && distReal < 16 && distReal > 3) {
+      } else if (m.type === 'ghastling' && (distReal < 0 ? (distReal = Math.hypot(playerPos.x - m.x, playerPos.z - m.z)) : distReal) < 16 && distReal > 3) {
         // 小恶魂跟随玩家（1.21.6 Java：16 格内缀着玩家飞；3 格内悬停不再贴近）
         const fx2 = playerPos.x - m.x;
         const fz2 = playerPos.z - m.z;
@@ -1988,19 +2184,29 @@ export function tickMobs(
     }
 
     if (m.y < -10) {
+      unindexMob(m);
       mobs.splice(i, 1);
     }
   }
   tickDepth--;
-  // 统一清理遍历中 damageMob 标记的待移除 mob（pendingKill 延迟移除，避免反向遍历索引错位双结算）
-  for (const dead of pendingKill) {
-    const di = mobs.indexOf(dead);
-    if (di >= 0) mobs.splice(di, 1);
+  // 统一清理遍历中 damageMob 标记的待移除 mob（pendingKill 延迟移除，避免反向遍历索引错位双结算）。
+  // 原对每个 dead 做 mobs.indexOf 线性查找（O(k·n)）→ 一次反向扫描 + Set 判定整体移除（O(n+k)），移除集合一致。
+  if (pendingKill.length > 0) {
+    const deadSet = new Set(pendingKill);
+    for (let i = mobs.length - 1; i >= 0; i--) {
+      const m = mobs[i];
+      if (deadSet.has(m)) {
+        unindexMob(m);
+        mobs.splice(i, 1);
+      }
+    }
+    pendingKill.length = 0;
   }
-  pendingKill.length = 0;
 }
 
-/** 玩家攻击判定：视线附近 reach 内最近的生物（投影距离 + 横向容差 + 墙体遮挡检查） */
+/** 玩家攻击判定：视线附近 reach 内最近的生物（投影距离 + 横向容差 + 墙体遮挡检查）。
+ *  原全量线性扫 mobs → 常驻 chunk 索引只扫原点所在及相邻 chunk（reach + 命中容差 ≪ 16，跨度按 ⌊reach/16⌋+1 不丢候选）。
+ *  与旧全扫的唯一差异：并列（投影 t 相同）时按桶序而非数组序取命中——两生物投影逐位相等几乎不可能，可忽略。 */
 export function mobInReach(
   world: World,
   ox: number,
@@ -2011,22 +2217,32 @@ export function mobInReach(
   dz: number,
   reach: number,
 ): Mob | null {
+  ensureMobIndex();
   let best: Mob | null = null;
   let bestT = reach;
-  for (const m of mobs) {
-    if (m.hp <= 0) continue; // 死亡态尸体不可被攻击（MC）
-    const cx = m.x - ox;
-    const cy = m.y + 0.9 - oy; // 身体中心
-    const cz = m.z - oz;
-    const t = cx * dx + cy * dy + cz * dz;
-    if (t < 0 || t > bestT) continue;
-    const px = ox + dx * t;
-    const py = oy + dy * t;
-    const pz = oz + dz * t;
-    const hitR = m.type === 'ender_dragon' ? 2.6 : 0.9; // 龙体型大，判定放宽（MC 龙碰撞箱长约 8 格）
-    if (Math.hypot(m.x - px, m.y + 0.9 - py, m.z - pz) < hitR) {
-      best = m;
-      bestT = t;
+  const span = Math.floor(reach / 16) + 1;
+  const pcx = Math.floor(ox) >> 4;
+  const pcz = Math.floor(oz) >> 4;
+  for (let cx = pcx - span; cx <= pcx + span; cx++) {
+    for (let cz = pcz - span; cz <= pcz + span; cz++) {
+      const arr = mobsByChunk.get(chunkKey(cx, cz));
+      if (!arr) continue;
+      for (const m of arr) {
+        if (m.hp <= 0) continue; // 死亡态尸体不可被攻击（MC）
+        const cx2 = m.x - ox;
+        const cy = m.y + 0.9 - oy; // 身体中心
+        const cz2 = m.z - oz;
+        const t = cx2 * dx + cy * dy + cz2 * dz;
+        if (t < 0 || t > bestT) continue;
+        const px = ox + dx * t;
+        const py = oy + dy * t;
+        const pz = oz + dz * t;
+        const hitR = m.type === 'ender_dragon' ? 2.6 : 0.9; // 龙体型大，判定放宽（MC 龙碰撞箱长约 8 格）
+        if (Math.hypot(m.x - px, m.y + 0.9 - py, m.z - pz) < hitR) {
+          best = m;
+          bestT = t;
+        }
+      }
     }
   }
   // 射线在到达生物前先命中实心方块 → 隔墙打不到（与骷髅箭撞墙一致）
@@ -2073,23 +2289,24 @@ export function damageMob(mob: Mob, damage: number, attackerPos?: { x: number; z
     mob.kbz = (dz / d) * power;
     if (mob.onGround) mob.velY = 4;
   }
-  // 僵尸猪灵：受伤激怒自身与 32 格内同伴（MC 群体仇恨）
+  // 僵尸猪灵：受伤激怒自身与 32 格内同伴（MC 群体仇恨）——常驻索引半径扫描替代全量线性扫
+  ensureMobIndex();
   if (mob.type === 'zombified_piglin') {
-    for (const m of mobs) {
+    forEachMobNear(mob.x, mob.z, 32, (m) => {
       if (m.type === 'zombified_piglin' && Math.hypot(m.x - mob.x, m.z - mob.z) <= 32) m.aggroTimer = 40;
-    }
+    });
   }
   // 猪灵：受伤激怒自身与 32 格内同伴（MC 群体仇恨；蛮兵不传染）
   if (mob.type === 'piglin') {
-    for (const m of mobs) {
+    forEachMobNear(mob.x, mob.z, 32, (m) => {
       if (m.type === 'piglin' && Math.hypot(m.x - mob.x, m.z - mob.z) <= 32) m.aggroTimer = 40;
-    }
+    });
   }
   // 野狼：受伤激怒自身与 16 格内同伴（MC 狼群复仇）
   if (mob.type === 'wolf' && !mob.tamed) {
-    for (const m of mobs) {
+    forEachMobNear(mob.x, mob.z, 16, (m) => {
       if (m.type === 'wolf' && !m.tamed && Math.hypot(m.x - mob.x, m.z - mob.z) <= 16) m.aggroTimer = 20;
-    }
+    });
   }
   // 末影人：受击激怒，且六成概率立即瞬移闪避（MC）
   if (mob.type === 'enderman') {
@@ -2100,9 +2317,9 @@ export function damageMob(mob: Mob, damage: number, attackerPos?: { x: number; z
   if (mob.type === 'iron_golem' && attackerPos) mob.aggroTimer = 40;
   // 玩家攻击村民：32 格内铁傀儡仇恨玩家（MC 村庄守卫护村）
   if (mob.type === 'villager' && attackerPos) {
-    for (const m of mobs) {
+    forEachMobNear(mob.x, mob.z, 32, (m) => {
       if (m.type === 'iron_golem' && Math.hypot(m.x - mob.x, m.z - mob.z) <= 32) m.aggroTimer = 40;
-    }
+    });
   }
   if (mob.hp > 0) {
     // 被动生物受击逃跑
@@ -2118,7 +2335,7 @@ export function damageMob(mob: Mob, damage: number, attackerPos?: { x: number; z
     const nextSize = ((mob.slimeSize ?? 4) / 2) as 2 | 1;
     const n = 2 + Math.floor(Math.random() * 3);
     for (let i = 0; i < n; i++) {
-      mobs.push(makeSlime(mob.x + (Math.random() - 0.5) * 1.6, mob.y + 0.1, mob.z + (Math.random() - 0.5) * 1.6, nextSize));
+      addMob(makeSlime(mob.x + (Math.random() - 0.5) * 1.6, mob.y + 0.1, mob.z + (Math.random() - 0.5) * 1.6, nextSize));
     }
     // 分裂不留尸体（MC）：标记已死（防同帧二次结算），立即移除 + 白烟
     mob.deathTimer = 0;
