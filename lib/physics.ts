@@ -1,7 +1,7 @@
 // AABB 碰撞与占位检测：玩家（Player）与怪物（mobs）共用；碰撞盒按方块形状（台阶半高/栅栏 1.5/门薄面板/花草无）
 // 另含 MC Java 移动手感纯函数：双击触发（冲刺/切飞行）、潜行边缘防跌落、藤蔓攀爬（Player.tsx 帧循环调用，可单测）
 
-import { BLOCK_BY_KEY, BLOCKS, type BlockId } from './blocks';
+import { AIR, BLOCK_BY_KEY, BLOCKS, type BlockId } from './blocks';
 import type { World } from './world';
 
 export interface Aabb {
@@ -12,11 +12,14 @@ export interface Aabb {
 
 export type Box3 = readonly [number, number, number, number, number, number];
 
+/** 满格方块的共享默认碰撞盒（免每次分配；各调用方只读） */
+const FULL_BOX: Box3 = [0, 0, 0, 1, 1, 1];
+
 /** 方块碰撞盒 [minX,minY,minZ,maxX,maxY,maxZ]（无碰撞返回 null：花草/水/空气） */
 export function blockBox(id: BlockId): Box3 | null {
   const def = BLOCKS[id];
   if (!def?.solid) return null;
-  return def.box3 ?? [0, 0, 0, 1, 1, 1];
+  return def.box3 ?? FULL_BOX;
 }
 
 const EPS = 0.001;
@@ -69,7 +72,9 @@ export function collideAxis(
   for (let y = minY; y <= maxY; y++) {
     for (let z = minZ; z <= maxZ; z++) {
       for (let x = minX; x <= maxX; x++) {
-        const box = blockBox(world.getBlock(x, y, z));
+        const id = world.getBlock(x, y, z);
+        if (id === AIR) continue; // 被扫格绝大多数是空气：跳过 blockBox 的表查找
+        const box = blockBox(id);
         if (!box) continue;
         if (!overlaps(p, halfW, height, x, y, z, box)) continue;
         hit = true;
@@ -97,7 +102,9 @@ export function aabbFree(world: World, x: number, y: number, z: number, halfW: n
   for (let yy = minY; yy <= maxY; yy++) {
     for (let zz = minZ; zz <= maxZ; zz++) {
       for (let xx = minX; xx <= maxX; xx++) {
-        const box = blockBox(world.getBlock(xx, yy, zz));
+        const id = world.getBlock(xx, yy, zz);
+        if (id === AIR) continue;
+        const box = blockBox(id);
         if (!box) continue;
         if (!overlaps({ x, y, z }, halfW, height, xx, yy, zz, box)) continue;
         return false;
@@ -265,9 +272,20 @@ export const RIDE_VERT_SPEED = 7;
 export const RIDE_HALF_W = 2;
 export const RIDE_HEIGHT = 4;
 
+/** 骑乘碰撞收集盒 scratch（模块级复用、单线程顺序调用）：一次扫掠三轴并集，免逐轴重复 getBlock 同批方块与每帧分配 */
+const sweptX: number[] = [];
+const sweptY: number[] = [];
+const sweptZ: number[] = [];
+const sweptBox: Box3[] = [];
+
 /**
  * 骑乘控制一帧：WASD 水平（沿相机水平朝向 fx/fz，模拟量保留力度）、up（空格+1 / Shift-1）垂直。
- * 逐轴 AABB 碰撞（与玩家同一套 collideAxis，坐骑不穿透方块；撞墙截停该轴）。
+ * 碰撞：先把本帧三轴扫掠并集（各轴 [旧位置, 新位置] 的 AABB 包络）内的实心碰撞盒收集一次——
+ * 空中常态（全集无实心块，快乐恶魂 4×4×4 箱逐轴要扫 ~125 格 ×3）直接应用位移跳过逐轴；
+ * 有实心块时按 x→z→y 序、collideAxis 同款推回公式对列表解算（min/max 候选与格序无关，
+ * 列表 ⊇ 各轴解析时的 AABB 覆盖格，非嵌入场景与逐轴扫描逐格等价）。
+ * 差异边界：坐骑本帧起始已嵌进实心块（落沙/活塞推入）且被推回超出并集时，原逐轴实现后续轴
+ * 会多扫到推回位置的新格——嵌入挤出属异常恢复路径，此处取并集内解算。
  */
 export function rideControl(world: World, m: Aabb, fx: number, fz: number, f: number, r: number, up: number, dt: number): void {
   let mx = fx * f - fz * r;
@@ -277,13 +295,68 @@ export function rideControl(world: World, m: Aabb, fx: number, fz: number, f: nu
   const scale = len > 1 ? RIDE_SPEED / len : RIDE_SPEED;
   mx *= scale;
   mz *= scale;
-  m.x += mx * dt;
-  collideAxis(world, m, 0, mx * dt, RIDE_HALF_W, RIDE_HEIGHT);
-  m.z += mz * dt;
-  collideAxis(world, m, 2, mz * dt, RIDE_HALF_W, RIDE_HEIGHT);
+  const dx = mx * dt;
+  const dz = mz * dt;
   const dy = up * RIDE_VERT_SPEED * dt;
-  m.y += dy;
-  collideAxis(world, m, 1, dy, RIDE_HALF_W, RIDE_HEIGHT);
+  if (dx === 0 && dz === 0 && dy === 0) return; // 三轴 delta 均 0：与逐轴 collideAxis(0) 无操作等价
+
+  const hw = RIDE_HALF_W;
+  const h = RIDE_HEIGHT;
+  const x0 = Math.floor(Math.min(m.x, m.x + dx) - hw);
+  const x1 = Math.floor(Math.max(m.x, m.x + dx) + hw);
+  const y0 = Math.floor(Math.min(m.y, m.y + dy));
+  const y1 = Math.floor(Math.max(m.y, m.y + dy) + h - EPS);
+  const z0 = Math.floor(Math.min(m.z, m.z + dz) - hw);
+  const z1 = Math.floor(Math.max(m.z, m.z + dz) + hw);
+  sweptX.length = 0;
+  sweptY.length = 0;
+  sweptZ.length = 0;
+  sweptBox.length = 0;
+  for (let y = y0; y <= y1; y++) {
+    for (let z = z0; z <= z1; z++) {
+      for (let x = x0; x <= x1; x++) {
+        const id = world.getBlock(x, y, z);
+        if (id === AIR) continue;
+        const box = blockBox(id);
+        if (!box) continue;
+        sweptX.push(x);
+        sweptY.push(y);
+        sweptZ.push(z);
+        sweptBox.push(box);
+      }
+    }
+  }
+  if (sweptBox.length === 0) {
+    m.x += dx;
+    m.y += dy;
+    m.z += dz;
+    return;
+  }
+  // 逐轴解算（与 collideAxis 同推回公式；delta=0 的轴跳过——collideAxis(0) 本就不扫不推）
+  if (dx !== 0) {
+    m.x += dx;
+    for (let i = 0; i < sweptBox.length; i++) {
+      const box = sweptBox[i];
+      if (!overlaps(m, hw, h, sweptX[i], sweptY[i], sweptZ[i], box)) continue;
+      m.x = dx > 0 ? Math.min(m.x, sweptX[i] + box[0] - hw - EPS) : Math.max(m.x, sweptX[i] + box[3] + hw + EPS);
+    }
+  }
+  if (dz !== 0) {
+    m.z += dz;
+    for (let i = 0; i < sweptBox.length; i++) {
+      const box = sweptBox[i];
+      if (!overlaps(m, hw, h, sweptX[i], sweptY[i], sweptZ[i], box)) continue;
+      m.z = dz > 0 ? Math.min(m.z, sweptZ[i] + box[2] - hw - EPS) : Math.max(m.z, sweptZ[i] + box[5] + hw + EPS);
+    }
+  }
+  if (dy !== 0) {
+    m.y += dy;
+    for (let i = 0; i < sweptBox.length; i++) {
+      const box = sweptBox[i];
+      if (!overlaps(m, hw, h, sweptX[i], sweptY[i], sweptZ[i], box)) continue;
+      m.y = dy > 0 ? Math.min(m.y, sweptY[i] + box[1] - h - EPS) : Math.max(m.y, sweptY[i] + box[4] + EPS);
+    }
+  }
 }
 
 /** 骑手吸附：玩家位置原地改写到坐骑头顶（帧循环零分配；y + RIDE_OFFSET_Y） */

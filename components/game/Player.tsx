@@ -21,7 +21,7 @@ import { arrows, checkEndermanStare, damageMob, mobInReach, mobs, spawnMobAt, ty
 import { crystalInReach, hitCrystal, tickCrystals } from '@/lib/endfight';
 import { tickFishing } from '@/lib/fishing';
 import { SEA_LEVEL, type Biome } from '@/lib/noise';
-import { aabbFree, canRide, climbVelY, collideAxis, dismountRide, DoubleTap, isHappyGhast, mountRide, PLAYER_HALF_W, PLAYER_HEIGHT, rideControl, rideSnap, sneakEdgeClip, sprintSwimNext, stanceSpeedMult, SWIM_EYE, SWIM_HEIGHT, touchingVine, wSprintNext, type Aabb } from '@/lib/physics';
+import { aabbFree, canRide, climbVelY, collideAxis, dismountRide, DoubleTap, isHappyGhast, mountRide, PLAYER_HALF_W, PLAYER_HEIGHT, rideControl, rideSnap, sneakEdgeClip, stanceSpeedMult, SWIM_EYE, SWIM_HEIGHT, touchingVine, wSprintNext, type Aabb } from '@/lib/physics';
 import { playSound, splashSound, hurtSound } from '@/lib/sound';
 import { useGameStore } from '@/lib/store';
 import { anyPanelOpen } from '@/lib/store-types';
@@ -39,6 +39,8 @@ const FLY_SPEED = 11;
 const JUMP_VEL = 8.07;
 const GRAVITY = 26;
 const REACH = 6; // 挖掘/放置距离
+/** mobs 引用（坐骑/末影龙/恶魂缓存）的数组成员校验节流间隔：mobs.includes 是 O(n) 线性扫，非死亡路径延迟 ≤0.5s 发现无实际影响 */
+const MOB_REF_CHECK_S = 0.5;
 /** 横扫粒子弧线：面前 ±40° 两簇（弧度） */
 const SWEEP_ARC = [-0.7, 0.7] as const;
 const LOOK_SENSITIVITY = 0.0045; // 触屏视角灵敏度（弧度/像素）
@@ -223,10 +225,18 @@ export function Player() {
   const stareAcc = useRef(0);
   /** 末影龙缓存：存活期内免每帧 mobs.find（被移除时 includes 失效重扫；龙只存在于末地维度） */
   const cachedDragon = useRef<Mob | null>(null);
+  /** 末影龙缓存的数组成员校验节流（0.5s 一次 mobs.includes；失效引用 worst-case 多携带 0.5s，tickCrystals 对已移除对象无副作用） */
+  const dragonValidAcc = useRef(0);
   /** 冲刺游泳姿态（MC Java 1.13+ 俯泳：水中冲刺进入，碰撞箱降到 0.6 可过 1 格缝；进出条件在 lib/physics.ts） */
   const sprintSwim = useRef(false);
+  /** 俯泳头顶空间缓存：键 = 站立 AABB 覆盖格 + 水/冲刺/着地状态，值 = 头顶被挡（aabbFree 取反）；静止时免每帧全扫 */
+  const headroomCache = useRef({ valid: false, x0: 0, x1: 0, y0: 0, y1: 0, z0: 0, z1: 0, water: false, sprint: false, ground: false, blocked: false });
   /** 骑乘中的快乐恶魂（mob 引用；骑乘状态不进存档——重载后玩家就地落回地面，坐骑留在原处） */
   const riding = useRef<Mob | null>(null);
+  /** 坐骑的 mobs 数组成员校验节流：canRide 读字段 O(1) 仍每帧（死亡/卸鞍即时下马），数组移除 worst-case 0.5s 后发现 */
+  const rideValid = useRef({ acc: MOB_REF_CHECK_S, inMobs: true });
+  /** 反射爆裂球结算的恶魂查找缓存（恶魂罕见：常态每帧至多一次 mobs.find，引用失效/超距才按球回退） */
+  const frameGhast = useRef<Mob | null>(null);
 
   // 维度切换：重置位置状态（落点由 WorldRenderer 经 spawnPoint 下发）
   const dimension = useGameStore((s) => s.dimension);
@@ -241,6 +251,7 @@ export function Player() {
       riding.current = null;
     }
     sprintSwim.current = false; // 俯泳姿态重置（落点未必在水中）
+    headroomCache.current.valid = false; // 世界已换：同格缓存不可跨世界复用
   }, [dimension]);
 
   // 相机共享给触屏挖/放动作（lib/actions.ts）
@@ -413,6 +424,8 @@ export function Player() {
     }
     if (!mountRide(mob)) return false; // 防御：同帧死亡等竞态
     riding.current = mob;
+    rideValid.current.acc = MOB_REF_CHECK_S; // 下帧立即做一次完整数组校验（先按在数组内处理）
+    rideValid.current.inMobs = true;
     stepAnim.current = null; // 上马瞬间打断台阶辅助动画（避免与吸附抢 y）
     if (eatState.active) cancelEating(); // 上马打断进食/饮用读条（MC：上马取消使用动作）
     return true;
@@ -564,8 +577,17 @@ export function Player() {
     // Esc 暂停（指针解锁）：物理/挖掘/生存 tick 全部冻结；触屏 paused 恒 false 不受影响
     if (gs.paused) return;
 
-    // 骑乘校验：坐骑死亡/被移除（含卸鞍 harnessed 变 false）→ 自动下马，落回普通物理（骑乘不进存档，重载即落地）
-    if (riding.current && (!mobs.includes(riding.current) || !canRide(riding.current))) doDismount();
+    // 骑乘校验：坐骑死亡/被移除（含卸鞍 harnessed 变 false）→ 自动下马，落回普通物理（骑乘不进存档，重载即落地）。
+    // canRide 读字段 O(1) 仍每帧（死亡/卸鞍即时下马）；mobs.includes 数组成员校验节流到 0.5s 一次——
+    // 移除路径里死亡已由 canRide 拦截、维度清理由上方 effect 即时解骑，节流窗口内不会骑到幽灵坐骑
+    if (riding.current) {
+      rideValid.current.acc += dt;
+      if (rideValid.current.acc >= MOB_REF_CHECK_S) {
+        rideValid.current.acc = 0;
+        rideValid.current.inMobs = mobs.includes(riding.current);
+      }
+      if (!rideValid.current.inMobs || !canRide(riding.current)) doDismount();
+    }
     const ridingNow = riding.current !== null;
 
     // 视点高度：俯泳 0.4（MC Java），其余 1.62（潜行 -0.12 在相机段处理）
@@ -616,9 +638,38 @@ export function Player() {
       (keys.current['ControlLeft'] || keys.current['ControlRight'] || touchInput.sprint || wSprint.current) &&
       !sneaking && !flying && sprintBreak.current <= 0 &&
       (gs.worldMode !== 'survival' || gs.hunger > 6);
-    // 冲刺游泳（MC Java 1.13+ 俯泳）：水中冲刺进入；出水/松冲刺/站底退出；头顶容不下站姿时保持低姿态（1 格缝不卡天花板）
-    const swimHeadroom = aabbFree(world, p.x, p.y, p.z, PLAYER_HALF_W, PLAYER_HEIGHT);
-    sprintSwim.current = !ridingNow && sprintSwimNext(sprintSwim.current, inWater, sprinting, onGround.current, swimHeadroom);
+    // 冲刺游泳（MC Java 1.13+ 俯泳）：水中冲刺进入；出水/松冲刺/站底退出；头顶容不下站姿时保持低姿态（1 格缝不卡天花板）。
+    // 等价 sprintSwimNext（lib/physics.ts，仍单测覆盖）的惰性求值：进入条件（水中+冲刺+未站底）为真时与头顶空间无关，
+    // 直接进姿态、不扫头顶；只有退出期才查询——按「站立 AABB 覆盖格 + 水/冲刺/着地状态」缓存，
+    // 静止踩水常态免每帧 aabbFree 扫描（跨格/状态变化即重算）。
+    // 缓存精度注记：键是格界而非连续坐标——同覆盖格内的亚格微移若跨过台阶等形变盒边界，
+    // 逐帧重算会即时变化而缓存滞后到下次跨格/状态变化（仅影响俯泳姿态保持的帧级观感，不影响碰撞与摔落）
+    const swimEnter = inWater && sprinting && !onGround.current;
+    if (ridingNow) {
+      sprintSwim.current = false;
+    } else if (swimEnter) {
+      sprintSwim.current = true;
+    } else {
+      const hc = headroomCache.current;
+      const hx0 = Math.floor(p.x - PLAYER_HALF_W);
+      const hx1 = Math.floor(p.x + PLAYER_HALF_W);
+      const hy0 = Math.floor(p.y);
+      const hy1 = Math.floor(p.y + PLAYER_HEIGHT - 0.001); // aabbFree 同款格界（EPS）
+      const hz0 = Math.floor(p.z - PLAYER_HALF_W);
+      const hz1 = Math.floor(p.z + PLAYER_HALF_W);
+      if (
+        !hc.valid ||
+        hc.x0 !== hx0 || hc.x1 !== hx1 || hc.y0 !== hy0 || hc.y1 !== hy1 ||
+        hc.z0 !== hz0 || hc.z1 !== hz1 ||
+        hc.water !== inWater || hc.sprint !== sprinting || hc.ground !== onGround.current
+      ) {
+        hc.blocked = !aabbFree(world, p.x, p.y, p.z, PLAYER_HALF_W, PLAYER_HEIGHT);
+        hc.x0 = hx0; hc.x1 = hx1; hc.y0 = hy0; hc.y1 = hy1; hc.z0 = hz0; hc.z1 = hz1;
+        hc.water = inWater; hc.sprint = sprinting; hc.ground = onGround.current;
+        hc.valid = true;
+      }
+      sprintSwim.current = sprintSwim.current && hc.blocked; // sprintSwimNext 的 active && !hasHeadroom
+    }
     /** 本帧碰撞箱高度：俯泳 0.6（可过 1 格缝，MC Java），其余 1.8 */
     const hitH = sprintSwim.current ? SWIM_HEIGHT : PLAYER_HEIGHT;
     // 前进 = (fx, fz)，右 = 前进 × up = (-fz, fx)
@@ -667,9 +718,11 @@ export function Player() {
     wantX = clipped.x;
     wantZ = clipped.z;
     p.x = wantX;
-    const hitX = collideAxis(world, p, 0, mx * dt, PLAYER_HALF_W, hitH);
+    const mdx = mx * dt;
+    const hitX = mdx !== 0 ? collideAxis(world, p, 0, mdx, PLAYER_HALF_W, hitH) : false; // delta=0 时 collideAxis 本就无操作（返 false 不动位置），跳过调用
     p.z = wantZ;
-    const hitZ = collideAxis(world, p, 2, mz * dt, PLAYER_HALF_W, hitH);
+    const mdz = mz * dt;
+    const hitZ = mdz !== 0 ? collideAxis(world, p, 2, mdz, PLAYER_HALF_W, hitH) : false;
 
     // 台阶辅助（设置「自动跳跃」，MC 辅助功能）：着地行走被 1 格高障碍挡住时启动 150ms 上台动画
     //（平滑升起 + 前冲，观感是快速小跳——不是瞬移闪现，也不会像起跳那样弹回）
@@ -748,7 +801,7 @@ export function Player() {
     }
     const dy = velY.current * dt;
     p.y += dy;
-    const hitY = collideAxis(world, p, 1, dy, PLAYER_HALF_W, hitH);
+    const hitY = dy !== 0 ? collideAxis(world, p, 1, dy, PLAYER_HALF_W, hitH) : false; // 轴向早退同水平轴：dy=0 不扫不推
     if (hitY) {
       if (dy < 0) {
         onGround.current = true;
@@ -889,9 +942,16 @@ export function Player() {
     tickBeaconsThrottled(world, p.x, p.y, p.z, state.clock.elapsedTime);
     // 末影水晶：龙在存活水晶附近时缓慢回血（MC 治疗光束）。
     // 龙只存在于末地（mobs 按维度隔离，非末地 find 恒为 null）：非末地跳过查找；
-    // 末地内缓存命中（includes 校验，O(n) 引用比较无闭包分配），被移除/重生成才重扫
+    // 末地内缓存命中（数组成员校验节流到 0.5s 一次，免每帧 O(n) includes；被移除/重生成才重扫，
+    // worst-case 多携带失效引用 0.5s——tickCrystals 对已移除龙无副作用）
     let dragon = cachedDragon.current;
-    if (dragon !== null && !mobs.includes(dragon)) dragon = null;
+    if (dragon !== null) {
+      dragonValidAcc.current += dt;
+      if (dragonValidAcc.current >= MOB_REF_CHECK_S) {
+        dragonValidAcc.current = 0;
+        if (!mobs.includes(dragon)) { dragon = null; cachedDragon.current = null; }
+      }
+    }
     if (dragon === null && gs.dimension === 'end') dragon = mobs.find((m) => m.type === 'ender_dragon') ?? null;
     cachedDragon.current = dragon;
     tickCrystals(dragon, dt);
@@ -909,11 +969,18 @@ export function Player() {
     }
 
     // 打回的恶魂爆裂球：接近恶魂即秒杀（MC：反射火球对恶魂 1000 伤害）。
-    // mobs 的通用玩家弹射物命中只有 9 伤且判定盒 0.55（恶魂 MC 体型 4×4×4），这里按体型放宽提前结算
+    // mobs 的通用玩家弹射物命中只有 9 伤且判定盒 0.55（恶魂 MC 体型 4×4×4），这里按体型放宽提前结算。
+    // 恶魂罕见：常态每帧至多一次 mobs.find，结果按帧缓存（frameGhast，引用失效即死亡移除/维度清理时校验重扫）；
+    // 缓存个体距该球 ≥3 时按球回退单次 find——多恶魂共存各自的火球各自回退，与原版逐球 find 同语义
     for (let i = arrows.length - 1; i >= 0; i--) {
       const a = arrows[i];
       if (a.kind !== 'ghast' || !a.fromPlayer) continue;
-      const ghast = mobs.find((m) => m.type === 'ghast' && Math.hypot(m.x - a.x, m.y + 1.5 - a.y, m.z - a.z) < 3);
+      let ghast = frameGhast.current;
+      if (ghast !== null && !mobs.includes(ghast)) ghast = frameGhast.current = null; // 缓存引用已失效
+      if (ghast === null || Math.hypot(ghast.x - a.x, ghast.y + 1.5 - a.y, ghast.z - a.z) >= 3) {
+        ghast = mobs.find((m) => m.type === 'ghast' && Math.hypot(m.x - a.x, m.y + 1.5 - a.y, m.z - a.z) < 3) ?? null;
+        frameGhast.current = ghast;
+      }
       if (ghast) {
         damageMob(ghast, 1000, playerPosition, 0, world);
         arrows.splice(i, 1);

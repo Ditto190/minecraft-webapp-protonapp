@@ -52,6 +52,32 @@ describe('重力方块下落', () => {
     expect(w.getBlock(4, 33, 4)).toBe(BLOCK_BY_KEY.sand.id);
     expect(w.getBlock(4, 34, 4)).toBe(0);
   });
+  it('同格重复触发不重复登记：队列只一份，下落节奏与单次触发一致', () => {
+    const w = new World('gravity-dedupe', undefined, VOID_TERRAIN);
+    w.setBlock(4, 30, 4, BLOCK_BY_KEY.stone.id);
+    w.setBlock(4, 33, 4, BLOCK_BY_KEY.sand.id);
+    checkGravityAt(w, 4, 33, 4);
+    checkGravityAt(w, 4, 33, 4); // 重复触发（编辑抖动/相邻更新）
+    checkGravityAt(w, 4, 32, 4); // 上方格检查同样命中 (4,33,4)
+    tickGravity(w, 0.2); // 0.2s < 0.4s：尚未起步（若登记两份，第二份也会在同一 tick 结算，节奏不变但队列语义错位）
+    expect(w.getBlock(4, 33, 4)).toBe(BLOCK_BY_KEY.sand.id);
+    for (let i = 0; i < 30; i++) tickGravity(w, 0.1);
+    expect(w.getBlock(4, 31, 4)).toBe(BLOCK_BY_KEY.sand.id); // 正常落到底
+  });
+
+  it('落地出队后可再次登记：去重键随出队删除（中断重置路径）', () => {
+    const w = new World('gravity-redupe', undefined, VOID_TERRAIN);
+    w.setBlock(4, 30, 4, BLOCK_BY_KEY.stone.id);
+    w.setBlock(4, 33, 4, BLOCK_BY_KEY.sand.id);
+    checkGravityAt(w, 4, 33, 4);
+    for (let i = 0; i < 30; i++) tickGravity(w, 0.1); // 落定 y=31
+    expect(w.getBlock(4, 31, 4)).toBe(BLOCK_BY_KEY.sand.id);
+    // 抬起再放下（新的一块沙落同一列）：若去重键未清，这次登记会被误拦
+    w.setBlock(4, 33, 4, BLOCK_BY_KEY.sand.id);
+    checkGravityAt(w, 4, 33, 4);
+    for (let i = 0; i < 30; i++) tickGravity(w, 0.1);
+    expect(w.getBlock(4, 32, 4)).toBe(BLOCK_BY_KEY.sand.id); // 叠到第一块顶上
+  });
 });
 
 describe('落方块砸在非整格方块上碎成掉落物（MC）', () => {

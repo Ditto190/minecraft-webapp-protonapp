@@ -41,10 +41,14 @@ interface Falling {
   timer: number;
   /** 当前步进间隔（连续下落逐格缩短，落地/移除即出队重置） */
   interval: number;
+  /** 队列去重键（fallingKeys 同步维护，出队/清空即删） */
+  key: string;
 }
 
 /** 正在下落的方块（世界作用域状态，维度切换清空） */
 const falling: Falling[] = [];
+/** falling 坐标键集合（"x,y,z"）：O(1) 查重替代线性 some()（连锁塌落逐格触发检查时数组会增长） */
+const fallingKeys = new Set<string>();
 
 /** 该格是否可被落下方块穿越（空气/流体/非实心植物等；MC 中掉落可穿非实心格） */
 function passable(world: World, x: number, y: number, z: number): boolean {
@@ -76,8 +80,10 @@ export function checkGravityAt(world: World, x: number, y: number, z: number): v
     if (!isGravityBlock(id)) continue;
     if (!passable(world, cx, cy - 1, cz)) continue;
     // 已在队列中不重复登记
-    if (falling.some((f) => f.x === cx && f.y === cy && f.z === cz)) continue;
-    falling.push({ x: cx, y: cy, z: cz, id, timer: FALL_STEP_FIRST, interval: FALL_STEP_FIRST });
+    const key = `${cx},${cy},${cz}`;
+    if (fallingKeys.has(key)) continue;
+    fallingKeys.add(key);
+    falling.push({ x: cx, y: cy, z: cz, id, timer: FALL_STEP_FIRST, interval: FALL_STEP_FIRST, key });
   }
 }
 
@@ -87,6 +93,7 @@ export function tickGravity(world: World, dt: number): void {
     const f = falling[i];
     // 方块已被其他途径移除（挖掉/炸掉）
     if (world.getBlock(f.x, f.y, f.z) !== f.id) {
+      fallingKeys.delete(f.key);
       falling.splice(i, 1);
       continue;
     }
@@ -97,22 +104,28 @@ export function tickGravity(world: World, dt: number): void {
       if (breaksFallingBlock(world.getBlock(f.x, f.y - 1, f.z))) {
         world.setBlock(f.x, f.y, f.z, AIR);
         spawnBlockDrop(f.id, f.x + 0.5, f.y - 0.6, f.z + 0.5);
+        fallingKeys.delete(f.key);
         falling.splice(i, 1);
         break;
       }
       if (!passable(world, f.x, f.y - 1, f.z)) {
+        fallingKeys.delete(f.key);
         falling.splice(i, 1); // 落地
         break;
       }
       // 下到底部：落出世界即消失（MC 掉落实体坠入虚空消失）
       if (f.y <= 1) {
         world.setBlock(f.x, f.y, f.z, AIR);
+        fallingKeys.delete(f.key);
         falling.splice(i, 1);
         break;
       }
       world.setBlock(f.x, f.y - 1, f.z, f.id);
       world.setBlock(f.x, f.y, f.z, AIR);
+      fallingKeys.delete(f.key);
       f.y -= 1;
+      f.key = `${f.x},${f.y},${f.z}`;
+      fallingKeys.add(f.key);
       // 连续下落加速：下一格间隔缩短（下限 FALL_STEP_MIN）
       f.interval = Math.max(FALL_STEP_MIN, f.interval * FALL_ACCEL);
       f.timer += f.interval;
@@ -125,6 +138,7 @@ export function tickGravity(world: World, dt: number): void {
 /** 清空（测试/维度切换用） */
 export function clearGravity(): void {
   falling.length = 0;
+  fallingKeys.clear();
 }
 
 // 世界作用域自注册（lib/worldScope.ts）：下落中的方块随世界清理
