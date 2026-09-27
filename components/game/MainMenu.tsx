@@ -1,11 +1,12 @@
 'use client';
 
+import dynamic from 'next/dynamic';
 import { useEffect, useState } from 'react';
-import { loadWorldMeta } from '@/lib/persistence';
 import { randomSeed, useGameStore, type WorldMode } from '@/lib/store';
-import { getAtlasMaterials } from '@/lib/textures';
 import { McButton } from './McButton';
-import { SettingsDialog } from './SettingsDialog';
+
+// 设置弹窗懒加载（ssr:false 静态导出必配）：不进首屏 bundle，菜单渲染后并行拉取
+const SettingsDialog = dynamic(() => import('./SettingsDialog').then((m) => m.SettingsDialog), { ssr: false });
 
 /** MC 主菜单随机黄色标语 */
 const SPLASHES = [
@@ -48,11 +49,14 @@ export function MainMenu() {
   const continueGame = useGameStore((s) => s.continueGame);
 
   useEffect(() => {
-    void loadWorldMeta()
+    // 动态 import：persistence（含 idb）不进首屏 bundle；失败静默按无存档处理
+    void import('@/lib/persistence')
+      .then((m) => m.loadWorldMeta())
       .then((m) => setHasSave(m !== null))
       .catch(() => setHasSave(false));
-    // 打开游戏即预载纹理图集（构建 atlas 并缓存；进世界时不再因首次加载图集而卡顿）
-    void getAtlasMaterials();
+    // 打开游戏即预载纹理图集（构建 atlas 并缓存；进世界时不再因首次加载图集而卡顿）——
+    // 保持 mount 时预热语义，只是静态引用换成动态 import（three/atlas 构建代码不进首屏 bundle）
+    void import('@/lib/textures').then((m) => m.getAtlasMaterials());
     // 随机标语（微任务绕过同步 setState 限制，同时避免 SSR 水合不一致）
     queueMicrotask(() => setSplash(Math.floor(Math.random() * SPLASHES.length)));
   }, []);

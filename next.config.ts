@@ -9,6 +9,10 @@ const nextConfig: NextConfig = {
   output: "export",
   basePath,
   assetPrefix: basePath || undefined,
+  experimental: {
+    // barrel 包按需编译：@base-ui/react 深路径导入只打包用到的组件（对话框/滑块等 UI 控件）
+    optimizePackageImports: ["@base-ui/react"],
+  },
 };
 
 export default nextConfig;

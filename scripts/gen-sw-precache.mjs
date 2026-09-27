@@ -1,5 +1,6 @@
 // 扫描 public/ 生成 SW install 期 precache 清单：public/sw-precache-manifest.js
-// 范围：贴图（atlas/水面条带/GUI 图）、全部音效、像素字体
+// 范围：贴图（atlas/水面条带/GUI 图）、全部音效
+// 不含 fonts/（构建后 CSS 经 @font-face 引用打包成带 hash 的 _next/static/media/*，由运行时 cache-first 覆盖）；
 // 不含 textures/pack/（逐 tile 文件仅供构建 atlas 与设置页预览，运行时走 atlas）；
 // 不含 _next/ hashed chunk（文件名构建期才知道，保持运行时 cache-first）
 // 用法：node scripts/gen-sw-precache.mjs（build 前由 prebuild 自动执行）
@@ -30,7 +31,6 @@ const urls = [
   'textures/water_still.png',
   ...walk(join(PUBLIC, 'textures/gui'), ['.png']),
   ...walk(join(PUBLIC, 'sounds'), ['.ogg']),
-  ...walk(join(PUBLIC, 'fonts'), ['.woff2', '.ttf']),
 ].sort();
 
 const body = `// 本文件由 scripts/gen-sw-precache.mjs 自动生成，请勿手改

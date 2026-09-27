@@ -1,22 +1,22 @@
 'use client';
 
 import { memo, useEffect, useRef, useState } from 'react';
-import * as THREE from 'three';
+import { BufferAttribute, BufferGeometry, Group, Mesh } from 'three';
 import { buildChunkGeometry, chunkBiomes, type GeometryData } from '@/lib/mesher';
 import { getMesherPool } from '@/lib/mesherPool';
 import { getActiveWorld } from '@/lib/game';
 import type { AtlasMaterials } from '@/lib/textures';
 
-export function toGeometry(data: GeometryData): THREE.BufferGeometry | null {
+export function toGeometry(data: GeometryData): BufferGeometry | null {
   if (data.indices.length === 0) return null;
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(data.positions, 3));
-  geo.setAttribute('normal', new THREE.BufferAttribute(data.normals, 3));
-  geo.setAttribute('uv', new THREE.BufferAttribute(data.uvs, 2));
-  geo.setAttribute('color', new THREE.BufferAttribute(data.colors, 3));
+  const geo = new BufferGeometry();
+  geo.setAttribute('position', new BufferAttribute(data.positions, 3));
+  geo.setAttribute('normal', new BufferAttribute(data.normals, 3));
+  geo.setAttribute('uv', new BufferAttribute(data.uvs, 2));
+  geo.setAttribute('color', new BufferAttribute(data.colors, 3));
   // chunk 几何（块单位 UV 约定）携带逐顶点 tile 基址；单方块几何（旧约定）无此属性
-  if (data.tiles) geo.setAttribute('aTile', new THREE.BufferAttribute(data.tiles, 1));
-  geo.setIndex(new THREE.BufferAttribute(data.indices, 1));
+  if (data.tiles) geo.setAttribute('aTile', new BufferAttribute(data.tiles, 1));
+  geo.setIndex(new BufferAttribute(data.indices, 1));
   return geo;
 }
 
@@ -30,9 +30,9 @@ interface ChunkMeshProps {
 }
 
 export const ChunkMesh = memo(function ChunkMesh({ cx, cz, version, materials }: ChunkMeshProps) {
-  const groupRef = useRef<THREE.Group>(null);
+  const groupRef = useRef<Group>(null);
   /** 当前展示中的 mesh（新几何就绪后才替换，消除加载闪烁） */
-  const currentRef = useRef<THREE.Mesh[]>([]);
+  const currentRef = useRef<Mesh[]>([]);
   /** 邻居未齐推迟建网的重试预算（跨 effect 重跑保持） */
   const retryRef = useRef(0);
   const [retry, setRetry] = useState(0);
@@ -82,14 +82,14 @@ export const ChunkMesh = memo(function ChunkMesh({ cx, cz, version, materials }:
 
     const swap = (solid: GeometryData, water: GeometryData): void => {
       if (cancelled) return;
-      const next: THREE.Mesh[] = [];
+      const next: Mesh[] = [];
       for (const [data, mat] of [
         [solid, materials.solid],
         [water, materials.water],
       ] as const) {
         const geo = toGeometry(data);
         if (!geo) continue;
-        const mesh = new THREE.Mesh(geo, mat);
+        const mesh = new Mesh(geo, mat);
         next.push(mesh);
         group.add(mesh);
       }

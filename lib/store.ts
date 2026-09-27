@@ -27,7 +27,6 @@ import {
 import { applyCraft, canCraft, hasSpaceFor } from './recipes';
 import { grindResult } from './grindstone';
 import { netheriteUpgradeOf } from './smithing';
-import { setPersistenceNoticeHandler } from './persistence';
 import { addArmorToSlots, addStackToSlots, addToolToSlots, BUNDLE_MATERIAL, bundleContents, emptyBackpack, emptySlots, isBundleSlot, type Slot } from './slots';
 import { anvilSound, eatSound, hurtSound, levelupSound } from './sound';
 import { getStorage, putIntoStorage, storages, takeFromStorage } from './storage';
@@ -1215,5 +1214,8 @@ export function randomSeed(): string {
 }
 
 // persistence 的用户可见提示（存档损坏/版本不兼容/写入失败）注入到 Hud 的 Notice 条——
-// persistence 不反向 import store，故由这里经回调注入（模块加载即注册，菜单/游戏内都生效）
-setPersistenceNoticeHandler((message) => useGameStore.getState().setNotice(message));
+// persistence 不反向 import store，故由这里经回调注入；动态 import 避免把 idb 静态拉进首屏 bundle
+// （注册在模块加载后异步完成，远早于任何存档读写实际触发提示，语义不变）
+void import('./persistence').then(({ setPersistenceNoticeHandler }) =>
+  setPersistenceNoticeHandler((message) => useGameStore.getState().setNotice(message)),
+);

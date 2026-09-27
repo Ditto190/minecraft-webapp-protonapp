@@ -1,8 +1,6 @@
 // 本文件由 scripts/gen-sw-precache.mjs 自动生成，请勿手改
-// SW install 期 precache 清单（68 项；相对路径，由 SW 相对 registration.scope 解析，兼容子路径部署）
+// SW install 期 precache 清单（66 项；相对路径，由 SW 相对 registration.scope 解析，兼容子路径部署）
 self.__PRECACHE_MANIFEST__ = [
- "fonts/Monocraft.ttf",
- "fonts/fusion-pixel-zh-hans.woff2",
  "sounds/default_break_glass.1.ogg",
  "sounds/default_break_glass.2.ogg",
  "sounds/default_break_glass.3.ogg",

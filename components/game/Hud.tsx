@@ -1,6 +1,7 @@
 'use client';
 
 import { memo, useEffect, useRef, useState, type KeyboardEvent } from 'react';
+import dynamic from 'next/dynamic';
 import { eatState } from '@/lib/actions';
 import { attackState, bossState, debugInfo, eatFeedback, survivalStats } from '@/lib/game';
 import { clearMobs } from '@/lib/mobs';
@@ -15,17 +16,20 @@ import type { Slot } from '@/lib/slots';
 import { slotDurabilityPct, slotEnchanted, slotName, slotTile } from './slotDisplay';
 import { McButton } from './McButton';
 import { TouchControls } from './TouchControls';
-import { SettingsDialog } from './SettingsDialog';
-import { CraftingDialog } from './CraftingDialog';
-import { FurnaceDialog } from './FurnaceDialog';
-import { BrewingDialog } from './BrewingDialog';
-import { EnchantingDialog } from './EnchantingDialog';
-import { GrindstoneDialog } from './GrindstoneDialog';
-import { TradingDialog } from './TradingDialog';
-import { StorageDialog } from './StorageDialog';
 import { CursorItem } from './CursorItem';
 import { TileIcon } from './TileIcon';
 import { BlockPicker } from './BlockPicker';
+
+// 8 个功能对话框懒加载（ssr:false 静态导出必配）：不进 Hud chunk，首次打开时才拉取对应 chunk；
+// 打开行为不变——下方渲染处用各 open 状态门控，打开即挂载（动态组件加载间隙显示 null）
+const SettingsDialog = dynamic(() => import('./SettingsDialog').then((m) => m.SettingsDialog), { ssr: false });
+const CraftingDialog = dynamic(() => import('./CraftingDialog').then((m) => m.CraftingDialog), { ssr: false });
+const FurnaceDialog = dynamic(() => import('./FurnaceDialog').then((m) => m.FurnaceDialog), { ssr: false });
+const BrewingDialog = dynamic(() => import('./BrewingDialog').then((m) => m.BrewingDialog), { ssr: false });
+const EnchantingDialog = dynamic(() => import('./EnchantingDialog').then((m) => m.EnchantingDialog), { ssr: false });
+const GrindstoneDialog = dynamic(() => import('./GrindstoneDialog').then((m) => m.GrindstoneDialog), { ssr: false });
+const TradingDialog = dynamic(() => import('./TradingDialog').then((m) => m.TradingDialog), { ssr: false });
+const StorageDialog = dynamic(() => import('./StorageDialog').then((m) => m.StorageDialog), { ssr: false });
 
 /** 短暂提示条（睡觉/交互反馈），2.5s 自动消失 */
 function Notice() {
@@ -602,6 +606,14 @@ export function Hud() {
   const worldMode = useGameStore((s) => s.worldMode);
   const dead = useGameStore((s) => s.dead);
   const panelOpen = useGameStore(anyPanelOpen);
+  // 各功能对话框 open 状态：既驱动懒加载组件的门控渲染（关闭即不挂载、不拉 chunk），也保持原有显示行为
+  const craftingOpen = useGameStore((s) => s.craftingOpen);
+  const furnaceOpen = useGameStore((s) => s.furnaceOpen);
+  const brewingOpen = useGameStore((s) => s.brewingOpen);
+  const enchantOpen = useGameStore((s) => s.enchantOpen);
+  const grindstoneOpen = useGameStore((s) => s.grindstoneOpen);
+  const tradeMob = useGameStore((s) => s.tradeMob);
+  const storageOpen = useGameStore((s) => s.storageOpen);
 
   // F1 切换 HUD 显隐（Java 截图模式：热键栏/血条/准星/调试面板等全隐，GUI 面板不受影响；会话内状态不持久化）
   // （本文件 KeyboardEvent 已绑定 React 类型供 SurvivalCell 用，此处用 DOM 全局类型）
@@ -660,26 +672,32 @@ export function Hud() {
       {/* 死亡遮罩 */}
       {dead && <DeathOverlay />}
 
-      {/* 合成界面（生存）/ 选块界面（创造） */}
-      {worldMode === 'survival' ? <CraftingDialog /> : <BlockPicker />}
+      {/* 合成界面（生存）/ 选块界面（创造）——懒加载：打开时才挂载拉取 chunk */}
+      {worldMode === 'survival' ? (
+        craftingOpen ? (
+          <CraftingDialog />
+        ) : null
+      ) : (
+        <BlockPicker />
+      )}
 
       {/* 熔炉界面 */}
-      <FurnaceDialog />
+      {furnaceOpen !== null && <FurnaceDialog />}
 
       {/* 酿造台界面 */}
-      <BrewingDialog />
+      {brewingOpen !== null && <BrewingDialog />}
 
       {/* 附魔台界面 */}
-      <EnchantingDialog />
+      {enchantOpen !== null && <EnchantingDialog />}
 
       {/* 砂轮界面 */}
-      <GrindstoneDialog />
+      {grindstoneOpen !== null && <GrindstoneDialog />}
 
       {/* 村民交易界面 */}
-      <TradingDialog />
+      {tradeMob !== null && <TradingDialog />}
 
       {/* 容器界面（箱子/木桶） */}
-      <StorageDialog />
+      {storageOpen !== null && <StorageDialog />}
 
       {/* 光标堆叠跟随件（MC Java 光标拖拽；含全局 pointerup 结束拖动） */}
       <CursorItem />
